@@ -1,0 +1,12 @@
+{
+  "base_url": "https://relay.example.com",
+  "heartbeat_interval": 8,
+  "claim_interval": 5,
+  "status_interval": 7200,
+  "rt_refresh_before_seconds": 86400,
+  "rs_refresh_before_seconds": 3600,
+  "request_timeout": 10,
+  "task_timeout": 600,
+  "load_cap": 1.0,
+  "log_level": "INFO"
+}
