@@ -29,6 +29,7 @@ Improvements over older pollers:
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,7 @@ DEFAULT_CONFIG = {
     "task_timeout": 600,
     "load_cap": 1.0,
     "log_level": "INFO",
+    "background_heartbeat": True,
 }
 
 
@@ -128,6 +130,10 @@ class Poller:
         self.last_claim = 0
         self.last_status_check = 0
         self._worker_start = _utcnow()
+        self._heartbeat_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._last_heartbeat_status = "unknown"
+        self._lock = threading.Lock()
 
         if not self.token:
             print("no runtime token found, attempting recovery with registration secret", file=sys.stderr)
@@ -266,20 +272,63 @@ class Poller:
             load = 0.0
         load = min(load, float(self.config.get("load_cap", 1.0)))
 
+        # queue_depth reflects in-flight work on this node
+        queue_depth = getattr(self, "_in_flight", 0)
+
+        with self._lock:
+            token = self.token
+
         r = httpx.post(
             url,
-            headers={"Authorization": f"Bearer {self.token}"},
+            headers={"Authorization": f"Bearer {token}"},
             json={
                 "node_id": self.meta["node_id"],
                 "status": "online",
                 "load": load,
-                "queue_depth": 0,
+                "queue_depth": queue_depth,
                 "capabilities": caps,
             },
             timeout=self.config["request_timeout"],
         )
         r.raise_for_status()
         return r.json()
+
+    def _heartbeat_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                hb = self.heartbeat()
+                with self._lock:
+                    self._last_heartbeat_status = hb.get("status", "ok")
+                print(f"background heartbeat {self._last_heartbeat_status} at {time.strftime('%H:%M:%S')}")
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                print(f"background heartbeat http error {status_code}: {exc}", file=sys.stderr)
+                if status_code in (401, 403):
+                    try:
+                        self._handle_auth_error()
+                    except SystemExit:
+                        break
+            except Exception as exc:
+                print(f"background heartbeat error: {exc}", file=sys.stderr)
+
+            # Sleep in short increments so shutdown is responsive.
+            for _ in range(self.config["heartbeat_interval"]):
+                if self._stop_event.is_set():
+                    break
+                time.sleep(1)
+
+    def _start_background_heartbeat(self):
+        if not self.config.get("background_heartbeat", True):
+            return
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            return
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._heartbeat_thread.start()
+
+    def _stop_background_heartbeat(self):
+        self._stop_event.set()
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=5)
 
     def claim(self, capability):
         url = f"{self.meta['base_url']}/relay/v2/scheduler/claim"
@@ -354,50 +403,60 @@ class Poller:
                 capabilities.append(c)
         print(f"poller started for node {self.meta['node_id']} with caps {capabilities}")
 
-        while True:
-            heartbeat_status = "unknown"
-            error = None
-            try:
-                self.token = load_token() or self.token
-                hb = self.heartbeat()
-                heartbeat_status = hb.get("status", "ok")
-                print(f"heartbeat {heartbeat_status} at {time.strftime('%H:%M:%S')}")
+        self._start_background_heartbeat()
 
-                if time.time() - self.last_status_check > self.config["status_interval"]:
-                    self._ensure_credentials_fresh()
-                    self.last_status_check = time.time()
+        try:
+            while True:
+                heartbeat_status = self._last_heartbeat_status
+                error = None
+                try:
+                    self.token = load_token() or self.token
 
-                if time.time() - self.last_claim > self.config["claim_interval"]:
-                    for cap in capabilities:
-                        stage = self.claim(cap)
-                        if stage:
-                            print(f"claimed {cap} stage: {stage.get('stage_id')}")
-                            handler = self.handlers.get(cap)
-                            if handler:
-                                try:
-                                    result = handler(stage)
-                                    self.complete(stage["task_id"], stage["stage_id"], result)
-                                    self.tasks_completed += 1
-                                    print(f"completed {stage.get('stage_id')}")
-                                except Exception as exc:
-                                    self.tasks_failed += 1
-                                    print(f"task execution failed: {exc}", file=sys.stderr)
-                                    self.complete(stage["task_id"], stage["stage_id"], {"error": str(exc)})
-                            break
-                    self.last_claim = time.time()
+                    if time.time() - self.last_status_check > self.config["status_interval"]:
+                        self._ensure_credentials_fresh()
+                        self.last_status_check = time.time()
 
-            except httpx.HTTPStatusError as exc:
-                error = f"http {exc.response.status_code}"
-                if exc.response.status_code in (401, 403):
-                    self._handle_auth_error()
-                    continue
-                print(f"http error: {exc}", file=sys.stderr)
-            except Exception as exc:
-                error = str(exc)
-                print(f"error: {exc}", file=sys.stderr)
+                    if time.time() - self.last_claim > self.config["claim_interval"]:
+                        for cap in capabilities:
+                            stage = self.claim(cap)
+                            if stage:
+                                print(f"claimed {cap} stage: {stage.get('stage_id')}")
+                                handler = self.handlers.get(cap)
+                                if handler:
+                                    self._in_flight = getattr(self, "_in_flight", 0) + 1
+                                    try:
+                                        result = handler(stage)
+                                        self.complete(stage["task_id"], stage["stage_id"], result)
+                                        with self._lock:
+                                            self.tasks_completed += 1
+                                        print(f"completed {stage.get('stage_id')}")
+                                    except Exception as exc:
+                                        with self._lock:
+                                            self.tasks_failed += 1
+                                        print(f"task execution failed: {exc}", file=sys.stderr)
+                                        try:
+                                            self.complete(stage["task_id"], stage["stage_id"], {"error": str(exc)})
+                                        except Exception as complete_exc:
+                                            print(f"failed to report error result: {complete_exc}", file=sys.stderr)
+                                    finally:
+                                        self._in_flight = max(0, getattr(self, "_in_flight", 1) - 1)
+                                break
+                        self.last_claim = time.time()
 
-            self._write_status(heartbeat_status, error=error)
-            time.sleep(self.config["heartbeat_interval"])
+                except httpx.HTTPStatusError as exc:
+                    error = f"http {exc.response.status_code}"
+                    if exc.response.status_code in (401, 403):
+                        self._handle_auth_error()
+                        continue
+                    print(f"http error: {exc}", file=sys.stderr)
+                except Exception as exc:
+                    error = str(exc)
+                    print(f"error: {exc}", file=sys.stderr)
+
+                self._write_status(heartbeat_status, error=error)
+                time.sleep(self.config["heartbeat_interval"])
+        finally:
+            self._stop_background_heartbeat()
 
 
 def main():
