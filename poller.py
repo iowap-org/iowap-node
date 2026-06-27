@@ -136,7 +136,10 @@ class Poller:
         self._lock = threading.Lock()
 
         if not self.token:
-            print("no runtime token found, attempting recovery with registration secret", file=sys.stderr)
+            print(
+                "no runtime token found, attempting recovery with registration secret",
+                file=sys.stderr,
+            )
             self.token = self._recover_runtime_token_with_rs()
             if not self.token:
                 print("no runtime token available and recovery failed", file=sys.stderr)
@@ -300,7 +303,10 @@ class Poller:
                 hb = self.heartbeat()
                 with self._lock:
                     self._last_heartbeat_status = hb.get("status", "ok")
-                print(f"background heartbeat {self._last_heartbeat_status} at {time.strftime('%H:%M:%S')}")
+                print(
+                f"background heartbeat {self._last_heartbeat_status} "
+                f"at {time.strftime('%H:%M:%S')}"
+            )
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
                 print(f"background heartbeat http error {status_code}: {exc}", file=sys.stderr)
@@ -388,7 +394,10 @@ class Poller:
             "last_heartbeat": _utcnow_str(),
             "heartbeat_status": heartbeat_status,
             "token_present": bool(self.token),
-            "capabilities": [c.get("name") if isinstance(c, dict) else c for c in self.meta.get("capabilities", [])],
+            "capabilities": [
+                c.get("name") if isinstance(c, dict) else c
+                for c in self.meta.get("capabilities", [])
+            ],
             "tasks_completed": self.tasks_completed,
             "tasks_failed": self.tasks_failed,
             "error": error,
@@ -436,9 +445,15 @@ class Poller:
                                             self.tasks_failed += 1
                                         print(f"task execution failed: {exc}", file=sys.stderr)
                                         try:
-                                            self.complete(stage["task_id"], stage["stage_id"], {"error": str(exc)})
+                                            self.complete(
+                                            stage["task_id"], stage["stage_id"],
+                                            {"error": str(exc)},
+                                        )
                                         except Exception as complete_exc:
-                                            print(f"failed to report error result: {complete_exc}", file=sys.stderr)
+                                            print(
+                                            f"failed to report error result: {complete_exc}",
+                                            file=sys.stderr,
+                                        )
                                     finally:
                                         self._in_flight = max(0, getattr(self, "_in_flight", 1) - 1)
                                 break
