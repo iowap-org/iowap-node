@@ -211,7 +211,8 @@ class Poller:
         if not value:
             return None
         try:
-            return datetime.fromisoformat(value).timestamp()
+            # Handle Z suffix (UTC) for pre-3.11 Python
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
         except Exception:
             return None
 

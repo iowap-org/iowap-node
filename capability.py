@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
-"""
-Shared Capability-Modul fuer alle Node-Typen und den Server-CLI.
+"""Shared Capability module for all node types and the server CLI.
 
-Dieses Modul wird sowohl von den Worker-Nodes als auch vom Relay-Server
-verwendet. Es stellt die gemeinsamen Datenstrukturen und Hilfsfunktionen
-fuer den Umgang mit Capabilities bereit:
+This module is used by both worker nodes and the relay server.
+It provides the common data structures and helper functions for
+working with capabilities:
 
-    * ``CapabilityType``            – Enum der verfuegbaren Capability-Typen.
-    * ``CapabilityInputField``     – Beschreibung eines einzelnen Eingabefelds.
-    * ``CapabilityInputSchema``    – Schema ueber alle Eingabefelder mit
-                                     Validierungsfunktion fuer Payloads.
-    * ``Capability``               – Eine einzelne Capability eines Nodes.
-    * ``CapabilitySet``            – Verwaltung des gesamten
-                                     Capability-Vorrats eines Nodes.
-    * ``load_capabilities_from_yaml`` – Laedt ein CapabilitySet aus YAML.
-    * ``diff_capabilities``        – Vergleicht zwei CapabilitySets.
-
-Alle Docstrings sind auf Deutsch verfasst.
+    * ``CapabilityType``            - Enum of available capability types.
+    * ``CapabilityInputField``     - Description of a single input field.
+    * ``CapabilityInputSchema``    - Schema over all input fields with
+                                     payload validation.
+    * ``Capability``               - A single capability of a node.
+    * ``CapabilitySet``            - Management of a node's full
+                                     capability inventory.
+    * ``load_capabilities_from_yaml`` - Loads a CapabilitySet from YAML.
+    * ``diff_capabilities``        - Compares two CapabilitySets.
 """
 
 from __future__ import annotations
@@ -31,7 +28,7 @@ import yaml
 
 
 class CapabilityType(str, Enum):
-    """Typ einer Capability – bestimmt das Routing im Scheduler."""
+    """Type of a capability - determines routing in the scheduler."""
 
     AI = "ai"
     TOOL = "tool"
@@ -40,32 +37,32 @@ class CapabilityType(str, Enum):
     RESOURCE = "resource"
 
     def __str__(self) -> str:
-        """Gibt den String-Wert des Enums zurueck."""
+        """Return the string value of this enum member."""
         return self.value
 
 
 # ---------------------------------------------------------------------------
-# Eingabe-Schema
+# Input Schema
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class CapabilityInputField:
     """
-    Beschreibt ein einzelnes Eingabefeld einer Capability.
+    Describes a single input field of a capability.
 
-    Attribute:
-        name:        Bezeichner des Felds.
-        type:        Typ-Bezeichnung als String (z. B. ``"string"``,
-                      ``"integer"``, ``"number"``, ``"boolean"``,
-                      ``"object"``, ``"array"``). Standard ist ``"string"``.
-        required:    Gibt an, ob das Feld zwingend erforderlich ist.
-        default:     Standardwert, der verwendet wird, wenn das Feld im
-                      Payload fehlt.
-        enum:        Optionale Liste erlaubter Werte.
-        ge:          Optionaler numerischer Untergrenzen-Wert (>=).
-        le:          Optionaler numerischer Obergrenzen-Wert (<=).
-        description: Mensch-lesbare Beschreibung des Felds.
+    Attributes:
+        name:        Identifier of the field.
+        type:        Type identifier as string (e.g. ``"string"``,
+                     ``"integer"``, ``"number"``, ``"boolean"``,
+                     ``"object"``, ``"array"``). Default is ``"string"``.
+        required:    Whether the field is mandatory.
+        default:     Default value used when the field is missing from
+                     the payload.
+        enum:        Optional list of allowed values.
+        ge:          Optional numeric lower bound (>=).
+        le:          Optional numeric upper bound (<=).
+        description: Human-readable description of the field.
     """
 
     name: str
@@ -78,7 +75,7 @@ class CapabilityInputField:
     description: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialisiert das Feld in ein Dictionary."""
+        """Serialize this field to a dictionary."""
         d: dict[str, Any] = {
             "name": self.name,
             "type": self.type,
@@ -93,7 +90,7 @@ class CapabilityInputField:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CapabilityInputField:
-        """Erzeugt ein Feld aus einem Dictionary."""
+        """Create a field from a dictionary."""
         return cls(
             name=data["name"],
             type=data.get("type", "string"),
@@ -107,40 +104,40 @@ class CapabilityInputField:
 
     def validate(self, value: Any) -> list[str]:
         """
-        Validiert einen einzelnen Wert gegen das Feld-Schema.
+        Validate a single value against this field schema.
 
-        Rueckgabe:
-            Liste von Fehlermeldungen (leer, wenn der Wert gueltig ist).
+        Returns:
+            List of error messages (empty if the value is valid).
         """
         errors: list[str] = []
 
         if value is None:
             if self.required and self.default is None:
-                errors.append(f"Feld '{self.name}' ist erforderlich.")
+                errors.append(f"Field '{self.name}' is required.")
             return errors
 
-        # Enum-Pruefung
+        # Enum check
         if self.enum is not None and value not in self.enum:
             errors.append(
-                f"Feld '{self.name}': Wert {value!r} ist nicht in den "
-                f"erlaubten Werten {self.enum!r}."
+                f"Field '{self.name}': value {value!r} is not in "
+                f"allowed values {self.enum!r}."
             )
 
-        # Numerische Grenzen
+        # Numeric bounds
         if self.ge is not None or self.le is not None:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 errors.append(
-                    f"Feld '{self.name}': Wert {value!r} muss numerisch sein "
-                    f"fuer ge/le-Pruefung."
+                    f"Field '{self.name}': value {value!r} must be numeric "
+                    f"for ge/le validation."
                 )
             else:
                 if self.ge is not None and value < self.ge:
                     errors.append(
-                        f"Feld '{self.name}': Wert {value!r} muss >= {self.ge} sein."
+                        f"Field '{self.name}': value {value!r} must >= {self.ge}."
                     )
                 if self.le is not None and value > self.le:
                     errors.append(
-                        f"Feld '{self.name}': Wert {value!r} muss <= {self.le} sein."
+                        f"Field '{self.name}': value {value!r} must <= {self.le}."
                     )
 
         return errors
@@ -149,23 +146,24 @@ class CapabilityInputField:
 @dataclass
 class CapabilityInputSchema:
     """
-    Schema ueber alle Eingabefelder einer Capability.
+    Schema over all input fields of a capability.
 
-    Attribute:
-        fields: Mapping von Feldname auf das zugehoerige ``CapabilityInputField``.
+    Attributes:
+        fields: Mapping of field name to the corresponding \
+                ``CapabilityInputField``.
     """
 
     fields: dict[str, CapabilityInputField] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialisiert das Schema in ein Dictionary."""
+        """Serialize this schema to a dictionary."""
         return {
             "fields": {name: f.to_dict() for name, f in self.fields.items()}
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CapabilityInputSchema:
-        """Erzeugt ein Schema aus einem Dictionary."""
+        """Create a schema from a dictionary."""
         if not data:
             return cls()
         raw_fields = data.get("fields", data) if isinstance(data, dict) else {}
@@ -177,36 +175,36 @@ class CapabilityInputSchema:
 
     def validate_payload(self, payload: dict[str, Any]) -> tuple[bool, list[str]]:
         """
-        Validiert einen Payload gegen das Schema.
+        Validate a payload against this schema.
 
-        Es werden folgende Regeln geprueft:
-            * Alle als ``required`` markierten Felder muessen vorhanden sein.
-            * Felder ohne Vorgabe erhalten ihren ``default``-Wert.
-            * Enum-Beschraenkungen werden eingehalten.
-            * Numerische Grenzen (``ge``/``le``) werden eingehalten.
-            * Unerwartete, nicht im Schema definierte Felder werden als
-              Fehler gemeldet.
+        Rules checked:
+            * All fields marked ``required`` must be present.
+            * Fields without a value receive their ``default``.
+            * Enum constraints are enforced.
+            * Numeric bounds (``ge`` / ``le``) are enforced.
+            * Unexpected fields not defined in the schema are reported as
+              errors.
 
-        Rueckgabe:
-            Tupel ``(gueltig, fehlermeldungen)``.
+        Returns:
+            Tuple ``(is_valid, error_messages)``.
         """
         errors: list[str] = []
         if not isinstance(payload, dict):
-            return False, ["Payload muss ein Dictionary sein."]
+            return False, ["Payload must be a dictionary."]
 
-        # Unerwartete Felder
+        # Check for unexpected fields
         for key in payload:
             if key not in self.fields:
-                errors.append(f"Unerwartetes Feld '{key}' im Payload.")
+                errors.append(f"Unexpected field '{key}' in payload.")
 
-        # Erwartete Felder pruefen
+        # Check expected fields
         for name, fld in self.fields.items():
             if name not in payload or payload[name] is None:
                 if fld.required and fld.default is None:
-                    errors.append(f"Feld '{name}' ist erforderlich.")
+                    errors.append(f"Field '{name}' is required.")
                     continue
-                # default wird nicht in den Payload zurueckgeschrieben –
-                # Validierung erfolgt mit default, falls vorhanden.
+                # default is not written back into the payload -
+                # validation uses the default if present.
                 value = fld.default
             else:
                 value = payload[name]
@@ -215,7 +213,6 @@ class CapabilityInputSchema:
                 continue
 
             errors.extend(fld.validate(value))
-
         return (len(errors) == 0), errors
 
 
@@ -227,18 +224,17 @@ class CapabilityInputSchema:
 @dataclass
 class Capability:
     """
-    Eine einzelne Capability eines Worker-Nodes.
+    A single capability of a worker node.
 
-    Attribute:
-        name:         Eindeutiger Bezeichner der Capability.
-        type:         Art der Capability (siehe ``CapabilityType``).
-        description:  Mensch-lesbare Beschreibung.
-        version:      Semantische Version der Capability.
-        available:    Gibt an, ob die Capability aktuell nutzbar ist.
-        input_schema: Optionales Eingabe-Schema fuer die Validierung von
-                      Aufruf-Payloads.
-        config:       Freie Konfigurationswerte der Capability.
-        metadata:     Freie Metadaten der Capability.
+    Attributes:
+        name:         Unique identifier of the capability.
+        type:         Type of capability (see ``CapabilityType``).
+        description:  Human-readable description.
+        version:      Semantic version of the capability.
+        available:    Whether the capability is currently usable.
+        input_schema: Optional input schema for validating call payloads.
+        config:       Free-form configuration values of the capability.
+        metadata:     Free-form metadata of the capability.
     """
 
     name: str
@@ -251,7 +247,7 @@ class Capability:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialisiert die Capability in ein Dictionary."""
+        """Serialize this capability to a dictionary."""
         d: dict[str, Any] = asdict(self)
         d["type"] = self.type.value if isinstance(self.type, CapabilityType) else self.type
         if self.input_schema is not None:
@@ -262,7 +258,7 @@ class Capability:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Capability:
-        """Erzeugt eine Capability aus einem Dictionary."""
+        """Create a capability from a dictionary."""
         raw_type = data.get("type", "tool")
         raw_schema = data.get("input_schema")
         input_schema: Optional[CapabilityInputSchema] = None
@@ -281,19 +277,20 @@ class Capability:
 
     def merge(self, other: Capability) -> Capability:
         """
-        Uebernimmt Felder aus ``other``, die nicht None/leer sind.
+        Merge fields from ``other`` into this capability.
 
-        ``name`` und ``type`` werden immer von ``self`` uebernommen.
-        ``config`` und ``metadata`` werden gemischt (Werte aus ``other``
-        ueberschreiben gleichnamige Schluessel aus ``self``).
+        Fields that are None or empty in ``other`` are skipped.
+        ``name`` and ``type`` are always taken from ``self``.
+        ``config`` and ``metadata`` are merged (values from ``other``
+        override same-named keys from ``self``).
         """
         merged = copy.deepcopy(self)
         if other.description:
             merged.description = other.description
         if other.version:
             merged.version = other.version
-        # ``available`` wird auch dann uebernommen, wenn False – sonst
-        # waere kein bewusstes Deaktivieren moeglich.
+        # ``available`` is also taken when False - otherwise there
+        # would be no way to intentionally disable a capability.
         merged.available = other.available
         if other.input_schema is not None:
             merged.input_schema = copy.deepcopy(other.input_schema)
@@ -302,7 +299,7 @@ class Capability:
         return merged
 
     def patch_config(self, updates: dict[str, Any]) -> None:
-        """Schreibt einzelne Config-Werte nach, ohne die gesamte Config zu ersetzen."""
+        """Patch individual config values without replacing the entire config."""
         self.config.update(updates)
 
     def matches(
@@ -311,7 +308,7 @@ class Capability:
         ctype: Optional[CapabilityType | str] = None,
         available_only: bool = True,
     ) -> bool:
-        """Prueft, ob die Capability den Filterkriterien entspricht."""
+        """Check if this capability matches the given filter criteria."""
         if name is not None and self.name != name:
             return False
         if ctype is not None:
@@ -332,40 +329,40 @@ class Capability:
 @dataclass
 class CapabilitySet:
     """
-    Verwaltet den gesamten Capability-Vorrat eines Nodes.
+    Manage the full inventory of capabilities for a node.
 
-    Attribute:
-        _caps: Internes Mapping von Capability-Name auf ``Capability``.
+    Attributes:
+        _caps: Internal mapping of capability name to ``Capability``.
     """
 
     _caps: dict[str, Capability] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Stellt sicher, dass ``_caps`` ein Dictionary ist."""
+        """Ensure ``_caps`` is a dictionary."""
         if self._caps is None:
             self._caps = {}
 
     # ---- Registration ----------------------------------------------------
 
     def register(self, cap: Capability) -> None:
-        """Registriert eine Capability. Vorhandene werden ueberschrieben."""
+        """Register a capability. Existing entries are overwritten."""
         self._caps[cap.name] = cap
 
     def deregister(self, name: str) -> bool:
-        """Entfernt eine Capability am Namensschluessel. Gibt ``True`` zurueck, wenn entfernt."""
+        """Remove a capability by name. Returns True if removed."""
         if name in self._caps:
             del self._caps[name]
             return True
         return False
 
-    # ---- Zugriff ---------------------------------------------------------
+    # ---- Access -----------------------------------------------------------
 
     def get(self, name: str) -> Optional[Capability]:
-        """Liefert die Capability mit dem gegebenen Namen oder ``None``."""
+        """Get the capability with the given name or ``None``."""
         return self._caps.get(name)
 
     def update(self, name: str, **kwargs: Any) -> Optional[Capability]:
-        """Aendert einzelne Felder einer registrierten Capability."""
+        """Update individual fields of a registered capability."""
         cap = self._caps.get(name)
         if cap is None:
             return None
@@ -381,7 +378,7 @@ class CapabilitySet:
         ctype: Optional[CapabilityType | str] = None,
         available_only: bool = True,
     ) -> list[Capability]:
-        """Liefert alle Capabilities, die den Filterkriterien entsprechen."""
+        """Return all capabilities matching the filter criteria."""
         return [
             c for c in self._caps.values()
             if c.matches(name, ctype, available_only)
@@ -389,33 +386,33 @@ class CapabilitySet:
 
     @property
     def names(self) -> list[str]:
-        """Liefert die Liste aller registrierten Capability-Namen."""
+        """Return the list of all registered capability names."""
         return list(self._caps.keys())
 
-    # ---- Serialisierung --------------------------------------------------
+    # ---- Serialization ----------------------------------------------------
 
     def to_list(self) -> list[dict[str, Any]]:
-        """Serialisiert alle Capabilities in eine Liste von Dictionaries."""
+        """Serialize all capabilities to a list of dictionaries."""
         return [c.to_dict() for c in self._caps.values()]
 
     @classmethod
     def from_list(cls, data: list[dict[str, Any]]) -> CapabilitySet:
-        """Erzeugt ein CapabilitySet aus einer Liste von Dictionaries."""
+        """Create a CapabilitySet from a list of dictionaries."""
         return cls(
             _caps={c["name"]: Capability.from_dict(c) for c in data}
         )
 
 
 # ---------------------------------------------------------------------------
-# YAML-Ladefunktion
+# YAML Loader
 # ---------------------------------------------------------------------------
 
 
 def load_capabilities_from_yaml(path: Path) -> CapabilitySet:
     """
-    Laedt Capabilities aus einer YAML-Datei.
+    Load capabilities from a YAML file.
 
-    Erwartete Struktur der YAML-Datei::
+    Expected YAML structure::
 
         capabilities:
           - name: vault
@@ -432,8 +429,7 @@ def load_capabilities_from_yaml(path: Path) -> CapabilitySet:
             config: {}
             metadata: {}
 
-    Wenn die Datei nicht existiert, wird ein leeres ``CapabilitySet``
-    zurueckgegeben.
+    If the file does not exist, an empty ``CapabilitySet`` is returned.
     """
     path = Path(path)
     if not path.exists():
@@ -453,15 +449,15 @@ def load_capabilities_from_yaml(path: Path) -> CapabilitySet:
 
 
 # ---------------------------------------------------------------------------
-# Diff-Funktion
+# Diff Function
 # ---------------------------------------------------------------------------
 
 
 def diff_capabilities(old: CapabilitySet, new: CapabilitySet) -> dict[str, Any]:
     """
-    Vergleicht zwei CapabilitySets und liefert die Aenderungen.
+    Compare two CapabilitySets and return the differences.
 
-    Rueckgabe-Struktur::
+    Return structure::
 
         {
             "added":   [<Capability.to_dict>, ...],
