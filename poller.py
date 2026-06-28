@@ -28,12 +28,13 @@ Improvements over older pollers:
 
 import json
 import os
+import re
 import sys
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import httpx
 
@@ -382,6 +383,40 @@ class Poller:
         )
         r.raise_for_status()
         return r.json()
+
+    def download_artifact(
+        self,
+        artifact_id: str,
+        output_path: Optional[Path] = None,
+        *,
+        chunk_size: int = 64 * 1024,
+    ) -> Path:
+        """Download an artifact from the relay, streaming it to disk.
+
+        Returns the local path the artifact was written to. The filename is
+        taken from the server's Content-Disposition header when no
+        ``output_path`` is supplied.
+        """
+        url = f"{self.meta['base_url'].rstrip('/')}/relay/v2/storage/files/{artifact_id}"
+        with httpx.stream(
+            "GET",
+            url,
+            headers={"Authorization": f"Bearer {self.token}"},
+            follow_redirects=True,
+            timeout=self.config.get("request_timeout", 30),
+        ) as r:
+            r.raise_for_status()
+            target = output_path or Path(self._filename_from_response(r, artifact_id))
+            with target.open("wb") as f:
+                for chunk in r.iter_bytes(chunk_size=chunk_size):
+                    f.write(chunk)
+            return target
+
+    @staticmethod
+    def _filename_from_response(response: httpx.Response, fallback: str) -> str:
+        cd = response.headers.get("content-disposition", "")
+        m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd)
+        return m.group(1) if m else fallback
 
     def register(self, capability, handler):
         self.handlers[capability] = handler

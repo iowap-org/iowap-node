@@ -12,6 +12,7 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
         node-cli claim <capability>
         node-cli complete <stage_id> --task <task_id> --result-file <path>
         node-cli task submit --name <name> --stage <cap>:<json_payload> [--priority N]
+        node-cli artifact download <artifact_id> [--output <path>]
 
     Capability profile management:
         node-cli capabilities list | validate [profile] | publish <profile>
@@ -28,6 +29,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -35,7 +37,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -295,6 +297,64 @@ class RelayClient:
         )
         r.raise_for_status()
         return r.json()
+
+    # -- artifact download ---------------------------------------------------
+
+    def download_artifact(
+        self,
+        artifact_id: str,
+        output_path: Optional[Path] = None,
+        *,
+        chunk_size: int = 64 * 1024,
+    ) -> Path:
+        """Download an artifact by id, streaming it to disk chunkwise.
+
+        Falls back to a token refresh on a 401/403, then retries once. The
+        output filename is derived from the Content-Disposition header when
+        no ``output_path`` is supplied.
+        """
+        url = f"{self.base_url}/relay/v2/storage/files/{artifact_id}"
+        timeout = self.cfg.get("request_timeout", 30)
+
+        cm = httpx.stream(
+            "GET",
+            url,
+            headers={"Authorization": f"Bearer {self.token}"},
+            follow_redirects=True,
+            timeout=timeout,
+        )
+        resp = cm.__enter__()
+        try:
+            if resp.status_code in (401, 403):
+                # Close this attempt and retry once after refreshing the token.
+                cm.__exit__(None, None, None)
+                refreshed = self._refresh_token()
+                cm = httpx.stream(
+                    "GET",
+                    url,
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    follow_redirects=True,
+                    timeout=timeout,
+                )
+                resp = cm.__enter__()
+                if not refreshed:
+                    resp.raise_for_status()  # surface the auth error
+            resp.raise_for_status()
+
+            target = output_path or Path(_filename_from_response(resp, artifact_id))
+            with target.open("wb") as f:
+                for chunk in resp.iter_bytes(chunk_size=chunk_size):
+                    f.write(chunk)
+            return target
+        finally:
+            cm.__exit__(None, None, None)
+
+
+def _filename_from_response(response: httpx.Response, fallback: str) -> str:
+    """Extract a filename from Content-Disposition, falling back to the id."""
+    cd = response.headers.get("content-disposition", "")
+    m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd)
+    return m.group(1) if m else fallback
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +761,17 @@ def _cmd_task_submit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_artifact_download(args: argparse.Namespace) -> int:
+    _setup_logging(args.log_level)
+    meta = load_meta()
+    cfg = _effective_config()
+    client = RelayClient(meta, cfg)
+    target = client.download_artifact(args.artifact_id, output_path=args.output)
+    size = target.stat().st_size if target.exists() else 0
+    print(f"Downloaded {size} bytes to {target}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # capabilities subcommands
 # ---------------------------------------------------------------------------
@@ -940,6 +1011,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_reload = sub.add_parser("reload", help="Send SIGHUP to running daemon.")
     p_reload.set_defaults(func=_cmd_reload)
+
+    # artifact operations
+    p_artifact = sub.add_parser("artifact", help="Artifact operations.")
+    p_artifact_sub = p_artifact.add_subparsers(
+        dest="artifact_command", required=True, metavar="<action>"
+    )
+    p_artifact_download = p_artifact_sub.add_parser(
+        "download", help="Download an artifact by id from the relay."
+    )
+    p_artifact_download.add_argument("artifact_id", help="The artifact ID to download.")
+    p_artifact_download.add_argument(
+        "--output", "-o", type=Path, default=None,
+        help="Output path (default: <artifact name from server>).",
+    )
+    p_artifact_download.set_defaults(func=_cmd_artifact_download)
 
     return parser
 
