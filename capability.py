@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
-"""Shared Capability module for all node types and the server CLI.
+"""
+Node-side capability data model.
 
-This module is used by both worker nodes and the relay server.
-It provides the common data structures and helper functions for
-working with capabilities:
+Nodes define their capabilities locally, typically in a YAML file
+(e.g. nodes/worker/capabilities.yaml). This module loads those definitions
+and maps them to the schema expected by the relay server's API.
+
+This model is used for:
+  - Loading capability definitions from YAML config files
+  - Serializing capabilities for registration and heartbeat payloads
+  - Schema validation BEFORE sending to the server (fail fast locally)
+
+The server has its own copy in src/relay_server/models/capability.py for
+inbound validation. The two models are intentionally separate: the node
+owns the definition, the server only mediates and routes.
+The capability_loader.py bridges this gap by loading YAML and mapping to
+the server-expected JSON schema.
+
+Provided API:
 
     * ``CapabilityType``            - Enum of available capability types.
     * ``CapabilityInputField``     - Description of a single input field.
