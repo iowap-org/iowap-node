@@ -815,6 +815,25 @@ def _cmd_artifact_download(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_artifact_upload(args: argparse.Namespace) -> int:
+    _setup_logging(args.log_level)
+    meta = load_meta()
+    cfg = _effective_config()
+    client = RelayClient(meta, cfg)
+    file_path = Path(args.file)
+    if not file_path.exists():
+        print(f"file not found: {file_path}", file=sys.stderr)
+        return 2
+    result = client.upload_artifact(
+        file_path,
+        name=args.name,
+        task_id=args.task_id,
+        stage_id=args.stage_id,
+    )
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # capabilities subcommands
 # ---------------------------------------------------------------------------
@@ -1069,6 +1088,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output path (default: <artifact name from server>).",
     )
     p_artifact_download.set_defaults(func=_cmd_artifact_download)
+
+    p_artifact_upload = p_artifact_sub.add_parser(
+        "upload", help="Upload a local file as an artifact to the relay."
+    )
+    p_artifact_upload.add_argument("file", type=str, help="Path to the file to upload.")
+    p_artifact_upload.add_argument(
+        "--name", default=None, help="Artifact name (default: filename)."
+    )
+    p_artifact_upload.add_argument(
+        "--task-id", default=None, help="Optional task ID to associate with."
+    )
+    p_artifact_upload.add_argument(
+        "--stage-id", default=None, help="Optional stage ID to associate with."
+    )
+    p_artifact_upload.set_defaults(func=_cmd_artifact_upload)
 
     return parser
 
