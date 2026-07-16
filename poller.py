@@ -27,9 +27,9 @@ Improvements over older pollers:
 """
 
 import json
+import logging
 import os
 import re
-import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -37,6 +37,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import httpx
+
+# Structured logging — replaces ad-hoc print() / print(..., file=sys.stderr).
+# Mirrors the logging setup used by the relay server (main.py).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("relay.poller")
 
 BASE_DIR = Path.home() / ".relay"
 META_PATH = BASE_DIR / "ai-relay-agent.json"
@@ -73,7 +81,7 @@ def load_json(path: Path, default=None):
     try:
         return json.loads(path.read_text())
     except Exception as exc:
-        print(f"failed to read {path}: {exc}", file=sys.stderr)
+        logger.warning("failed to read %s: %s", path, exc)
         return default
 
 
@@ -94,8 +102,7 @@ def load_config() -> dict:
 
 def load_meta() -> dict:
     if not META_PATH.exists():
-        print(f"metadata missing: {META_PATH}", file=sys.stderr)
-        sys.exit(1)
+        raise FileNotFoundError(f"metadata missing: {META_PATH}")
     return json.loads(META_PATH.read_text())
 
 
@@ -137,14 +144,12 @@ class Poller:
         self._lock = threading.Lock()
 
         if not self.token:
-            print(
-                "no runtime token found, attempting recovery with registration secret",
-                file=sys.stderr,
+            logger.warning(
+                "no runtime token found, attempting recovery with registration secret"
             )
             self.token = self._recover_runtime_token_with_rs()
             if not self.token:
-                print("no runtime token available and recovery failed", file=sys.stderr)
-                sys.exit(1)
+                raise RuntimeError("no runtime token available and recovery failed")
 
     def _api_post(self, path: str, headers: dict = None, json_body=None, timeout=None):
         url = f"{self.meta['base_url']}{path}"
@@ -227,35 +232,34 @@ class Poller:
         rs_valid = self._iso_to_timestamp(status.get("rs_valid_until"))
 
         if rt_valid and (rt_valid - now) < self.config["rt_refresh_before_seconds"]:
-            print("runtime token close to expiry, refreshing", file=sys.stderr)
+            logger.info("runtime token close to expiry, refreshing")
             new_token = self._refresh_runtime_token_with_rt()
             if new_token:
                 self.token = new_token
 
         if rs_valid and (rs_valid - now) < self.config["rs_refresh_before_seconds"]:
-            print("registration secret close to expiry, refreshing", file=sys.stderr)
+            logger.info("registration secret close to expiry, refreshing")
             self._refresh_registration_secret_with_rt()
 
         self.token = load_token() or self.token
 
     def _handle_auth_error(self):
-        print("token invalid, forcing refresh", file=sys.stderr)
+        logger.warning("token invalid, forcing refresh")
         new_token = None
         try:
             new_token = self._refresh_runtime_token_with_rt()
         except Exception as exc:
-            print(f"runtime-token refresh failed: {exc}", file=sys.stderr)
+            logger.warning("runtime-token refresh failed: %s", exc)
 
         if not new_token:
-            print("trying registration-secret recovery", file=sys.stderr)
+            logger.info("trying registration-secret recovery")
             try:
                 new_token = self._recover_runtime_token_with_rs()
             except Exception as exc:
-                print(f"registration-secret recovery failed: {exc}", file=sys.stderr)
+                logger.warning("registration-secret recovery failed: %s", exc)
 
         if not new_token:
-            print("all credential refresh attempts failed, exiting", file=sys.stderr)
-            sys.exit(1)
+            raise RuntimeError("all credential refresh attempts failed")
 
         self.token = new_token
 
@@ -304,20 +308,25 @@ class Poller:
                 hb = self.heartbeat()
                 with self._lock:
                     self._last_heartbeat_status = hb.get("status", "ok")
-                print(
-                f"background heartbeat {self._last_heartbeat_status} "
-                f"at {time.strftime('%H:%M:%S')}"
-            )
+                logger.info(
+                    "background heartbeat %s at %s",
+                    self._last_heartbeat_status,
+                    time.strftime("%H:%M:%S"),
+                )
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
-                print(f"background heartbeat http error {status_code}: {exc}", file=sys.stderr)
+                logger.warning("background heartbeat http error %s: %s", status_code, exc)
                 if status_code in (401, 403):
                     try:
                         self._handle_auth_error()
-                    except SystemExit:
+                    except RuntimeError:
+                        logger.error("background heartbeat terminating: auth refresh failed")
+                        break
+                    except Exception as exc_inner:
+                        logger.error("background heartbeat auth error: %s", exc_inner)
                         break
             except Exception as exc:
-                print(f"background heartbeat error: {exc}", file=sys.stderr)
+                logger.warning("background heartbeat error: %s", exc)
 
             # Sleep in short increments so shutdown is responsive.
             for _ in range(self.config["heartbeat_interval"]):
@@ -446,7 +455,7 @@ class Poller:
                 capabilities.append(c.get("name"))
             else:
                 capabilities.append(c)
-        print(f"poller started for node {self.meta['node_id']} with caps {capabilities}")
+        logger.info("poller started for node %s with caps %s", self.meta["node_id"], capabilities)
 
         self._start_background_heartbeat()
 
@@ -465,7 +474,7 @@ class Poller:
                         for cap in capabilities:
                             stage = self.claim(cap)
                             if stage:
-                                print(f"claimed {cap} stage: {stage.get('stage_id')}")
+                                logger.info("claimed %s stage: %s", cap, stage.get("stage_id"))
                                 handler = self.handlers.get(cap)
                                 if handler:
                                     self._in_flight = getattr(self, "_in_flight", 0) + 1
@@ -474,21 +483,21 @@ class Poller:
                                         self.complete(stage["task_id"], stage["stage_id"], result)
                                         with self._lock:
                                             self.tasks_completed += 1
-                                        print(f"completed {stage.get('stage_id')}")
+                                        logger.info("completed %s", stage.get("stage_id"))
                                     except Exception as exc:
                                         with self._lock:
                                             self.tasks_failed += 1
-                                        print(f"task execution failed: {exc}", file=sys.stderr)
+                                        logger.error("task execution failed: %s", exc)
                                         try:
                                             self.complete(
-                                            stage["task_id"], stage["stage_id"],
-                                            {"error": str(exc)},
-                                        )
+                                                stage["task_id"],
+                                                stage["stage_id"],
+                                                {"error": str(exc)},
+                                            )
                                         except Exception as complete_exc:
-                                            print(
-                                            f"failed to report error result: {complete_exc}",
-                                            file=sys.stderr,
-                                        )
+                                            logger.error(
+                                                "failed to report error result: %s", complete_exc
+                                            )
                                     finally:
                                         self._in_flight = max(0, getattr(self, "_in_flight", 1) - 1)
                                 break
@@ -499,10 +508,10 @@ class Poller:
                     if exc.response.status_code in (401, 403):
                         self._handle_auth_error()
                         continue
-                    print(f"http error: {exc}", file=sys.stderr)
+                    logger.error("http error: %s", exc)
                 except Exception as exc:
                     error = str(exc)
-                    print(f"error: {exc}", file=sys.stderr)
+                    logger.error("error: %s", exc)
 
                 self._write_status(heartbeat_status, error=error)
                 time.sleep(self.config["heartbeat_interval"])
