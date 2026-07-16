@@ -349,6 +349,49 @@ class RelayClient:
         finally:
             cm.__exit__(None, None, None)
 
+    # -- artifact upload -----------------------------------------------------
+
+    def upload_artifact(
+        self,
+        file_path: Path,
+        *,
+        name: Optional[str] = None,
+        task_id: Optional[str] = None,
+        stage_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Upload a local file to the relay as an artifact.
+
+        Returns the server response dict containing ``artifact_id``,
+        ``name``, ``size_bytes``, etc. Falls back to a token refresh
+        on a 401/403, then retries once.
+        """
+        url = f"{self.base_url}/relay/v2/storage/upload"
+        params: dict[str, str] = {}
+        if task_id:
+            params["task_id"] = task_id
+        if stage_id:
+            params["stage_id"] = stage_id
+
+        file_path = Path(file_path)
+        upload_name = name or file_path.name
+
+        def _do_upload() -> httpx.Response:
+            with file_path.open("rb") as f:
+                return httpx.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    files={"file": (upload_name, f, "application/octet-stream")},
+                    params=params or None,
+                    timeout=self.cfg.get("request_timeout", 30),
+                )
+
+        resp = _do_upload()
+        if resp.status_code in (401, 403):
+            self._refresh_token()
+            resp = _do_upload()
+        resp.raise_for_status()
+        return resp.json()
+
 
 def _filename_from_response(response: httpx.Response, fallback: str) -> str:
     """Extract a filename from Content-Disposition, falling back to the id."""
