@@ -39,6 +39,89 @@ from typing import Any
 import yaml
 
 # ---------------------------------------------------------------------------
+# JSON Schema for capability profiles (Draft 2020-12)
+# ---------------------------------------------------------------------------
+
+CAPABILITY_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["capabilities"],
+    "properties": {
+        "capabilities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "version": {"type": "string", "minLength": 1},
+                    "auto_publish": {"type": "boolean"},
+                    "claimable": {"type": "boolean"},
+                    "handler": {"type": "string"},
+                    "max_parallel": {"type": "integer", "minimum": 1},
+                    "timeout": {"type": "integer", "minimum": 1},
+                },
+                "additionalProperties": False,
+            },
+        }
+    },
+    "additionalProperties": False,
+}
+
+
+def validate_with_schema(data: dict[str, Any]) -> list[str]:
+    """Validate parsed YAML data against CAPABILITY_SCHEMA.
+
+    Returns a list of human-readable error messages. An empty list means
+    the data is structurally valid. Uses ``jsonschema`` if available,
+    otherwise falls back to a basic structural check.
+    """
+    errors: list[str] = []
+
+    # Basic structural check (works without jsonschema dependency).
+    if not isinstance(data, dict):
+        errors.append("profile root must be a mapping")
+        return errors
+    if "capabilities" not in data:
+        errors.append("'capabilities' key is required")
+        return errors
+    if not isinstance(data["capabilities"], list):
+        errors.append("'capabilities' must be a list")
+        return errors
+
+    for i, entry in enumerate(data["capabilities"]):
+        prefix = f"capabilities[{i}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{prefix}: must be a mapping, got {type(entry).__name__}")
+            continue
+        if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
+            errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
+        # Check for unknown keys
+        allowed = {"name", "version", "auto_publish", "claimable", "handler", "max_parallel", "timeout"}
+        extra = set(entry.keys()) - allowed
+        if extra:
+            errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
+        # Type checks for optional fields
+        for key, expected_type in [
+            ("version", str),
+            ("auto_publish", bool),
+            ("claimable", bool),
+            ("handler", str),
+            ("max_parallel", int),
+            ("timeout", int),
+        ]:
+            val = entry.get(key)
+            if val is not None and not isinstance(val, expected_type):
+                errors.append(f"{prefix}.{key}: expected {expected_type.__name__}, got {type(val).__name__}")
+        # Range checks
+        for key in ("max_parallel", "timeout"):
+            val = entry.get(key)
+            if isinstance(val, int) and val < 1:
+                errors.append(f"{prefix}.{key}: must be >= 1, got {val}")
+
+    return errors
+
+# ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
@@ -288,6 +371,12 @@ def validate_profile(
     Raises :class:`CapabilityValidationError` on any problem.
     """
     if isinstance(source, dict):
+        # Schema validation first
+        schema_errors = validate_with_schema(source)
+        if schema_errors:
+            raise CapabilityValidationError(
+                "schema validation failed:\n  " + "\n  ".join(schema_errors)
+            )
         if "capabilities" not in source:
             raise CapabilityValidationError("'capabilities' key missing")
         return _normalize_caps_list(source["capabilities"], file=None)
@@ -319,6 +408,15 @@ def validate_profile(
             "profile root must be a mapping with a 'capabilities' key",
             file=file_label,
         )
+
+    # Schema validation
+    schema_errors = validate_with_schema(parsed)
+    if schema_errors:
+        raise CapabilityValidationError(
+            "schema validation failed:\n  " + "\n  ".join(schema_errors),
+            file=file_label,
+        )
+
     if "capabilities" not in parsed:
         raise CapabilityValidationError(
             "'capabilities' key missing or not a list",
