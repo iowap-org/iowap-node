@@ -13,6 +13,7 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
         node-cli complete <stage_id> --task <task_id> --result-file <path>
         node-cli task submit --name <name> --stage <cap>:<json_payload> [--priority N]
         node-cli artifact download <artifact_id> [--output <path>]
+        node-cli artifact upload <file> [--name <name>] [--task-id <id>] [--stage-id <id>]
 
     Capability profile management:
         node-cli capabilities list | validate [profile] | publish <profile>
