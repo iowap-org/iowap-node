@@ -343,5 +343,5 @@ You may copy `poller.py` and modify it for your node. Common customizations:
 - Replace the synchronous `httpx` calls with `asyncio` if the node is
   I/O-bound.
 
-The server-side protocol is documented in `docs/node-readme.md` and
-`docs/nodes-design.md`.
+The server-side protocol is documented in `docs/node/setup.md` and
+`docs/concepts.md`.
