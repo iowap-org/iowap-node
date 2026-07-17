@@ -97,7 +97,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
         if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
             errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
         # Check for unknown keys
-        allowed = {"name", "version", "auto_publish", "claimable", "handler", "max_parallel", "timeout"}
+        allowed = {"name", "version", "description", "auto_publish", "claimable", "handler", "max_parallel", "timeout"}
         extra = set(entry.keys()) - allowed
         if extra:
             errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
@@ -144,6 +144,7 @@ DEFAULT_TIMEOUT = 300
 _NORMALIZED_KEYS = (
     "name",
     "version",
+    "description",
     "auto_publish",
     "claimable",
     "handler",
