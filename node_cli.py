@@ -170,6 +170,15 @@ class RelayClient:
             timeout=timeout or self.cfg["request_timeout"],
         )
 
+    def _get(
+        self, path: str, *, timeout: float | None = None
+    ) -> httpx.Response:
+        return httpx.get(
+            f"{self.base_url}{path}",
+            headers={"Authorization": f"Bearer {self.token}"},
+            timeout=timeout or self.cfg["request_timeout"],
+        )
+
     def _post_with_retry(
         self, path: str, body: dict[str, Any] | None = None, *, timeout: float | None = None
     ) -> httpx.Response:
@@ -227,9 +236,13 @@ class RelayClient:
     def heartbeat(self, caps: list[dict[str, Any]], in_flight: dict[str, int]) -> dict[str, Any]:
         try:
             load_avg = os.getloadavg()[0]
+            cpu_count = os.cpu_count() or 1
+            load_pct = (load_avg / cpu_count) * 100.0
         except (OSError, AttributeError):
-            load_avg = 0.0
-        load = min(load_avg, float(self.cfg.get("load_cap", 1.0)))
+            cpu_count = 1
+            load_pct = 0.0
+        load_cap = float(self.cfg.get("load_cap", cpu_count * 100.0))
+        load = min(load_pct, load_cap)
 
         cap_status: list[dict[str, Any]] = []
         for cap in caps:
@@ -951,6 +964,39 @@ def _cmd_capabilities_current(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def _cmd_capabilities_server(args: argparse.Namespace) -> int:
+    """Query capabilities from the relay server (all registered nodes)."""
+    _setup_logging(args.log_level)
+    meta = load_meta()
+    cfg = _effective_config()
+    client = RelayClient(meta, cfg)
+    try:
+        resp = client._get("/relay/v2/discovery/capabilities")
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"failed to query server capabilities: {exc}", file=sys.stderr)
+        return 1
+
+    caps = data.get("capabilities", data) if isinstance(data, dict) else data
+    if not caps:
+        print("(no capabilities registered on the server)")
+        return 0
+
+    print(f"Server capabilities ({len(caps)} total):\n")
+    for c in caps:
+        name = c.get("name", "?")
+        ver = c.get("version", "?")
+        avail = c.get("available", False)
+        nodes = c.get("nodes", [])
+        status = "✅" if avail else "❌"
+        node_names = ", ".join(
+            n.get("node_name", n.get("node_id", "?")) for n in nodes
+        ) if nodes else "(no nodes)"
+        print(f"  {status} {name:20} v{ver:8}  [{node_names}]")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # status / reload
 # ---------------------------------------------------------------------------
@@ -1067,6 +1113,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_current = p_caps_sub.add_parser("current", help="Show active profile name.")
     p_current.set_defaults(func=_cmd_capabilities_current)
+
+    p_server = p_caps_sub.add_parser(
+        "server", help="Query capabilities registered on the relay server (all nodes)."
+    )
+    p_server.set_defaults(func=_cmd_capabilities_server)
 
     # status / reload
     p_status = sub.add_parser("status", help="Print worker_status.json content.")

@@ -61,7 +61,6 @@ DEFAULT_CONFIG = {
     "rs_refresh_before_seconds": 3600,
     "request_timeout": 10,
     "task_timeout": 600,
-    "load_cap": 1.0,
     "log_level": "INFO",
     "background_heartbeat": True,
 }
@@ -277,9 +276,13 @@ class Poller:
 
         try:
             load = os.getloadavg()[0]
+            cpu_count = os.cpu_count() or 1
+            load = (load / cpu_count) * 100.0
         except (OSError, AttributeError):
+            cpu_count = 1
             load = 0.0
-        load = min(load, float(self.config.get("load_cap", 1.0)))
+        load_cap = float(self.config.get("load_cap", cpu_count * 100.0))
+        load = min(load, load_cap)
 
         # queue_depth reflects in-flight work on this node
         queue_depth = getattr(self, "_in_flight", 0)
