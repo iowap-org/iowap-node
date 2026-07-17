@@ -262,6 +262,7 @@ class RelayClient:
             {
                 "node_id": self.meta["node_id"],
                 "status": "online",
+                "available": True,
                 "load": load,
                 "queue_depth": queue_depth,
                 "capabilities": cap_status,
