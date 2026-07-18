@@ -911,7 +911,7 @@ def _print_task_result(data: dict[str, Any]) -> None:
             # stderr snippet) so callers can debug empty responses
             # without downloading artifacts. Populated by
             # handler_runner.run_handler() on success (exit 0).
-            handler_info = s.get("result", {}).get("_handler")
+            handler_info = (s.get("result") or {}).get("_handler")
             if handler_info:
                 stderr_snippet = (handler_info.get("stderr") or "")[:200]
                 print(
