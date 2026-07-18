@@ -55,11 +55,14 @@ CAPABILITY_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "name": {"type": "string", "minLength": 1},
                     "version": {"type": "string", "minLength": 1},
+                    "type": {"type": "string"},
+                    "description": {"type": "string"},
                     "auto_publish": {"type": "boolean"},
                     "claimable": {"type": "boolean"},
                     "handler": {"type": "string"},
                     "max_parallel": {"type": "integer", "minimum": 1},
                     "timeout": {"type": "integer", "minimum": 1},
+                    "input_schema": {"type": "object"},
                 },
                 "additionalProperties": False,
             },
@@ -97,7 +100,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
         if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
             errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
         # Check for unknown keys
-        allowed = {"name", "version", "description", "auto_publish", "claimable", "handler", "max_parallel", "timeout"}
+        allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout"}
         extra = set(entry.keys()) - allowed
         if extra:
             errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
