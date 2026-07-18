@@ -58,7 +58,7 @@ from nodes.common.capability_loader import (
     validate_profile,
 )
 from nodes.common.handler_runner import run_handler
-from nodes.common.poller import (
+from nodes.common.node_utils import (
     STATUS_PATH,
     TOKEN_PATH,
     load_config,
