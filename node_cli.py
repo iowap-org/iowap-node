@@ -907,6 +907,18 @@ def _print_task_result(data: dict[str, Any]) -> None:
             if s.get("result"):
                 result_str = f"  result={json.dumps(s['result'])}"
             print(f"    {status_icon} {s.get('stage_name','?')} [{s.get('capability','?')}] — {s.get('status','?')}{result_str}")
+            # Surface handler diagnostics (exit code, stdout size,
+            # stderr snippet) so callers can debug empty responses
+            # without downloading artifacts. Populated by
+            # handler_runner.run_handler() on success (exit 0).
+            handler_info = s.get("result", {}).get("_handler")
+            if handler_info:
+                stderr_snippet = (handler_info.get("stderr") or "")[:200]
+                print(
+                    f"      [handler] exit={handler_info.get('exit_code')} "
+                    f"stdout={handler_info.get('stdout_length','?')}B "
+                    f"stderr={stderr_snippet!r}"
+                )
         print()
 
     if artifacts:

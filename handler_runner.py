@@ -115,8 +115,10 @@ def run_handler(
     Returns
     -------
     dict
-        On success (exit 0): the parsed JSON from stdout. If the stdout
-        is not valid JSON, an error dict is returned instead.
+        On success (exit 0): the parsed JSON from stdout, augmented with
+        an ``_handler`` debug dict (``stderr``, ``stdout_length``,
+        ``exit_code``). If the stdout is not valid JSON, an error dict is
+        returned instead.
         On failure (non-zero exit or timeout): an error dict of the
         form ``{"error": "...", "stderr": "..."}``.
     """
@@ -162,7 +164,15 @@ def run_handler(
 
     if not isinstance(parsed, dict):
         # Wrap non-dict JSON (e.g. a bare string/number) into a result.
-        return {"result": parsed}
+        parsed = {"result": parsed}
+
+    # Always attach handler diagnostics so callers can debug empty
+    # responses without having to download artifacts. The CLI surfaces
+    # these in `node-cli task result` (see _print_task_result).
+    parsed.setdefault("_handler", {})
+    parsed["_handler"]["stderr"] = stderr
+    parsed["_handler"]["stdout_length"] = len(stdout)
+    parsed["_handler"]["exit_code"] = proc.returncode
     return parsed
 
 
