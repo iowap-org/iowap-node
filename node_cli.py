@@ -11,7 +11,7 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
         node-cli heartbeat
         node-cli claim <capability>
         node-cli complete <stage_id> --task <task_id> --result-file <path>
-        node-cli task submit --name <name> --stage <cap>:<json_payload> [--priority N]
+        node-cli task submit --name <name> --stage <cap>:<json_payload> [--priority N] [--owner <node_id>]
         node-cli artifact download <artifact_id> [--output <path>]
         node-cli artifact upload <file> [--name <name>] [--task-id <id>] [--stage-id <id>]
 
@@ -310,16 +310,17 @@ class RelayClient:
         *,
         name: str = "",
         priority: int = 0,
+        owner_node_id: str | None = None,
     ) -> dict[str, Any]:
-        r = self._post_with_retry(
-            "/relay/v2/scheduler/task-simple",
-            {
-                "capability": capability,
-                "payload": payload,
-                "name": name,
-                "priority": priority,
-            },
-        )
+        body = {
+            "capability": capability,
+            "payload": payload,
+            "name": name,
+            "priority": priority,
+        }
+        if owner_node_id:
+            body["owner_node_id"] = owner_node_id
+        r = self._post_with_retry("/relay/v2/scheduler/task-simple", body)
         r.raise_for_status()
         return r.json()
 
@@ -832,7 +833,13 @@ def _cmd_task_submit(args: argparse.Namespace) -> int:
     cfg = _effective_config()
     client = RelayClient(meta, cfg)
     cap, payload = _parse_stage_arg(args.stage)
-    resp = client.submit_simple_task(cap, payload, name=args.name or "", priority=args.priority)
+    resp = client.submit_simple_task(
+        cap,
+        payload,
+        name=args.name or "",
+        priority=args.priority,
+        owner_node_id=args.owner,
+    )
     print(json.dumps(resp, indent=2, default=str))
     return 0
 
@@ -1178,6 +1185,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stage as <capability>:<json-payload>.",
     )
     p_submit.add_argument("--priority", type=int, default=0, help="Task priority 0-10.")
+    p_submit.add_argument(
+        "--owner",
+        default=None,
+        help="Node ID that must claim this task (owner_node_id).",
+    )
     p_submit.set_defaults(func=_cmd_task_submit)
 
     p_result = p_task_sub.add_parser("result", help="Show task result (status, stages, artifacts).")
