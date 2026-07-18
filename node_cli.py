@@ -264,6 +264,7 @@ class RelayClient:
                 "name": name,
                 "version": cap.get("version", "1.0.0"),
                 "available": inflight < cap.get("max_parallel", 1),
+                "dashboard_page": bool(cap.get("dashboard_page", False)),
             })
 
         queue_depth = sum(in_flight.values())
@@ -392,12 +393,17 @@ class RelayClient:
         name: Optional[str] = None,
         task_id: Optional[str] = None,
         stage_id: Optional[str] = None,
+        capability: Optional[str] = None,
     ) -> dict[str, Any]:
         """Upload a local file to the relay as an artifact.
 
         Returns the server response dict containing ``artifact_id``,
         ``name``, ``size_bytes``, etc. Falls back to a token refresh
         on a 401/403, then retries once.
+
+        When ``capability`` is set, the server stores the file as the
+        dashboard page for that capability (no artifact DB entry); the
+        response then contains ``status`` and ``path`` instead.
         """
         url = f"{self.base_url}/relay/v2/storage/upload"
         params: dict[str, str] = {}
@@ -405,6 +411,8 @@ class RelayClient:
             params["task_id"] = task_id
         if stage_id:
             params["stage_id"] = stage_id
+        if capability:
+            params["capability"] = capability
 
         file_path = Path(file_path)
         upload_name = name or file_path.name
@@ -956,6 +964,7 @@ def _cmd_artifact_upload(args: argparse.Namespace) -> int:
         name=args.name,
         task_id=args.task_id,
         stage_id=args.stage_id,
+        capability=args.capability,
     )
     print(json.dumps(result, indent=2, default=str))
     return 0
@@ -1280,6 +1289,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_artifact_upload.add_argument(
         "--stage-id", default=None, help="Optional stage ID to associate with."
+    )
+    p_artifact_upload.add_argument(
+        "--capability",
+        default=None,
+        help="If set, store the file as the dashboard page for this capability "
+        "(in ~/.relay/capability-pages/<name>/dashboard.html on the server). "
+        "No artifact DB entry is created.",
     )
     p_artifact_upload.set_defaults(func=_cmd_artifact_upload)
 
