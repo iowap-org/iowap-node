@@ -179,6 +179,16 @@ class RelayClient:
             timeout=timeout or self.cfg["request_timeout"],
         )
 
+    def _get_with_retry(
+        self, path: str, *, timeout: float | None = None
+    ) -> httpx.Response:
+        r = self._get(path, timeout=timeout)
+        if r.status_code in (401, 403):
+            log.warning("auth error %s on %s, refreshing token", r.status_code, path)
+            if self._refresh_token():
+                r = self._get(path, timeout=timeout)
+        return r
+
     def _post_with_retry(
         self, path: str, body: dict[str, Any] | None = None, *, timeout: float | None = None
     ) -> httpx.Response:
@@ -310,6 +320,14 @@ class RelayClient:
                 "priority": priority,
             },
         )
+        r.raise_for_status()
+        return r.json()
+
+    def get_task(self, task_id: str) -> dict[str, Any]:
+        """Fetch task details including stages and artifacts."""
+        r = self._get_with_retry(f"/relay/v2/scheduler/tasks/{task_id}")
+        if r.status_code == 404:
+            return {"error": "not found", "task_id": task_id}
         r.raise_for_status()
         return r.json()
 
@@ -819,6 +837,81 @@ def _cmd_task_submit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_task_result(args: argparse.Namespace) -> int:
+    _setup_logging(args.log_level)
+    meta = load_meta()
+    cfg = _effective_config()
+    client = RelayClient(meta, cfg)
+    data = client.get_task(args.task_id)
+    if "error" in data:
+        print(f"Task {args.task_id}: {data['error']}", file=sys.stderr)
+        return 1
+    _print_task_result(data)
+    return 0
+
+
+def _cmd_task_wait(args: argparse.Namespace) -> int:
+    _setup_logging(args.log_level)
+    meta = load_meta()
+    cfg = _effective_config()
+    client = RelayClient(meta, cfg)
+    task_id = args.task_id
+    interval = max(1, args.interval)
+
+    import time
+    while True:
+        data = client.get_task(task_id)
+        if "error" in data:
+            print(f"Task {task_id}: {data['error']}", file=sys.stderr)
+            return 1
+
+        task = data.get("task", {})
+        status = task.get("status", "unknown")
+
+        if status in ("completed", "failed", "timed_out"):
+            print(f"\n✅ Task {task_id} — {status}\n")
+            _print_task_result(data)
+            return 0 if status == "completed" else 1
+
+        # Show spinner / progress
+        stages = data.get("stages", [])
+        done = sum(1 for s in stages if s.get("status") == "completed")
+        total = len(stages)
+        print(f"\r⏳ {status} — {done}/{total} stages completed...", end="", flush=True)
+        time.sleep(interval)
+
+
+def _print_task_result(data: dict[str, Any]) -> None:
+    task = data.get("task", {})
+    stages = data.get("stages", [])
+    artifacts = data.get("artifacts", [])
+
+    print(f"  Task:    {task.get('task_name', '?')} ({task.get('task_id', '?')})")
+    print(f"  Status:  {task.get('status', '?')}")
+    print(f"  Created: {task.get('created_at', '?')}")
+    print(f"  Updated: {task.get('updated_at', '?')}")
+    print()
+
+    if stages:
+        print("  Stages:")
+        for s in stages:
+            status_icon = "✅" if s.get("status") == "completed" else "⏳" if s.get("status") == "claimed" else "⬜"
+            result_str = ""
+            if s.get("result"):
+                result_str = f"  result={json.dumps(s['result'])}"
+            print(f"    {status_icon} {s.get('stage_name','?')} [{s.get('capability','?')}] — {s.get('status','?')}{result_str}")
+        print()
+
+    if artifacts:
+        print("  Artifacts:")
+        for a in artifacts:
+            size = a.get("size_bytes", 0)
+            size_str = f"{size/1024:.0f} KB" if size < 1024*1024 else f"{size/1024/1024:.1f} MB"
+            print(f"    📄 {a.get('name','?')} ({a.get('artifact_id','?')}) — {size_str}")
+    else:
+        print("  (no artifacts linked to this task)")
+
+
 def _cmd_artifact_download(args: argparse.Namespace) -> int:
     _setup_logging(args.log_level)
     meta = load_meta()
@@ -1086,6 +1179,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_submit.add_argument("--priority", type=int, default=0, help="Task priority 0-10.")
     p_submit.set_defaults(func=_cmd_task_submit)
+
+    p_result = p_task_sub.add_parser("result", help="Show task result (status, stages, artifacts).")
+    p_result.add_argument("task_id", help="Task ID to query.")
+    p_result.set_defaults(func=_cmd_task_result)
+
+    p_wait = p_task_sub.add_parser("wait", help="Wait for a task to complete and show result.")
+    p_wait.add_argument("task_id", help="Task ID to wait for.")
+    p_wait.add_argument("--interval", type=int, default=5, help="Poll interval in seconds (default: 5).")
+    p_wait.set_defaults(func=_cmd_task_wait)
 
     # capabilities
     p_caps = sub.add_parser("capabilities", help="Capability profile management.")
