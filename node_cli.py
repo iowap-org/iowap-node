@@ -1193,15 +1193,53 @@ def _cmd_capabilities_server(args: argparse.Namespace) -> int:
             n.get("node_name", n.get("node_id", "?")) for n in nodes
         ) if nodes else "(no nodes)"
         print(f"  {status} {name:20} v{ver:8}  [{node_names}]")
-        if args.verbose:
-            desc = c.get("description")
-            if desc:
-                print(f"     Description: {desc}")
-            schema = c.get("input_schema")
-            if schema:
-                import json as _json
-                print(f"     Input Schema: {_json.dumps(schema, indent=6)}")
-            print()
+        desc = c.get("description")
+        if desc:
+            print(f"     {desc}")
+        schema = c.get("input_schema")
+        if schema:
+            print(f"     Input: {json.dumps(schema, indent=6)}")
+        print()
+    return 0
+
+
+def _cmd_capabilities_info(args: argparse.Namespace) -> int:
+    """Show detailed info for a single capability registered on the relay."""
+    _setup_logging(args.log_level)
+    meta = load_meta()
+    cfg = _effective_config()
+    client = RelayClient(meta, cfg)
+    try:
+        resp = client._get(f"/relay/v2/discovery/capabilities/{args.name}")
+        if resp.status_code == 404:
+            print(f"Capability '{args.name}' not found.")
+            return 1
+        resp.raise_for_status()
+        cap = resp.json()
+    except Exception as exc:
+        print(f"failed to query capability: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Name:        {cap.get('name', '?')}")
+    print(f"Type:        {cap.get('type', '-')}")
+    print(f"Version:     {cap.get('version', '?')}")
+    print(f"Available:   {'yes' if cap.get('available', False) else 'no'}")
+    desc = cap.get("description")
+    if desc:
+        print(f"Description: {desc}")
+    schema = cap.get("input_schema")
+    if schema:
+        print("Input Schema:")
+        print(json.dumps(schema, indent=2))
+    nodes = cap.get("nodes", [])
+    if nodes:
+        print(f"\nNodes ({len(nodes)}):")
+        for n in nodes:
+            print(
+                f"  - {n.get('node_name', n.get('node_id', '?'))} "
+                f"(load={n.get('load', 0):.1f}, "
+                f"queue={n.get('queue_depth', 0)})"
+            )
     return 0
 
 
@@ -1344,11 +1382,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_server = p_caps_sub.add_parser(
         "server", help="Query capabilities registered on the relay server (all nodes)."
     )
-    p_server.add_argument(
-        "--verbose", "-v", action="store_true",
-        help="Show description and input_schema for each capability.",
-    )
     p_server.set_defaults(func=_cmd_capabilities_server)
+
+    p_info = p_caps_sub.add_parser(
+        "info", help="Show detailed info for a single capability registered on the relay."
+    )
+    p_info.add_argument("name", help="Capability name to query.")
+    p_info.set_defaults(func=_cmd_capabilities_info)
 
     # status / reload
     p_status = sub.add_parser("status", help="Print worker_status.json content.")
