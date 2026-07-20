@@ -260,12 +260,24 @@ class RelayClient:
                 continue
             name = cap["name"]
             inflight = in_flight.get(name, 0)
-            cap_status.append({
+            entry: dict[str, Any] = {
                 "name": name,
                 "version": cap.get("version", "1.0.0"),
                 "available": inflight < cap.get("max_parallel", 1),
                 "dashboard_page": bool(cap.get("dashboard_page", False)),
-            })
+            }
+            # T-053: forward capability metadata so the server can
+            # populate node_capabilities.{description,input_schema}
+            # and resolve capability_details on claim/task-view
+            # without an extra discovery round-trip. Omit fields that
+            # are absent or falsy to keep the heartbeat payload small.
+            if cap.get("type"):
+                entry["type"] = cap.get("type")
+            if cap.get("description"):
+                entry["description"] = cap.get("description")
+            if cap.get("input_schema"):
+                entry["input_schema"] = cap.get("input_schema")
+            cap_status.append(entry)
 
         queue_depth = sum(in_flight.values())
         r = self._post_with_retry(
@@ -326,10 +338,19 @@ class RelayClient:
         return r.json()
 
     def get_task(self, task_id: str) -> dict[str, Any]:
-        """Fetch task details including stages and artifacts."""
+        """Fetch task details including stages, artifacts, and notes."""
         r = self._get_with_retry(f"/relay/v2/scheduler/tasks/{task_id}")
         if r.status_code == 404:
             return {"error": "not found", "task_id": task_id}
+        r.raise_for_status()
+        return r.json()
+
+    def add_task_note(self, task_id: str, message: str) -> dict[str, Any]:
+        """Append a free-form note to a task (T-052 mini-chat)."""
+        r = self._post_with_retry(
+            f"/relay/v2/scheduler/tasks/{task_id}/notes",
+            {"message": message},
+        )
         r.raise_for_status()
         return r.json()
 
@@ -796,7 +817,19 @@ def _cmd_claim(args: argparse.Namespace) -> int:
     if stage is None:
         print(json.dumps({"claimed": False}))
         return 0
+    # T-053: surface resolved capability metadata when the server
+    # included capability_details on the claim response.
     print(json.dumps({"claimed": True, "stage": stage}, indent=2, default=str))
+    cd = stage.get("capability_details")
+    if cd:
+        print()
+        print(f"  Capability: {cd.get('name', '?')}")
+        if cd.get("description"):
+            print(f"  Description: {cd['description']}")
+        if cd.get("type"):
+            print(f"  Type:        {cd['type']}")
+        if cd.get("input_schema"):
+            print(f"  Input Schema: {json.dumps(cd['input_schema'], indent=2)}")
     return 0
 
 
@@ -865,6 +898,25 @@ def _cmd_task_result(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_task_note(args: argparse.Namespace) -> int:
+    """node-cli task note <task_id> <message> — append a note to a task."""
+    _setup_logging(args.log_level)
+    meta = load_meta()
+    cfg = _effective_config()
+    client = RelayClient(meta, cfg)
+    try:
+        data = client.add_task_note(args.task_id, args.message)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            print(f"Task {args.task_id} not found", file=sys.stderr)
+            return 1
+        print(f"Error: {exc.response.status_code} {exc.response.text}", file=sys.stderr)
+        return 1
+    print(f"✅ Note added to task {data.get('task_id', args.task_id)}")
+    print(f"   {data.get('message', '')} ({data.get('created_at', '')})")
+    return 0
+
+
 def _cmd_task_wait(args: argparse.Namespace) -> int:
     _setup_logging(args.log_level)
     meta = load_meta()
@@ -874,6 +926,8 @@ def _cmd_task_wait(args: argparse.Namespace) -> int:
     interval = max(1, args.interval)
 
     import time
+
+    last_note_count = 0
     while True:
         data = client.get_task(task_id)
         if "error" in data:
@@ -882,6 +936,13 @@ def _cmd_task_wait(args: argparse.Namespace) -> int:
 
         task = data.get("task", {})
         status = task.get("status", "unknown")
+
+        # T-052: surface any new notes that arrived since the last poll.
+        notes = data.get("notes", [])
+        if len(notes) > last_note_count:
+            for n in notes[last_note_count:]:
+                print(f"\n💬 [{n.get('node_id', '?')}] {n.get('message', '')} ({n.get('created_at', '?')})")
+            last_note_count = len(notes)
 
         if status in ("completed", "failed", "timed_out"):
             print(f"\n✅ Task {task_id} — {status}\n")
@@ -900,6 +961,7 @@ def _print_task_result(data: dict[str, Any]) -> None:
     task = data.get("task", {})
     stages = data.get("stages", [])
     artifacts = data.get("artifacts", [])
+    notes = data.get("notes", [])
 
     print(f"  Task:    {task.get('task_name', '?')} ({task.get('task_id', '?')})")
     print(f"  Status:  {task.get('status', '?')}")
@@ -915,6 +977,15 @@ def _print_task_result(data: dict[str, Any]) -> None:
             if s.get("result"):
                 result_str = f"  result={json.dumps(s['result'])}"
             print(f"    {status_icon} {s.get('stage_name','?')} [{s.get('capability','?')}] — {s.get('status','?')}{result_str}")
+            # T-053: show resolved capability metadata when present.
+            cd = s.get("capability_details")
+            if cd:
+                if cd.get("description"):
+                    print(f"       description: {cd['description']}")
+                if cd.get("type"):
+                    print(f"       type:        {cd['type']}")
+                if cd.get("input_schema"):
+                    print(f"       input_schema: {json.dumps(cd['input_schema'])}")
             # Surface handler diagnostics (exit code, stdout size,
             # stderr snippet) so callers can debug empty responses
             # without downloading artifacts. Populated by
@@ -937,6 +1008,12 @@ def _print_task_result(data: dict[str, Any]) -> None:
             print(f"    📄 {a.get('name','?')} ({a.get('artifact_id','?')}) — {size_str}")
     else:
         print("  (no artifacts linked to this task)")
+
+    if notes:
+        print()
+        print(f"  Notes ({len(notes)}):")
+        for n in notes:
+            print(f"    💬 [{n.get('node_id', '?')}] {n.get('message', '')} ({n.get('created_at', '?')})")
 
 
 def _cmd_artifact_download(args: argparse.Namespace) -> int:
@@ -1221,6 +1298,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_wait.add_argument("task_id", help="Task ID to wait for.")
     p_wait.add_argument("--interval", type=int, default=5, help="Poll interval in seconds (default: 5).")
     p_wait.set_defaults(func=_cmd_task_wait)
+
+    p_note = p_task_sub.add_parser("note", help="Append a free-form note to a task (T-052 mini-chat).")
+    p_note.add_argument("task_id", help="Task ID to add a note to.")
+    p_note.add_argument("message", help="Note text (1..2000 characters).")
+    p_note.set_defaults(func=_cmd_task_note)
 
     # capabilities
     p_caps = sub.add_parser("capabilities", help="Capability profile management.")
