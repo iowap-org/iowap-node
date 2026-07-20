@@ -1193,6 +1193,15 @@ def _cmd_capabilities_server(args: argparse.Namespace) -> int:
             n.get("node_name", n.get("node_id", "?")) for n in nodes
         ) if nodes else "(no nodes)"
         print(f"  {status} {name:20} v{ver:8}  [{node_names}]")
+        if args.verbose:
+            desc = c.get("description")
+            if desc:
+                print(f"     Description: {desc}")
+            schema = c.get("input_schema")
+            if schema:
+                import json as _json
+                print(f"     Input Schema: {_json.dumps(schema, indent=6)}")
+            print()
     return 0
 
 
@@ -1334,6 +1343,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_server = p_caps_sub.add_parser(
         "server", help="Query capabilities registered on the relay server (all nodes)."
+    )
+    p_server.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Show description and input_schema for each capability.",
     )
     p_server.set_defaults(func=_cmd_capabilities_server)
 
