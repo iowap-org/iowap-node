@@ -337,6 +337,15 @@ def _normalize_capability(
         "timeout": timeout,
         "dashboard_page": dashboard_page,
     }
+    # T-053/T-056: forward optional metadata fields so the heartbeat
+    # can populate node_capabilities.{type,description,input_schema}
+    # and the server can resolve capability_details on claim/task-view.
+    if raw.get("type") is not None:
+        cap["type"] = raw["type"]
+    if raw.get("description") is not None:
+        cap["description"] = raw["description"]
+    if raw.get("input_schema") is not None:
+        cap["input_schema"] = raw["input_schema"]
     # Apply env-var overrides (may raise CapabilityValidationError).
     _apply_env_overrides(cap)
     # Re-validate handler after overrides: an override could clear it.
