@@ -7,7 +7,7 @@ well-defined environment, feeds the stage ``payload`` as JSON on stdin,
 captures stdout/stderr, enforces a timeout, and returns a result dict
 ready to be POSTed to the ``/complete`` endpoint.
 
-Contract (see NODE_CLI_SPEC.md §4):
+Contract (see NODE_CLI_SPEC.md §4 and docs/node/capabilities.md):
 
 * Environment variables set before execution::
 
@@ -19,13 +19,27 @@ Contract (see NODE_CLI_SPEC.md §4):
       RELAY_TOKEN_FILE    Path to runtime token file
 
 * Stdin:  stage ``payload`` as a JSON string.
-* Stdout: must be valid JSON — parsed and returned as the result dict.
+* Stdout: on exit 0 MUST be valid JSON — parsed and returned as the
+  result dict. Writing anything else to stdout on exit 0 is a contract
+  violation and is recorded as an ``error`` result on the stage.
 * Stderr: captured and included in the error result on non-zero exit.
+  On exit 0 it is attached to the result under ``_handler.stderr`` for
+  debugging but is never interpreted as the result.
 * Exit codes:
       0          -> stdout parsed as result dict
       non-zero   -> {"error": "handler exited with code N", "stderr": ...}
+  Handlers MUST exit non-zero whenever they could not produce a valid
+  result. Exit 0 with non-JSON or an ``error``-keyed payload completes
+  the stage silently and skips the scheduler's retry budget, losing the
+  failed work.
 * Timeout: terminates the subprocess and returns
   ``{"error": "handler timeout after Ns"}``.
+
+Retry behaviour (T-060): non-zero exit, timeout, invalid-JSON-on-exit-0
+and complete-endpoint failures all increment the daemon-side per-task
+failure counter (and the server-side ``retry_count`` via the released
+claim). Once ``max_retries`` (default 2 → 3 attempts total) is exceeded
+the scheduler marks the stage as ``failed`` permanently.
 """
 
 from __future__ import annotations

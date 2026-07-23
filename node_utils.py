@@ -29,6 +29,9 @@ DEFAULT_CONFIG = {
     "task_timeout": 600,
     "log_level": "INFO",
     "background_heartbeat": True,
+    # T-060: how many times the daemon retries a task before refusing
+    # to claim more stages for it (3 attempts total with the default of 2).
+    "max_retries": 2,
 }
 
 

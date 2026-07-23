@@ -120,6 +120,12 @@ def _effective_config() -> dict[str, Any]:
             cfg["claim_interval"] = int(ci)
         except ValueError:
             log.warning("ignoring invalid RELAY_CLAIM_INTERVAL=%r", ci)
+    mr = os.environ.get("RELAY_MAX_RETRIES")
+    if mr is not None:
+        try:
+            cfg["max_retries"] = int(mr)
+        except ValueError:
+            log.warning("ignoring invalid RELAY_MAX_RETRIES=%r", mr)
     return cfg
 
 
@@ -481,6 +487,11 @@ class Daemon:
         self._stop_event = threading.Event()
         self._hb_thread: threading.Thread | None = None
         self._started_at = datetime.now(timezone.utc)
+        # T-060: per-task failure counter so the daemon stops reclaiming
+        # stages for a task whose handler keeps failing (exit 0 with an
+        # ``error`` result or an exception). Mirrors the server-side
+        # retry_count guard so both sides converge on the same budget.
+        self._failed_tasks: dict[str, int] = {}
 
     # -- signal handling -----------------------------------------------------
 
@@ -515,6 +526,7 @@ class Daemon:
             "in_flight": dict(self.in_flight),
             "tasks_completed": self.tasks_completed,
             "tasks_failed": self.tasks_failed,
+            "failed_tasks": dict(self._failed_tasks),
             "error": error,
         }
         try:
@@ -583,16 +595,30 @@ class Daemon:
                 with self._lock:
                     if "error" in result:
                         self.tasks_failed += 1
+                        # T-060: count handler-reported errors so the
+                        # claim loop can stop reclaiming this task.
+                        if task_id is not None:
+                            self._failed_tasks[str(task_id)] = (
+                                self._failed_tasks.get(str(task_id), 0) + 1
+                            )
                     else:
                         self.tasks_completed += 1
                 log.info("completed stage %s", stage_id)
             except Exception as exc:  # noqa: BLE001
                 with self._lock:
                     self.tasks_failed += 1
+                    if task_id is not None:
+                        self._failed_tasks[str(task_id)] = (
+                            self._failed_tasks.get(str(task_id), 0) + 1
+                        )
                 log.error("failed to report result for stage %s: %s", stage_id, exc)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 self.tasks_failed += 1
+                if task_id is not None:
+                    self._failed_tasks[str(task_id)] = (
+                        self._failed_tasks.get(str(task_id), 0) + 1
+                    )
             log.error("stage %s execution failed: %s", stage_id, exc)
         finally:
             with self._lock:
@@ -600,6 +626,7 @@ class Daemon:
 
     def _claim_loop(self) -> None:
         interval = self.cfg["claim_interval"]
+        max_retries = int(self.cfg.get("max_retries", 2))
         while not self._stop_event.is_set():
             try:
                 caps = load_active_profile()
@@ -613,6 +640,21 @@ class Daemon:
                         continue
                     stage = self.client.claim(name)
                     if stage is None:
+                        continue
+                    # T-060: skip stages for tasks that have already
+                    # exceeded the retry budget on this daemon. The
+                    # claim will expire on the server side where
+                    # retry_count > max_retries fails the stage
+                    # permanently. This prevents the daemon from
+                    # burning CPU on a handler that keeps failing.
+                    task_id = str(stage.get("task_id") or "")
+                    with self._lock:
+                        failures = self._failed_tasks.get(task_id, 0)
+                    if task_id and failures >= max_retries:
+                        log.warning(
+                            "skipping stage %s for task %s — %d failures >= max_retries %d",
+                            stage.get("stage_id"), task_id, failures, max_retries,
+                        )
                         continue
                     # Run synchronously; the heartbeat thread keeps the
                     # node alive. max_parallel is enforced per-capability
@@ -744,6 +786,9 @@ def _daemon_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     print(f"heartbeat_status: {status_file.get('heartbeat_status', '-')}")
     print(f"tasks_completed: {status_file.get('tasks_completed', 0)}")
     print(f"tasks_failed: {status_file.get('tasks_failed', 0)}")
+    failed_tasks = status_file.get("failed_tasks", {})
+    if failed_tasks:
+        print(f"failed_tasks: {failed_tasks}")
     inflight = status_file.get("in_flight", {})
     if inflight:
         print(f"in_flight: {inflight}")
