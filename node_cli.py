@@ -22,6 +22,10 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
     Status:
         node-cli status
         node-cli reload
+
+    Updates (T-062):
+        node-cli update check     — fetch origin, compare local vs. upstream
+        node-cli update apply     — git pull + restart the node-cli service
 """
 
 from __future__ import annotations
@@ -59,8 +63,13 @@ from nodes.common.capability_loader import (
 )
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_utils import (
+    REPO_DIR,
+    SERVICE_UNIT,
     STATUS_PATH,
     TOKEN_PATH,
+    apply_update,
+    check_for_updates,
+    get_repo_info,
     load_config,
     load_json,
     load_meta,
@@ -1203,6 +1212,41 @@ def _cmd_docs(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# update (T-062): check for and apply git-based updates
+# ---------------------------------------------------------------------------
+
+def _cmd_update_check(args: argparse.Namespace) -> int:
+    """node-cli update check — fetch origin and compare local vs. upstream."""
+    _setup_logging(args.log_level)
+    info = check_for_updates()
+    print(f"Repo:           {REPO_DIR}")
+    print(f"Local commit:   {info.get('local_commit') or '-'}")
+    print(f"Local branch:   {info.get('local_branch') or '-'}")
+    print(f"Upstream:       {'yes' if info.get('has_upstream') else 'no (not configured)'}")
+    print(f"Remote commit:  {info.get('remote_commit') or '-'}")
+    behind = info.get("behind_count", 0)
+    if not info.get("has_upstream"):
+        print("Status:         no upstream configured — cannot determine updates")
+        return 1
+    if behind > 0:
+        print(f"Status:         {behind} commit{'s' if behind != 1 else ''} behind — update available")
+        return 0
+    print("Status:         up to date")
+    return 0
+
+
+def _cmd_update_apply(args: argparse.Namespace) -> int:
+    """node-cli update apply — git pull + restart the systemd service."""
+    _setup_logging(args.log_level)
+    result = apply_update(service_unit=args.service_unit)
+    print(f"Before: {result.get('before_commit') or '-'}")
+    print(f"After:  {result.get('after_commit') or '-'}")
+    print(f"Restarted: {'yes' if result.get('restarted') else 'no'}")
+    print(f"Result:  {result.get('message')}")
+    return 0 if result.get("success") else 1
+
+
+# ---------------------------------------------------------------------------
 # capabilities subcommands
 # ---------------------------------------------------------------------------
 
@@ -1601,6 +1645,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Document name (omit to list all available documents).",
     )
     p_docs.set_defaults(func=_cmd_docs)
+
+    # update (T-062)
+    p_update = sub.add_parser(
+        "update",
+        help="Check for and apply git-based node-cli updates.",
+    )
+    p_update_sub = p_update.add_subparsers(
+        dest="update_command", required=True, metavar="<action>"
+    )
+    p_update_check = p_update_sub.add_parser(
+        "check",
+        help="Fetch origin and report whether the local branch is behind.",
+    )
+    p_update_check.set_defaults(func=_cmd_update_check)
+
+    p_update_apply = p_update_sub.add_parser(
+        "apply",
+        help="Pull the latest commits and restart the node-cli service.",
+    )
+    p_update_apply.add_argument(
+        "--service-unit",
+        default=SERVICE_UNIT,
+        help=f"systemd user unit to restart (default: {SERVICE_UNIT}).",
+    )
+    p_update_apply.set_defaults(func=_cmd_update_apply)
 
     return parser
 

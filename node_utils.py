@@ -8,6 +8,8 @@ loading used by node_cli.py and its RelayClient.
 
 import json
 import logging
+import os
+import subprocess
 from pathlib import Path
 
 logger = logging.getLogger("node-utils")
@@ -80,3 +82,150 @@ def save_token(token: str):
 
 def save_meta(meta: dict):
     write_json_atomic(META_PATH, meta)
+
+
+# ---------------------------------------------------------------------------
+# T-062: git repo update helpers (update check / update apply)
+# ---------------------------------------------------------------------------
+
+# Location of the deployed repository on a node. Overridable via env var
+# RELAY_REPO_DIR so tests (or non-standard installs) can point it elsewhere.
+REPO_DIR = Path(os.environ.get("RELAY_REPO_DIR", str(Path.home() / "projects" / "ai-relay-service")))
+
+# systemd user unit name restarted by `update apply`. Overridable via env
+# RELAY_SERVICE_UNIT so tests can substitute a no-op service name.
+SERVICE_UNIT = os.environ.get("RELAY_SERVICE_UNIT", "ai-relay-node-cli.service")
+
+
+def _git(args: list[str], *, cwd: Path, timeout: float = 30.0) -> subprocess.CompletedProcess:
+    """Run a git command inside ``cwd`` and return the completed process.
+
+    Raises CalledProcessError on non-zero exit so callers can distinguish a
+    real failure from empty-but-valid output (e.g. ``git rev-list --count``
+    before any upstream exists).
+    """
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+
+
+def get_repo_info(repo_dir: Path | None = None) -> dict:
+    """Return a snapshot of the local repo vs. its configured upstream.
+
+    The dict contains:
+      - ``local_commit``:    SHA of HEAD (or None if not a git repo)
+      - ``local_branch``:    current branch name (or "" for detached HEAD)
+      - ``remote_commit``:   SHA of the upstream tracking branch (or None)
+      - ``behind_count``:    number of commits local is behind upstream
+                             (0 when no upstream is configured)
+      - ``has_upstream``:    bool whether an upstream is configured
+    """
+    repo = repo_dir or REPO_DIR
+    info: dict = {
+        "local_commit": None,
+        "local_branch": "",
+        "remote_commit": None,
+        "behind_count": 0,
+        "has_upstream": False,
+    }
+    if not (repo / ".git").exists() and not repo.exists():
+        return info
+    try:
+        info["local_commit"] = _git(["rev-parse", "HEAD"], cwd=repo).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return info
+    try:
+        info["local_branch"] = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo).stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        info["local_branch"] = ""
+    try:
+        info["remote_commit"] = _git(["rev-parse", "@{upstream}"], cwd=repo).stdout.strip()
+        info["has_upstream"] = bool(info["remote_commit"])
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        info["remote_commit"] = None
+        info["has_upstream"] = False
+    if info["has_upstream"]:
+        try:
+            count = _git(["rev-list", "--count", "HEAD..@{upstream}"], cwd=repo).stdout.strip()
+            info["behind_count"] = int(count) if count.isdigit() else 0
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+            info["behind_count"] = 0
+    return info
+
+
+def check_for_updates(repo_dir: Path | None = None) -> dict:
+    """Run ``git fetch origin`` and return ``get_repo_info()`` afterwards.
+
+    The fetch is best-effort: network failures are logged and the current
+    repo info is still returned so callers can display the last-known state.
+    """
+    repo = repo_dir or REPO_DIR
+    try:
+        _git(["fetch", "origin"], cwd=repo, timeout=60.0)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("git fetch failed: %s", exc)
+    return get_repo_info(repo_dir=repo)
+
+
+def apply_update(repo_dir: Path | None = None, *, service_unit: str | None = None) -> dict:
+    """Pull the latest commits and restart the node-cli systemd service.
+
+    Returns a dict with:
+      - ``success``:        bool
+      - ``message``:        human-readable summary
+      - ``before_commit``:  SHA before the pull (or None)
+      - ``after_commit``:   SHA after the pull (or None)
+      - ``behind_before``:  behind_count before the pull
+      - ``behind_after``:   behind_count after the pull
+      - ``restarted``:      bool whether the service restart was attempted
+    """
+    repo = repo_dir or REPO_DIR
+    unit = service_unit or SERVICE_UNIT
+    before = get_repo_info(repo_dir=repo)
+    result: dict = {
+        "success": False,
+        "message": "",
+        "before_commit": before.get("local_commit"),
+        "after_commit": None,
+        "behind_before": before.get("behind_count", 0),
+        "behind_after": 0,
+        "restarted": False,
+    }
+    try:
+        _git(["pull"], cwd=repo, timeout=120.0)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        result["message"] = f"git pull failed: {exc}"
+        return result
+    after = get_repo_info(repo_dir=repo)
+    result["after_commit"] = after.get("local_commit")
+    result["behind_after"] = after.get("behind_count", 0)
+    # Restart the systemd user service so the new code is loaded.
+    try:
+        subprocess.run(
+            ["systemctl", "--user", "restart", unit],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            check=True,
+        )
+        result["restarted"] = True
+        result["success"] = True
+        if result["before_commit"] == result["after_commit"]:
+            result["message"] = f"already up to date ({result['after_commit']}); service restarted"
+        else:
+            result["message"] = (
+                f"updated {result['before_commit']} -> {result['after_commit']}; "
+                f"service restarted"
+            )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        result["message"] = (
+            f"pull ok ({result['before_commit']} -> {result['after_commit']}) but "
+            f"service restart failed: {exc}"
+        )
+        result["success"] = False
+    return result
