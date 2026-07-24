@@ -63,7 +63,6 @@ CAPABILITY_SCHEMA: dict[str, Any] = {
                     "max_parallel": {"type": "integer", "minimum": 1},
                     "timeout": {"type": "integer", "minimum": 1},
                     "input_schema": {"type": "object"},
-                    "dashboard_page": {"type": "boolean"},
                 },
                 "additionalProperties": False,
             },
@@ -101,7 +100,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
         if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
             errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
         # Check for unknown keys
-        allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "dashboard_page"}
+        allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout"}
         extra = set(entry.keys()) - allowed
         if extra:
             errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
@@ -154,7 +153,6 @@ _NORMALIZED_KEYS = (
     "handler",
     "max_parallel",
     "timeout",
-    "dashboard_page",
 )
 
 
@@ -319,14 +317,6 @@ def _normalize_capability(
             capability=name,
         )
 
-    dashboard_page = raw.get("dashboard_page", False)
-    if not isinstance(dashboard_page, bool):
-        raise CapabilityValidationError(
-            "'dashboard_page' must be a boolean",
-            file=file,
-            capability=name,
-        )
-
     cap: dict[str, Any] = {
         "name": name,
         "version": version,
@@ -335,7 +325,6 @@ def _normalize_capability(
         "handler": handler if isinstance(handler, str) else "",
         "max_parallel": max_parallel,
         "timeout": timeout,
-        "dashboard_page": dashboard_page,
     }
     # T-053/T-056: forward optional metadata fields so the heartbeat
     # can populate node_capabilities.{type,description,input_schema}
