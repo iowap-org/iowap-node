@@ -294,16 +294,26 @@ class RelayClient:
             cap_status.append(entry)
 
         queue_depth = sum(in_flight.values())
+        body: dict[str, Any] = {
+            "node_id": self.meta["node_id"],
+            "status": "online",
+            "available": True,
+            "load": load,
+            "queue_depth": queue_depth,
+            "capabilities": cap_status,
+        }
+        # T-072: forward node-level node_name + description from the
+        # meta file (ai-relay-agent.json) so the server can store and
+        # surface them via `node list` / `node info`.
+        node_name = self.meta.get("node_name")
+        if node_name:
+            body["node_name"] = node_name
+        description = self.meta.get("description")
+        if description:
+            body["description"] = description
         r = self._post_with_retry(
             "/relay/v2/discovery/heartbeat",
-            {
-                "node_id": self.meta["node_id"],
-                "status": "online",
-                "available": True,
-                "load": load,
-                "queue_depth": queue_depth,
-                "capabilities": cap_status,
-            },
+            body,
         )
         r.raise_for_status()
         return r.json()
@@ -1468,6 +1478,10 @@ def _cmd_node_list(args: argparse.Namespace) -> int:
         print(f"      Endpoint: {endpoint}")
         print(f"      Last:     {last_seen}")
         print(f"      Caps:     {caps}")
+        # T-072: show node-level description (truncated for the list view).
+        desc = n.get("description", "")
+        if desc:
+            print(f"      Desc:     {desc[:60]}{'...' if len(desc) > 60 else ''}")
         print()
     return 0
 
@@ -1517,6 +1531,10 @@ def _cmd_node_info(args: argparse.Namespace) -> int:
     print(f"Queue Depth: {node.get('queue_depth', 0)}")
     print(f"Last Seen:   {node.get('last_seen', '?')}")
     print(f"Registered:  {node.get('registered_at', '?')}")
+    # T-072: show the full node-level description.
+    desc = node.get("description", "")
+    if desc:
+        print(f"Description: {desc}")
 
     caps_raw = node.get("capabilities", "")
     if isinstance(caps_raw, list) and caps_raw:
