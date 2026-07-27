@@ -1380,7 +1380,7 @@ def _cmd_capabilities_server(args: argparse.Namespace) -> int:
         nodes = c.get("nodes", [])
         status = "✅" if avail else "❌"
         node_names = ", ".join(
-            n.get("node_name", n.get("node_id", "?")) for n in nodes
+            f"{n.get('node_name', '?')} ({n.get('node_id', '?')})" for n in nodes
         ) if nodes else "(no nodes)"
         print(f"  {status} {name:20} v{ver:8}  [{node_names}]")
         desc = c.get("description")
@@ -1426,10 +1426,109 @@ def _cmd_capabilities_info(args: argparse.Namespace) -> int:
         print(f"\nNodes ({len(nodes)}):")
         for n in nodes:
             print(
-                f"  - {n.get('node_name', n.get('node_id', '?'))} "
+                f"  - {n.get('node_name', '?')} ({n.get('node_id', '?')}) "
                 f"(load={n.get('load', 0):.1f}, "
                 f"queue={n.get('queue_depth', 0)})"
             )
+    return 0
+
+
+def _cmd_node_list(args: argparse.Namespace) -> int:
+    """List all nodes registered on the relay server."""
+    _setup_logging(args.log_level)
+    meta = load_meta()
+    cfg = _effective_config()
+    client = RelayClient(meta, cfg)
+    try:
+        resp = client._get("/relay/v2/discovery/nodes")
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"failed to query nodes: {exc}", file=sys.stderr)
+        return 1
+
+    nodes = data.get("nodes", [])
+    if not nodes:
+        print("(no nodes registered on the server)")
+        return 0
+
+    print(f"Nodes ({len(nodes)} total):\n")
+    for n in nodes:
+        nid = n.get("node_id", "?")
+        name = n.get("node_name", "?")
+        status = n.get("status", "?")
+        avail = "✅" if n.get("available", False) else "❌"
+        endpoint = n.get("endpoint", "-")
+        role = n.get("role", "-")
+        caps_raw = n.get("capabilities", "")
+        caps = ", ".join(c.get("name", "?") for c in caps_raw) if isinstance(caps_raw, list) else str(caps_raw)[:60]
+        last_seen = n.get("last_seen", "?")[:19] if n.get("last_seen") else "?"
+        print(f"  {avail} {name:20}  ID={nid}")
+        print(f"      Status:   {status:10} Role: {role}")
+        print(f"      Endpoint: {endpoint}")
+        print(f"      Last:     {last_seen}")
+        print(f"      Caps:     {caps}")
+        print()
+    return 0
+
+
+def _cmd_node_info(args: argparse.Namespace) -> int:
+    """Show detailed info for a single node."""
+    _setup_logging(args.log_level)
+    meta = load_meta()
+    cfg = _effective_config()
+    client = RelayClient(meta, cfg)
+    try:
+        resp = client._get("/relay/v2/discovery/nodes?status=all")
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"failed to query nodes: {exc}", file=sys.stderr)
+        return 1
+
+    nodes = data.get("nodes", [])
+    # Some older server versions treat ``status=all`` as a literal status filter
+    # (returning an empty list). Fall back to the unfiltered endpoint so the
+    # command still works for offline/pending nodes.
+    if not nodes:
+        try:
+            resp = client._get("/relay/v2/discovery/nodes")
+            resp.raise_for_status()
+            nodes = resp.json().get("nodes", [])
+        except Exception:
+            pass
+    node = None
+    for n in nodes:
+        if n.get("node_id") == args.node_id:
+            node = n
+            break
+
+    if not node:
+        print(f"Node '{args.node_id}' not found.")
+        return 1
+
+    print(f"Node:        {node.get('node_name', '?')}")
+    print(f"ID:          {node.get('node_id', '?')}")
+    print(f"Status:      {node.get('status', '?')}")
+    print(f"Role:        {node.get('role', '-')}")
+    print(f"Available:   {'yes' if node.get('available', False) else 'no'}")
+    print(f"Endpoint:    {node.get('endpoint', '-')}")
+    print(f"Load:        {node.get('load', 0):.1f}")
+    print(f"Queue Depth: {node.get('queue_depth', 0)}")
+    print(f"Last Seen:   {node.get('last_seen', '?')}")
+    print(f"Registered:  {node.get('registered_at', '?')}")
+
+    caps_raw = node.get("capabilities", "")
+    if isinstance(caps_raw, list) and caps_raw:
+        print(f"\nCapabilities ({len(caps_raw)}):")
+        for c in caps_raw:
+            cname = c.get("name", "?")
+            cver = c.get("version", "?")
+            cavail = "✅" if c.get("available", False) else "❌"
+            print(f"  {cavail} {cname:25} v{cver}")
+    elif caps_raw:
+        print(f"\nCapabilities: {caps_raw}")
+
     return 0
 
 
@@ -1579,6 +1678,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_info.add_argument("name", help="Capability name to query.")
     p_info.set_defaults(func=_cmd_capabilities_info)
+
+    # node
+    p_node = sub.add_parser("node", help="Node operations (list, info).")
+    p_node_sub = p_node.add_subparsers(dest="node_command", required=True, metavar="<action>")
+
+    p_node_list = p_node_sub.add_parser("list", help="List all nodes registered on the relay server.")
+    p_node_list.set_defaults(func=_cmd_node_list)
+
+    p_node_info = p_node_sub.add_parser("info", help="Show detailed info for a single node.")
+    p_node_info.add_argument("node_id", help="Node ID to query.")
+    p_node_info.set_defaults(func=_cmd_node_info)
 
     # status / reload
     p_status = sub.add_parser("status", help="Print worker_status.json content.")
