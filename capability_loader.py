@@ -100,7 +100,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
         if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
             errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
         # Check for unknown keys
-        allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout"}
+        allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes"}
         extra = set(entry.keys()) - allowed
         if extra:
             errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
@@ -153,6 +153,7 @@ _NORMALIZED_KEYS = (
     "handler",
     "max_parallel",
     "timeout",
+    "routes",
 )
 
 
@@ -335,6 +336,9 @@ def _normalize_capability(
         cap["description"] = raw["description"]
     if raw.get("input_schema") is not None:
         cap["input_schema"] = raw["input_schema"]
+    # T-075: forward routes so the heartbeat can register dynamic API endpoints.
+    if raw.get("routes") is not None:
+        cap["routes"] = raw["routes"]
     # Apply env-var overrides (may raise CapabilityValidationError).
     _apply_env_overrides(cap)
     # Re-validate handler after overrides: an override could clear it.

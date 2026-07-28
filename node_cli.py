@@ -311,6 +311,16 @@ class RelayClient:
         description = self.meta.get("description")
         if description:
             body["description"] = description
+
+        # T-075: collect routes from all capabilities in the active profile.
+        routes: list[dict[str, Any]] = []
+        for cap in caps:
+            cap_routes = cap.get("routes")
+            if cap_routes and isinstance(cap_routes, list):
+                routes.extend(cap_routes)
+        if routes:
+            body["routes"] = routes
+
         r = self._post_with_retry(
             "/relay/v2/discovery/heartbeat",
             body,
