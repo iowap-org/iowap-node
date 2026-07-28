@@ -77,6 +77,17 @@ def _get_headers() -> dict[str, str]:
 app = FastAPI(title="SSN Proxy", version="1.0.0")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+# Register known capability pages so the ssn.capability-pages handler
+# finds them via its list action. Each page is a marker file under
+# ~/.ssn/pages/<capability>.html that the handler reads.
+_PAGES_DIR = Path.home() / ".ssn" / "pages"
+_PAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+# mflux page marker — the dashboard opens the Dynamic Route URL directly
+(_PAGES_DIR / "image.generate.mflux.html").write_text(
+    '<html><body>mflux capability page</body></html>'
+)
+
 
 # ---------------------------------------------------------------------------
 # Relay proxy endpoints (used by Dynamic Routes)
