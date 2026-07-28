@@ -31,6 +31,7 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
 import os
@@ -491,6 +492,26 @@ def _filename_from_response(response: httpx.Response, fallback: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# @with_client decorator — eliminates boilerplate from _cmd_* functions
+# ---------------------------------------------------------------------------
+
+def with_client(func):
+    """Decorator: injects (client, args) into _cmd_* functions.
+
+    Handles _setup_logging, load_meta, _effective_config, RelayClient
+    so every command doesn't repeat the same 4 lines.
+    """
+    @functools.wraps(func)
+    def wrapper(args):
+        _setup_logging(args.log_level)
+        meta = load_meta()
+        cfg = _effective_config()
+        client = RelayClient(meta, cfg)
+        return func(client, args)
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
 # Daemon
 # ---------------------------------------------------------------------------
 
@@ -863,29 +884,28 @@ def _daemon_internal() -> int:
 # One-shot subcommands
 # ---------------------------------------------------------------------------
 
-def _cmd_heartbeat(args: argparse.Namespace) -> int:
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
+@with_client
+def _cmd_heartbeat(client: RelayClient, args: argparse.Namespace) -> int:
     caps = load_active_profile()
     hb = client.heartbeat(caps, {})
+    if args.json:
+        print(json.dumps(hb, default=str))
+        return 0
     print(json.dumps(hb, indent=2, default=str))
     return 0
 
 
-def _cmd_claim(args: argparse.Namespace) -> int:
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
+@with_client
+def _cmd_claim(client: RelayClient, args: argparse.Namespace) -> int:
     stage = client.claim(args.capability)
     if stage is None:
         print(json.dumps({"claimed": False}))
         return 0
-    # T-053: surface resolved capability metadata when the server
-    # included capability_details on the claim response.
-    print(json.dumps({"claimed": True, "stage": stage}, indent=2, default=str))
+    result = {"claimed": True, "stage": stage}
+    if args.json:
+        print(json.dumps(result, default=str))
+        return 0
+    print(json.dumps(result, indent=2, default=str))
     cd = stage.get("capability_details")
     if cd:
         print()
@@ -899,11 +919,8 @@ def _cmd_claim(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_complete(args: argparse.Namespace) -> int:
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
+@with_client
+def _cmd_complete(client: RelayClient, args: argparse.Namespace) -> int:
     if not Path(args.result_file).exists():
         print(f"result file not found: {args.result_file}", file=sys.stderr)
         return 2
@@ -913,6 +930,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         print(f"result file is not valid JSON: {exc}", file=sys.stderr)
         return 2
     resp = client.complete(args.task, args.stage_id, result)
+    if args.json:
+        print(json.dumps(resp, default=str))
+        return 0
     print(json.dumps(resp, indent=2, default=str))
     return 0
 
@@ -934,11 +954,8 @@ def _parse_stage_arg(stage: str) -> tuple[str, dict[str, Any]]:
     return cap, payload
 
 
-def _cmd_task_submit(args: argparse.Namespace) -> int:
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
+@with_client
+def _cmd_task_submit(client: RelayClient, args: argparse.Namespace) -> int:
     cap, payload = _parse_stage_arg(args.stage)
     resp = client.submit_simple_task(
         cap,
@@ -947,29 +964,29 @@ def _cmd_task_submit(args: argparse.Namespace) -> int:
         priority=args.priority,
         owner_node_id=args.owner,
     )
+    if args.json:
+        print(json.dumps(resp, default=str))
+        return 0
     print(json.dumps(resp, indent=2, default=str))
     return 0
 
 
-def _cmd_task_result(args: argparse.Namespace) -> int:
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
+@with_client
+def _cmd_task_result(client: RelayClient, args: argparse.Namespace) -> int:
     data = client.get_task(args.task_id)
     if "error" in data:
         print(f"Task {args.task_id}: {data['error']}", file=sys.stderr)
         return 1
+    if args.json:
+        print(json.dumps(data, default=str))
+        return 0
     _print_task_result(data)
     return 0
 
 
-def _cmd_task_note(args: argparse.Namespace) -> int:
+@with_client
+def _cmd_task_note(client: RelayClient, args: argparse.Namespace) -> int:
     """node-cli task note <task_id> <message> — append a note to a task."""
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
     try:
         data = client.add_task_note(args.task_id, args.message)
     except httpx.HTTPStatusError as exc:
@@ -978,16 +995,16 @@ def _cmd_task_note(args: argparse.Namespace) -> int:
             return 1
         print(f"Error: {exc.response.status_code} {exc.response.text}", file=sys.stderr)
         return 1
+    if args.json:
+        print(json.dumps(data, default=str))
+        return 0
     print(f"✅ Note added to task {data.get('task_id', args.task_id)}")
     print(f"   {data.get('message', '')} ({data.get('created_at', '')})")
     return 0
 
 
-def _cmd_task_wait(args: argparse.Namespace) -> int:
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
+@with_client
+def _cmd_task_wait(client: RelayClient, args: argparse.Namespace) -> int:
     task_id = args.task_id
     interval = max(1, args.interval)
 
@@ -1011,6 +1028,9 @@ def _cmd_task_wait(args: argparse.Namespace) -> int:
             last_note_count = len(notes)
 
         if status in ("completed", "failed", "timed_out"):
+            if args.json:
+                print(json.dumps(data, default=str))
+                return 0 if status == "completed" else 1
             print(f"\n✅ Task {task_id} — {status}\n")
             _print_task_result(data)
             return 0 if status == "completed" else 1
@@ -1082,22 +1102,19 @@ def _print_task_result(data: dict[str, Any]) -> None:
             print(f"    💬 [{n.get('node_id', '?')}] {n.get('message', '')} ({n.get('created_at', '?')})")
 
 
-def _cmd_artifact_download(args: argparse.Namespace) -> int:
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
+@with_client
+def _cmd_artifact_download(client: RelayClient, args: argparse.Namespace) -> int:
     target = client.download_artifact(args.artifact_id, output_path=args.output)
     size = target.stat().st_size if target.exists() else 0
+    if args.json:
+        print(json.dumps({"path": str(target), "size_bytes": size}, default=str))
+        return 0
     print(f"Downloaded {size} bytes to {target}")
     return 0
 
 
-def _cmd_artifact_upload(args: argparse.Namespace) -> int:
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
+@with_client
+def _cmd_artifact_upload(client: RelayClient, args: argparse.Namespace) -> int:
     file_path = Path(args.file)
     if not file_path.exists():
         print(f"file not found: {file_path}", file=sys.stderr)
@@ -1108,6 +1125,9 @@ def _cmd_artifact_upload(args: argparse.Namespace) -> int:
         task_id=args.task_id,
         stage_id=args.stage_id,
     )
+    if args.json:
+        print(json.dumps(result, default=str))
+        return 0
     print(json.dumps(result, indent=2, default=str))
     return 0
 
@@ -1163,16 +1183,13 @@ def _html_to_text(html: str) -> str:
     return html.strip()
 
 
-def _cmd_docs(args: argparse.Namespace) -> int:
+@with_client
+def _cmd_docs(client: RelayClient, args: argparse.Namespace) -> int:
     """node-cli docs [<name>] — read relay documentation from the server.
 
     Without an argument, lists all public documents (name + URL).
     With a name, fetches the document and prints it as readable text.
     """
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
     try:
         if args.name:
             resp = client._get_with_retry(f"/relay/v2/docs/{args.name}")
@@ -1193,6 +1210,9 @@ def _cmd_docs(args: argparse.Namespace) -> int:
                         if text:
                             print(text)
                             return 0
+                    if args.json:
+                        print(json.dumps(data, default=str))
+                        return 0
                     print(json.dumps(data, indent=2, default=str))
                 except (json.JSONDecodeError, ValueError):
                     print(body)
@@ -1203,6 +1223,9 @@ def _cmd_docs(args: argparse.Namespace) -> int:
         resp.raise_for_status()
         data = resp.json()
         docs = data if isinstance(data, list) else data.get("docs", [])
+        if args.json:
+            print(json.dumps(docs, default=str))
+            return 0
         print(f"Relay documentation ({len(docs)} pages):\n")
         for doc in docs:
             name = doc.get("name") or doc.get("title", "?")
@@ -1230,6 +1253,9 @@ def _cmd_update_check(args: argparse.Namespace) -> int:
     """node-cli update check — fetch origin and compare local vs. upstream."""
     _setup_logging(args.log_level)
     info = check_for_updates()
+    if args.json:
+        print(json.dumps(info, default=str))
+        return 0
     print(f"Repo:           {REPO_DIR}")
     print(f"Local commit:   {info.get('local_commit') or '-'}")
     print(f"Local branch:   {info.get('local_branch') or '-'}")
@@ -1250,6 +1276,9 @@ def _cmd_update_apply(args: argparse.Namespace) -> int:
     """node-cli update apply — git pull + restart the systemd service."""
     _setup_logging(args.log_level)
     result = apply_update(service_unit=args.service_unit)
+    if args.json:
+        print(json.dumps(result, default=str))
+        return 0 if result.get("success") else 1
     print(f"Before: {result.get('before_commit') or '-'}")
     print(f"After:  {result.get('after_commit') or '-'}")
     print(f"Restarted: {'yes' if result.get('restarted') else 'no'}")
@@ -1373,12 +1402,9 @@ def _cmd_capabilities_current(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
-def _cmd_capabilities_server(args: argparse.Namespace) -> int:
+@with_client
+def _cmd_capabilities_server(client: RelayClient, args: argparse.Namespace) -> int:
     """Query capabilities from the relay server (all registered nodes)."""
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
     try:
         resp = client._get("/relay/v2/discovery/capabilities")
         resp.raise_for_status()
@@ -1388,6 +1414,9 @@ def _cmd_capabilities_server(args: argparse.Namespace) -> int:
         return 1
 
     caps = data.get("capabilities", data) if isinstance(data, dict) else data
+    if args.json:
+        print(json.dumps(caps, default=str))
+        return 0
     if not caps:
         print("(no capabilities registered on the server)")
         return 0
@@ -1413,12 +1442,9 @@ def _cmd_capabilities_server(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_capabilities_info(args: argparse.Namespace) -> int:
+@with_client
+def _cmd_capabilities_info(client: RelayClient, args: argparse.Namespace) -> int:
     """Show detailed info for a single capability registered on the relay."""
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
     try:
         resp = client._get(f"/relay/v2/discovery/capabilities/{args.name}")
         if resp.status_code == 404:
@@ -1430,6 +1456,9 @@ def _cmd_capabilities_info(args: argparse.Namespace) -> int:
         print(f"failed to query capability: {exc}", file=sys.stderr)
         return 1
 
+    if args.json:
+        print(json.dumps(cap, default=str))
+        return 0
     print(f"Name:        {cap.get('name', '?')}")
     print(f"Type:        {cap.get('type', '-')}")
     print(f"Version:     {cap.get('version', '?')}")
@@ -1453,12 +1482,9 @@ def _cmd_capabilities_info(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_node_list(args: argparse.Namespace) -> int:
+@with_client
+def _cmd_node_list(client: RelayClient, args: argparse.Namespace) -> int:
     """List all nodes registered on the relay server."""
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
     try:
         resp = client._get("/relay/v2/discovery/nodes")
         resp.raise_for_status()
@@ -1468,6 +1494,9 @@ def _cmd_node_list(args: argparse.Namespace) -> int:
         return 1
 
     nodes = data.get("nodes", [])
+    if args.json:
+        print(json.dumps(nodes, default=str))
+        return 0
     if not nodes:
         print("(no nodes registered on the server)")
         return 0
@@ -1496,12 +1525,9 @@ def _cmd_node_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_node_info(args: argparse.Namespace) -> int:
+@with_client
+def _cmd_node_info(client: RelayClient, args: argparse.Namespace) -> int:
     """Show detailed info for a single node."""
-    _setup_logging(args.log_level)
-    meta = load_meta()
-    cfg = _effective_config()
-    client = RelayClient(meta, cfg)
     try:
         resp = client._get("/relay/v2/discovery/nodes?status=all")
         resp.raise_for_status()
@@ -1531,6 +1557,9 @@ def _cmd_node_info(args: argparse.Namespace) -> int:
         print(f"Node '{args.node_id}' not found.")
         return 1
 
+    if args.json:
+        print(json.dumps(node, default=str))
+        return 0
     print(f"Node:        {node.get('node_name', '?')}")
     print(f"ID:          {node.get('node_id', '?')}")
     print(f"Status:      {node.get('status', '?')}")
@@ -1604,6 +1633,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--log-level",
         default=None,
         help="Log level (DEBUG/INFO/WARNING/ERROR). Default: env RELAY_LOG_LEVEL or INFO.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output raw JSON instead of formatted text (for scripting).",
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
 
