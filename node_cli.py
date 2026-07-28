@@ -500,10 +500,13 @@ def with_client(func):
 
     Handles _setup_logging, load_meta, _effective_config, RelayClient
     so every command doesn't repeat the same 4 lines.
+    When --json is set, forces log level to ERROR so INFO/WARNING
+    messages don't pollute the JSON output on stdout.
     """
     @functools.wraps(func)
     def wrapper(args):
-        _setup_logging(args.log_level)
+        log_level = "ERROR" if getattr(args, "json", False) else args.log_level
+        _setup_logging(log_level)
         meta = load_meta()
         cfg = _effective_config()
         client = RelayClient(meta, cfg)
@@ -1251,7 +1254,7 @@ def _cmd_docs(client: RelayClient, args: argparse.Namespace) -> int:
 
 def _cmd_update_check(args: argparse.Namespace) -> int:
     """node-cli update check — fetch origin and compare local vs. upstream."""
-    _setup_logging(args.log_level)
+    _setup_logging("ERROR" if args.json else args.log_level)
     info = check_for_updates()
     if args.json:
         print(json.dumps(info, default=str))
@@ -1274,7 +1277,7 @@ def _cmd_update_check(args: argparse.Namespace) -> int:
 
 def _cmd_update_apply(args: argparse.Namespace) -> int:
     """node-cli update apply — git pull + restart the systemd service."""
-    _setup_logging(args.log_level)
+    _setup_logging("ERROR" if args.json else args.log_level)
     result = apply_update(service_unit=args.service_unit)
     if args.json:
         print(json.dumps(result, default=str))
