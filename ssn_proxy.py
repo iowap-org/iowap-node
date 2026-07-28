@@ -179,7 +179,7 @@ MFLUX_HTML = """<!DOCTYPE html>
 
 <div class="layout">
   <div class="form-col">
-    <form hx-post="/mflux/generate" hx-target="#result" hx-indicator="#spinner">
+    <form hx-post="mflux/generate" hx-target="#result" hx-indicator="#spinner">
       <div class="form-group">
         <label for="prompt">Prompt</label>
         <textarea id="prompt" name="prompt" placeholder="Beschreibe das Bild..." required></textarea>
@@ -255,11 +255,11 @@ async def mflux_generate(prompt: str = Form(...), format: str = Form("quadrat"))
                         headers=_get_headers(),
                     )
                     if img_resp.status_code == 200:
-                        cache_path = CACHE_DIR / f"{artifact_id}.png"
-                        cache_path.write_bytes(img_resp.content)
+                        import base64
+                        img_b64 = base64.b64encode(img_resp.content).decode()
                         return HTMLResponse(
                             f'<div class="status status-ok">✅ Bild generiert</div>'
-                            f'<img src="/mflux/bilder/{artifact_id}.png" alt="Generiertes Bild">'
+                            f'<img src="data:image/png;base64,{img_b64}" alt="Generiertes Bild" style="max-width:100%;max-height:70vh;border-radius:.5rem">'
                             f'<div class="meta">Prompt: {prompt}</div>'
                         )
                 return HTMLResponse(f'<div class="status status-ok">✅ Task abgeschlossen, aber kein Bild gefunden</div>')
