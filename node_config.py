@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Capability profile loader for the node-cli daemon.
+"""Node configuration & capability profile loader for the node-cli daemon.
 
 This module is responsible for loading, validating, publishing, and
 diffing capability profiles stored as YAML files under
-``~/.relay/capabilities.d/``. The daemon only ever reads the *active*
-profile (``~/.relay/capabilities.active.yaml``); working profiles in
-``capabilities.d/`` are never touched by the daemon at runtime.
+``~/.relay/profiles.d/``. The daemon only ever reads the *active*
+profile (``~/.relay/node.yaml``); working profiles in ``profiles.d/``
+are never touched by the daemon at runtime.
+
+The active file is also the home of node-level configuration: the
+optional ``status`` field (operator-requested busy/idle state, managed
+by ``node-cli node busy``/``idle``/``clear-status``) and the optional
+``node_name``/``description`` overrides. The ``capabilities`` array
+itself is optional — a node may publish a profile that carries only
+node-level configuration.
 
 A *profile* is a YAML document of the form::
 
@@ -24,6 +31,12 @@ The loader normalizes each capability into a dict with the keys
 optional fields. Environment-variable overrides
 (``RELAY_CAPABILITY_<NAME>_HANDLER`` / ``..._MAX_PARALLEL``) are applied
 on read so that operators can patch a profile without editing the YAML.
+
+For backward compatibility a one-shot migration (``_migrate_old_paths``)
+runs at import time: legacy ``capabilities.active.yaml`` /
+``capabilities.active.profile`` / ``capabilities.d/`` artifacts are
+copied to their new names if the new files do not yet exist. The old
+files are left in place so a rolling deploy can fall back.
 """
 
 from __future__ import annotations
@@ -45,8 +58,10 @@ import yaml
 CAPABILITY_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
-    "required": ["capabilities"],
     "properties": {
+        "status": {"type": "string", "enum": ["busy", "idle", "online"]},
+        "node_name": {"type": "string"},
+        "description": {"type": "string"},
         "capabilities": {
             "type": "array",
             "items": {
@@ -68,7 +83,7 @@ CAPABILITY_SCHEMA: dict[str, Any] = {
             },
         }
     },
-    "additionalProperties": False,
+    "additionalProperties": True,
 }
 
 
@@ -85,42 +100,43 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
     if not isinstance(data, dict):
         errors.append("profile root must be a mapping")
         return errors
-    if "capabilities" not in data:
-        errors.append("'capabilities' key is required")
-        return errors
-    if not isinstance(data["capabilities"], list):
-        errors.append("'capabilities' must be a list")
-        return errors
-
-    for i, entry in enumerate(data["capabilities"]):
-        prefix = f"capabilities[{i}]"
-        if not isinstance(entry, dict):
-            errors.append(f"{prefix}: must be a mapping, got {type(entry).__name__}")
-            continue
-        if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
-            errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
-        # Check for unknown keys
-        allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes"}
-        extra = set(entry.keys()) - allowed
-        if extra:
-            errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
-        # Type checks for optional fields
-        for key, expected_type in [
-            ("version", str),
-            ("auto_publish", bool),
-            ("claimable", bool),
-            ("handler", str),
-            ("max_parallel", int),
-            ("timeout", int),
-        ]:
-            val = entry.get(key)
-            if val is not None and not isinstance(val, expected_type):
-                errors.append(f"{prefix}.{key}: expected {expected_type.__name__}, got {type(val).__name__}")
-        # Range checks
-        for key in ("max_parallel", "timeout"):
-            val = entry.get(key)
-            if isinstance(val, int) and val < 1:
-                errors.append(f"{prefix}.{key}: must be >= 1, got {val}")
+    # 'capabilities' is optional — a profile may carry only node-level
+    # configuration (status, node_name, description). When present it
+    # must be a list.
+    caps = data.get("capabilities")
+    if caps is not None:
+        if not isinstance(caps, list):
+            errors.append("'capabilities' must be a list")
+            return errors
+        for i, entry in enumerate(caps):
+            prefix = f"capabilities[{i}]"
+            if not isinstance(entry, dict):
+                errors.append(f"{prefix}: must be a mapping, got {type(entry).__name__}")
+                continue
+            if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
+                errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
+            # Check for unknown keys
+            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes"}
+            extra = set(entry.keys()) - allowed
+            if extra:
+                errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
+            # Type checks for optional fields
+            for key, expected_type in [
+                ("version", str),
+                ("auto_publish", bool),
+                ("claimable", bool),
+                ("handler", str),
+                ("max_parallel", int),
+                ("timeout", int),
+            ]:
+                val = entry.get(key)
+                if val is not None and not isinstance(val, expected_type):
+                    errors.append(f"{prefix}.{key}: expected {expected_type.__name__}, got {type(val).__name__}")
+            # Range checks
+            for key in ("max_parallel", "timeout"):
+                val = entry.get(key)
+                if isinstance(val, int) and val < 1:
+                    errors.append(f"{prefix}.{key}: must be >= 1, got {val}")
 
     return errors
 
@@ -130,10 +146,47 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
 
 BASE_DIR = Path.home() / ".relay"
 PROFILES_DIR = Path(
-    os.environ.get("RELAY_PROFILES_DIR", str(BASE_DIR / "capabilities.d"))
+    os.environ.get("RELAY_PROFILES_DIR", str(BASE_DIR / "profiles.d"))
 )
-ACTIVE_PATH = BASE_DIR / "capabilities.active.yaml"
-ACTIVE_PROFILE_NAME_PATH = BASE_DIR / "capabilities.active.profile"
+ACTIVE_PATH = BASE_DIR / "node.yaml"
+ACTIVE_PROFILE_NAME_PATH = BASE_DIR / "node.profile"
+
+
+def _migrate_old_paths() -> None:
+    """Migrate old capability-named files to new node-named files.
+
+    Called once at module import time. Detects legacy paths and copies
+    them to the new locations. Old files are NOT deleted — they are
+    left in place for backward compat during a rolling deploy.
+    """
+    try:
+        BASE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    old_active = BASE_DIR / "capabilities.active.yaml"
+    new_active = ACTIVE_PATH
+    if old_active.exists() and not new_active.exists():
+        try:
+            shutil.copy2(old_active, new_active)
+        except OSError:
+            pass
+    old_profile = BASE_DIR / "capabilities.active.profile"
+    new_profile = ACTIVE_PROFILE_NAME_PATH
+    if old_profile.exists() and not new_profile.exists():
+        try:
+            shutil.copy2(old_profile, new_profile)
+        except OSError:
+            pass
+    old_profiles_dir = BASE_DIR / "capabilities.d"
+    new_profiles_dir = PROFILES_DIR
+    if old_profiles_dir.exists() and not new_profiles_dir.exists():
+        try:
+            shutil.copytree(old_profiles_dir, new_profiles_dir, dirs_exist_ok=True)
+        except OSError:
+            pass
+
+
+_migrate_old_paths()
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -395,7 +448,7 @@ def validate_profile(
                 "schema validation failed:\n  " + "\n  ".join(schema_errors)
             )
         if "capabilities" not in source:
-            raise CapabilityValidationError("'capabilities' key missing")
+            return []
         return _normalize_caps_list(source["capabilities"], file=None)
 
     path = Path(source)
@@ -422,7 +475,7 @@ def validate_profile(
         parsed = {}
     if not isinstance(parsed, dict):
         raise CapabilityValidationError(
-            "profile root must be a mapping with a 'capabilities' key",
+            "profile root must be a mapping",
             file=file_label,
         )
 
@@ -435,10 +488,7 @@ def validate_profile(
         )
 
     if "capabilities" not in parsed:
-        raise CapabilityValidationError(
-            "'capabilities' key missing or not a list",
-            file=file_label,
-        )
+        return []
     return _normalize_caps_list(parsed["capabilities"], file=file_label)
 
 
@@ -463,7 +513,7 @@ def list_profiles() -> list[Path]:
 
 
 def profile_path(name: str) -> Path:
-    """Resolve a profile name to a path inside ``capabilities.d/``.
+    """Resolve a profile name to a path inside ``profiles.d/``.
 
     Accepts either a bare name (``default``) or a full filename
     (``default.yaml``). Does not check existence.
@@ -488,7 +538,7 @@ def write_current_profile_name(name: str) -> None:
 def publish_profile(name: str) -> Path:
     """Validate a working profile then atomically copy it to the active file.
 
-    Also records the profile name in ``capabilities.active.profile``.
+    Also records the profile name in ``node.profile``.
     Returns the path of the active file. Never touches the active file
     if validation fails.
     """
@@ -590,6 +640,70 @@ _active_cache = ActiveProfileCache()
 def load_active_profile() -> list[dict[str, Any]]:
     """Convenience accessor for the module-level active profile cache."""
     return _active_cache.get()
+
+
+def load_active_status() -> str | None:
+    """Read the ``status`` field from the active YAML profile.
+
+    Returns ``None`` when no explicit status is set (the node defaults
+    to ``online``). The value is read fresh from disk every call so
+    ``node-cli node busy`` / ``idle`` (which write directly into the
+    active YAML) are picked up on the next heartbeat without a cache
+    invalidation.
+    """
+    path = ACTIVE_PATH
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+        parsed = yaml.safe_load(raw)
+        if isinstance(parsed, dict):
+            val = parsed.get("status")
+            if isinstance(val, str) and val in ("busy", "idle", "online"):
+                return val
+    except (OSError, yaml.YAMLError):
+        pass
+    return None
+
+
+_STATUS_RE = re.compile(r'^(status:\s*).*', re.MULTILINE)
+
+
+def write_active_status(status: str | None) -> None:
+    """Write (or remove) the ``status`` field in the active YAML profile.
+
+    When ``status`` is ``None`` the field is removed from the YAML so
+    the node returns to its default ``online`` state. The file is
+    rewritten in place via temp + rename, preserving the rest of the
+    document verbatim (the YAML is edited as text so comments, key
+    ordering and formatting are kept intact). If the active profile
+    does not exist yet, this is a no-op.
+    """
+    path = ACTIVE_PATH
+    if not path.exists():
+        return
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if status is None:
+            # Remove the status: line.
+            new_text = _STATUS_RE.sub("", raw)
+            # Clean up double blank lines from removal.
+            new_text = re.sub(r'\n{3,}', '\n\n', new_text)
+        else:
+            if _STATUS_RE.search(raw):
+                new_text = _STATUS_RE.sub(rf"\1{status}", raw)
+            else:
+                # Insert after the first line (usually node_name or the
+                # capabilities: key) so the field sits at the top of the
+                # document.
+                first_newline = raw.index("\n") + 1 if "\n" in raw else len(raw)
+                new_text = raw[:first_newline] + f"status: {status}\n" + raw[first_newline:]
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, yaml.YAMLError) as exc:
+        log = __import__("logging").getLogger("relay.node_config")
+        log.warning("could not write status to YAML: %s", exc)
 
 
 def invalidate_active_cache() -> None:

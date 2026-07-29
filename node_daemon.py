@@ -39,7 +39,7 @@ from typing import Any
 
 import httpx
 
-from nodes.common.capability_loader import (
+from nodes.common.node_config import (
     current_profile_name,
     invalidate_active_cache,
     load_active_profile,

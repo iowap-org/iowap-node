@@ -13,7 +13,8 @@ utility functions (`node_utils.py`) for AI Relay worker nodes.
 |------|---------|
 | `node_cli.py` | CLI + daemon: heartbeat, claim, execute, complete. The recommended worker implementation. |
 | `node_utils.py` | Shared utility functions (config/meta/token file I/O). Used by `RelayClient`. |
-| `capability_loader.py` | YAML profile loading, validation, and publishing. |
+| `node_config.py` | YAML profile loading, validation, publishing, and node-level config (status, node_name). |
+| `capability.py` | Capability data model (CapabilitySet, input schema, diff). |
 | `handler_runner.py` | Subprocess execution for capability handlers. |
 
 ## Quick start

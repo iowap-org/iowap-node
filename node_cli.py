@@ -51,7 +51,7 @@ from typing import Any, Optional
 
 import httpx
 
-from nodes.common.capability_loader import (
+from nodes.common.node_config import (
     ACTIVE_PATH,
     BASE_DIR,
     PROFILES_DIR,
@@ -61,10 +61,12 @@ from nodes.common.capability_loader import (
     invalidate_active_cache,
     list_profiles,
     load_active_profile,
+    load_active_status,
     load_profile,
     profile_path,
     publish_profile,
     validate_profile,
+    write_active_status,
 )
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_utils import (
@@ -318,13 +320,13 @@ class RelayClient:
         if description:
             body["description"] = description
 
-        # T-081: forward the node's requested status (busy/idle) when
-        # the operator set it via `node-cli node busy`/`idle`. The
-        # value is written into the meta file by those subcommands
-        # and persists until explicitly changed again. When no
-        # explicit status is set we send "online" so the server can
-        # transition the node from approved/offline to online.
-        requested_status = self.meta.get("status")
+        # T-081: forward the node's requested status (busy/idle) from the
+        # active YAML profile. The value is written into the YAML by
+        # `node-cli node busy`/`idle` and persists until explicitly
+        # changed. When no explicit status is set we send "online" so
+        # the server can transition the node from approved/offline to
+        # online.
+        requested_status = load_active_status()
         if requested_status:
             body["status"] = requested_status
         # T-081: forward the per-node load cap so the server can run
@@ -1614,30 +1616,24 @@ def _cmd_node_info(client: RelayClient, args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# node busy / idle / status (T-084)
+# node busy / idle / status (T-084) — status stored in active YAML profile
 # ---------------------------------------------------------------------------
-
-_NODE_STATUS_PATH = BASE_DIR / "node_status.json"
 
 
 def _save_requested_status(status: str) -> None:
-    """Persist the operator-requested node status into the meta file.
+    """Persist the operator-requested node status into the active YAML profile.
 
-    The heartbeat loop reads ``meta["status"]`` and forwards it to the
-    server on the next heartbeat, where the transition is validated
-    against the central registry. The meta file is the only source
-    for the daemon so the requested status survives restarts.
+    The heartbeat loop reads the YAML ``status`` field and forwards it
+    to the server on the next heartbeat, where the transition is validated
+    against the central registry. The YAML file is the only source for the
+    daemon so the requested status survives restarts.
     """
-    meta = load_meta()
-    meta["status"] = status
-    save_meta(meta)
+    write_active_status(status)
 
 
 def _clear_requested_status() -> None:
     """Remove the operator-requested status so the node returns to auto."""
-    meta = load_meta()
-    meta.pop("status", None)
-    save_meta(meta)
+    write_active_status(None)
 
 
 @with_client
@@ -1704,12 +1700,12 @@ def _cmd_node_clear_status(client: RelayClient, args: argparse.Namespace) -> int
 def _cmd_node_status(client: RelayClient, args: argparse.Namespace) -> int:
     """node-cli node status — show the local + server-side node status.
 
-    Reports the operator-requested status persisted in the meta file
+    Reports the operator-requested status from the active YAML profile
     (if any) and queries the server for the authoritative current
     status of this node.
     """
     meta = load_meta()
-    requested = meta.get("status")
+    requested = load_active_status()
     server_status: Optional[str] = None
     server_load = None
     server_queue = None
@@ -1867,7 +1863,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="capabilities_command", required=True, metavar="<action>"
     )
 
-    p_list = p_caps_sub.add_parser("list", help="List profiles in capabilities.d/.")
+    p_list = p_caps_sub.add_parser("list", help="List profiles in profiles.d/.")
     p_list.set_defaults(func=_cmd_capabilities_list)
 
     p_validate = p_caps_sub.add_parser("validate", help="Validate a profile (default: active).")

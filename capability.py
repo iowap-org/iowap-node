@@ -14,8 +14,8 @@ This model is used for:
 The server has its own copy in src/relay_server/models/capability.py for
 inbound validation. The two models are intentionally separate: the node
 owns the definition, the server only mediates and routes.
-The capability_loader.py bridges this gap by loading YAML and mapping to
-the server-expected JSON schema.
+The ``node_config.py`` module bridges this gap by loading YAML and
+mapping to the server-expected JSON schema.
 
 Provided API:
 
