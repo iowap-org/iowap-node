@@ -22,6 +22,10 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
     Status:
         node-cli status
         node-cli reload
+        node-cli node busy     — mark this node as busy (T-084)
+        node-cli node idle     — mark this node as idle (T-084)
+        node-cli node status   — show local + server node status (T-084)
+        node-cli node clear-status — restore automatic status handling (T-084)
 
     Updates (T-062):
         node-cli update check     — fetch origin, compare local vs. upstream
@@ -75,6 +79,7 @@ from nodes.common.node_utils import (
     load_json,
     load_meta,
     load_token,
+    save_meta,
     save_token,
     write_json_atomic,
 )
@@ -312,6 +317,22 @@ class RelayClient:
         description = self.meta.get("description")
         if description:
             body["description"] = description
+
+        # T-081: forward the node's requested status (busy/idle) when
+        # the operator set it via `node-cli node busy`/`idle`. The
+        # value is written into the meta file by those subcommands
+        # and persists until explicitly changed again. When no
+        # explicit status is set we send "online" so the server can
+        # transition the node from approved/offline to online.
+        requested_status = self.meta.get("status")
+        if requested_status:
+            body["status"] = requested_status
+        # T-081: forward the per-node load cap so the server can run
+        # its auto-busy logic against the operator-configured ceiling
+        # rather than a server-wide default.
+        load_cap = self.cfg.get("load_cap")
+        if load_cap is not None:
+            body["load_cap"] = float(load_cap)
 
         # T-075: collect routes from all capabilities in the active profile.
         routes: list[dict[str, Any]] = []
@@ -1593,6 +1614,141 @@ def _cmd_node_info(client: RelayClient, args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# node busy / idle / status (T-084)
+# ---------------------------------------------------------------------------
+
+_NODE_STATUS_PATH = BASE_DIR / "node_status.json"
+
+
+def _save_requested_status(status: str) -> None:
+    """Persist the operator-requested node status into the meta file.
+
+    The heartbeat loop reads ``meta["status"]`` and forwards it to the
+    server on the next heartbeat, where the transition is validated
+    against the central registry. The meta file is the only source
+    for the daemon so the requested status survives restarts.
+    """
+    meta = load_meta()
+    meta["status"] = status
+    save_meta(meta)
+
+
+def _clear_requested_status() -> None:
+    """Remove the operator-requested status so the node returns to auto."""
+    meta = load_meta()
+    meta.pop("status", None)
+    save_meta(meta)
+
+
+@with_client
+def _cmd_node_busy(client: RelayClient, args: argparse.Namespace) -> int:
+    """node-cli node busy — mark this node as busy.
+
+    Persists ``status: busy`` into the meta file so the next heartbeat
+    forwards it to the server. The server validates the transition
+    (online/idle → busy) via the central status registry; an invalid
+    transition is silently ignored on the server side.
+
+    With ``--once`` the daemon is not affected and a single heartbeat
+    carrying the new status is sent immediately.
+    """
+    _save_requested_status("busy")
+    if args.once:
+        caps = load_active_profile()
+        client.heartbeat(caps, {})
+    if args.json:
+        print(json.dumps({"status": "busy", "persisted": True, "once": bool(args.once)}))
+        return 0
+    print("✅ Node marked busy — next heartbeat will forward the new status.")
+    if not args.once:
+        print("   Send SIGHUP or restart the daemon to pick up the change immediately.")
+    return 0
+
+
+@with_client
+def _cmd_node_idle(client: RelayClient, args: argparse.Namespace) -> int:
+    """node-cli node idle — mark this node as idle (available for claims)."""
+    _save_requested_status("idle")
+    if args.once:
+        caps = load_active_profile()
+        client.heartbeat(caps, {})
+    if args.json:
+        print(json.dumps({"status": "idle", "persisted": True, "once": bool(args.once)}))
+        return 0
+    print("✅ Node marked idle — next heartbeat will forward the new status.")
+    if not args.once:
+        print("   Send SIGHUP or restart the daemon to pick up the change immediately.")
+    return 0
+
+
+@with_client
+def _cmd_node_clear_status(client: RelayClient, args: argparse.Namespace) -> int:
+    """node-cli node clear-status — remove an explicit status request.
+
+    After this the node returns to automatic status handling (the
+    server sets it to ``online`` on the next heartbeat and may later
+    flip it to ``busy`` via the auto-busy load tracking).
+    """
+    _clear_requested_status()
+    if args.once:
+        caps = load_active_profile()
+        client.heartbeat(caps, {})
+    if args.json:
+        print(json.dumps({"status": None, "persisted": True, "once": bool(args.once)}))
+        return 0
+    print("✅ Explicit node status cleared — auto handling restored.")
+    return 0
+
+
+@with_client
+def _cmd_node_status(client: RelayClient, args: argparse.Namespace) -> int:
+    """node-cli node status — show the local + server-side node status.
+
+    Reports the operator-requested status persisted in the meta file
+    (if any) and queries the server for the authoritative current
+    status of this node.
+    """
+    meta = load_meta()
+    requested = meta.get("status")
+    server_status: Optional[str] = None
+    server_load = None
+    server_queue = None
+    try:
+        resp = client._get_with_retry("/relay/v2/discovery/nodes?status=all")
+        if resp.status_code == 200:
+            nodes = resp.json().get("nodes", [])
+            if not nodes:
+                resp = client._get_with_retry("/relay/v2/discovery/nodes")
+                nodes = resp.json().get("nodes", []) if resp.status_code == 200 else []
+            for n in nodes:
+                if n.get("node_id") == meta.get("node_id"):
+                    server_status = n.get("status")
+                    server_load = n.get("load")
+                    server_queue = n.get("queue_depth")
+                    break
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not query server-side node status: %s", exc)
+
+    if args.json:
+        print(json.dumps({
+            "node_id": meta.get("node_id"),
+            "requested_status": requested,
+            "server_status": server_status,
+            "load": server_load,
+            "queue_depth": server_queue,
+        }, default=str))
+        return 0
+    print(f"Node:             {meta.get('node_name', meta.get('node_id', '?'))}")
+    print(f"Requested status: {requested or '(auto)'}")
+    print(f"Server status:    {server_status or '-'}")
+    if server_load is not None:
+        print(f"Server load:      {server_load}")
+    if server_queue is not None:
+        print(f"Server queue:     {server_queue}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # status / reload
 # ---------------------------------------------------------------------------
 
@@ -1745,7 +1901,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_info.set_defaults(func=_cmd_capabilities_info)
 
     # node
-    p_node = sub.add_parser("node", help="Node operations (list, info).")
+    p_node = sub.add_parser("node", help="Node operations (list, info, busy/idle/status).")
     p_node_sub = p_node.add_subparsers(dest="node_command", required=True, metavar="<action>")
 
     p_node_list = p_node_sub.add_parser("list", help="List all nodes registered on the relay server.")
@@ -1754,6 +1910,40 @@ def build_parser() -> argparse.ArgumentParser:
     p_node_info = p_node_sub.add_parser("info", help="Show detailed info for a single node.")
     p_node_info.add_argument("node_id", help="Node ID to query.")
     p_node_info.set_defaults(func=_cmd_node_info)
+
+    # T-084: node busy / idle / status / clear-status
+    p_node_busy = p_node_sub.add_parser(
+        "busy", help="Mark this node as busy (stops it from claiming new stages)."
+    )
+    p_node_busy.add_argument(
+        "--once", action="store_true",
+        help="Send a single heartbeat carrying the new status immediately.",
+    )
+    p_node_busy.set_defaults(func=_cmd_node_busy)
+
+    p_node_idle = p_node_sub.add_parser(
+        "idle", help="Mark this node as idle (available for claiming stages again)."
+    )
+    p_node_idle.add_argument(
+        "--once", action="store_true",
+        help="Send a single heartbeat carrying the new status immediately.",
+    )
+    p_node_idle.set_defaults(func=_cmd_node_idle)
+
+    p_node_clear_status = p_node_sub.add_parser(
+        "clear-status",
+        help="Remove an explicit busy/idle request and restore automatic status handling.",
+    )
+    p_node_clear_status.add_argument(
+        "--once", action="store_true",
+        help="Send a single heartbeat after clearing the requested status.",
+    )
+    p_node_clear_status.set_defaults(func=_cmd_node_clear_status)
+
+    p_node_status = p_node_sub.add_parser(
+        "status", help="Show the local + server-side node status."
+    )
+    p_node_status.set_defaults(func=_cmd_node_status)
 
     # status / reload
     p_status = sub.add_parser("status", help="Print worker_status.json content.")
