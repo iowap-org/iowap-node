@@ -45,7 +45,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -171,7 +171,12 @@ class RelayClient:
         self.meta = meta
         self.cfg = cfg
         self.base_url = _base_url(meta, cfg)
-        self.token = load_token()
+        data = load_token()
+        self.token = data["token"] if data else None
+        # T-088: track the token expiry so the daemon can refresh
+        # proactively before it expires. ``None`` means unknown (e.g.
+        # a migrated legacy token or a server that omits expires_at).
+        self.token_expires_at: str | None = data.get("expires_at") if data else None
         if not self.token:
             print(
                 "no runtime token found, attempting recovery with registration secret",
@@ -233,10 +238,13 @@ class RelayClient:
                 timeout=self.cfg["request_timeout"],
             )
             if r.status_code == 200:
-                new = r.json().get("token")
+                data = r.json()
+                new = data.get("token")
+                expires_at = data.get("expires_at")
                 if new:
-                    save_token(new)
+                    save_token(new, expires_at=expires_at)
                     self.token = new
+                    self.token_expires_at = expires_at
                     return True
         except Exception as exc:
             log.warning("runtime-token refresh failed: %s", exc)
@@ -256,9 +264,11 @@ class RelayClient:
             r.raise_for_status()
             data = r.json()
             new = data.get("token")
+            expires_at = data.get("expires_at")
             if new:
-                save_token(new)
+                save_token(new, expires_at=expires_at)
                 self.token = new
+                self.token_expires_at = expires_at
             return new
         except Exception as exc:
             log.error("registration-secret recovery failed: %s", exc)
@@ -609,6 +619,23 @@ class Daemon:
         while not self._stop_event.is_set():
             error: str | None = None
             try:
+                # T-088: proactively refresh the runtime token before it
+                # expires so the daemon never loses connectivity because
+                # of a stale token. A 1h margin keeps the refresh well
+                # ahead of the expiry while avoiding refresh churn.
+                if self.client.token_expires_at:
+                    try:
+                        exp = datetime.fromisoformat(self.client.token_expires_at)
+                        if exp - datetime.now(timezone.utc) < timedelta(hours=1):
+                            log.info(
+                                "token expires soon (%s), refreshing proactively",
+                                self.client.token_expires_at,
+                            )
+                            self.client._refresh_token()
+                    except (ValueError, TypeError):
+                        # Malformed expires_at — ignore and let the normal
+                        # 401/403 retry path handle it when it expires.
+                        pass
                 caps = load_active_profile()
                 with self._lock:
                     inflight = dict(self.in_flight)
@@ -1432,7 +1459,7 @@ def _cmd_capabilities_current(args: argparse.Namespace) -> int:  # noqa: ARG001
 def _cmd_capabilities_server(client: RelayClient, args: argparse.Namespace) -> int:
     """Query capabilities from the relay server (all registered nodes)."""
     try:
-        resp = client._get("/relay/v2/discovery/capabilities")
+        resp = client._get_with_retry("/relay/v2/discovery/capabilities")
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
@@ -1472,7 +1499,7 @@ def _cmd_capabilities_server(client: RelayClient, args: argparse.Namespace) -> i
 def _cmd_capabilities_info(client: RelayClient, args: argparse.Namespace) -> int:
     """Show detailed info for a single capability registered on the relay."""
     try:
-        resp = client._get(f"/relay/v2/discovery/capabilities/{args.name}")
+        resp = client._get_with_retry(f"/relay/v2/discovery/capabilities/{args.name}")
         if resp.status_code == 404:
             print(f"Capability '{args.name}' not found.")
             return 1
@@ -1512,7 +1539,7 @@ def _cmd_capabilities_info(client: RelayClient, args: argparse.Namespace) -> int
 def _cmd_node_list(client: RelayClient, args: argparse.Namespace) -> int:
     """List all nodes registered on the relay server."""
     try:
-        resp = client._get("/relay/v2/discovery/nodes")
+        resp = client._get_with_retry("/relay/v2/discovery/nodes")
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
@@ -1555,7 +1582,7 @@ def _cmd_node_list(client: RelayClient, args: argparse.Namespace) -> int:
 def _cmd_node_info(client: RelayClient, args: argparse.Namespace) -> int:
     """Show detailed info for a single node."""
     try:
-        resp = client._get("/relay/v2/discovery/nodes?status=all")
+        resp = client._get_with_retry("/relay/v2/discovery/nodes?status=all")
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
@@ -1568,7 +1595,7 @@ def _cmd_node_info(client: RelayClient, args: argparse.Namespace) -> int:
     # command still works for offline/pending nodes.
     if not nodes:
         try:
-            resp = client._get("/relay/v2/discovery/nodes")
+            resp = client._get_with_retry("/relay/v2/discovery/nodes")
             resp.raise_for_status()
             nodes = resp.json().get("nodes", [])
         except Exception:

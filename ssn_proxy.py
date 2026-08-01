@@ -48,7 +48,12 @@ CACHE_DIR = Path.home() / ".ssn" / "cache" / "bilder"
 # ---------------------------------------------------------------------------
 
 def _load_token() -> str:
-    """Load the SSN node token from the relay meta file."""
+    """Load the SSN node token from the relay token file.
+
+    Since T-088 the token file is a JSON envelope
+    ``{"token": "...", "expires_at": "..."}``. Legacy plaintext files
+    (pre-T-088) are still tolerated as a fallback.
+    """
     meta_path = Path.home() / ".relay" / "ai-relay-agent.json"
     if not meta_path.exists():
         raise RuntimeError(f"SSN meta file not found: {meta_path}")
@@ -60,7 +65,13 @@ def _load_token() -> str:
         token_path = Path.home() / ".relay" / "ai-relay-agent.token"
     if not token_path.exists():
         raise RuntimeError(f"SSN token file not found for node {node_id}")
-    return token_path.read_text().strip()
+    raw = token_path.read_text().strip()
+    if raw.lstrip().startswith("{"):
+        try:
+            return json.loads(raw)["token"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return raw
 
 
 def _get_headers() -> dict[str, str]:

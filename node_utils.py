@@ -68,15 +68,43 @@ def load_meta() -> dict:
     return json.loads(META_PATH.read_text())
 
 
-def load_token():
-    if TOKEN_PATH.exists():
-        return TOKEN_PATH.read_text().strip()
-    return None
+def load_token() -> dict | None:
+    """Load the persisted runtime token as a dict.
+
+    Returns ``{"token": "...", "expires_at": "..." | None}`` or ``None``
+    when no token file exists. Legacy plaintext token files (pre-T-088)
+    are detected — a single non-JSON line is treated as the token value
+    with an unknown expiry — and migrated to the JSON format on the next
+    ``save_token()`` call.
+    """
+    if not TOKEN_PATH.exists():
+        return None
+    raw = TOKEN_PATH.read_text().strip()
+    if not raw:
+        return None
+    # T-088: prefer the JSON envelope. Fall back to the legacy
+    # plaintext format so existing installs keep working.
+    if raw.lstrip().startswith("{"):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("token file %s is not valid JSON, treating as plaintext", TOKEN_PATH)
+            return {"token": raw, "expires_at": None}
+        if isinstance(data, dict) and data.get("token"):
+            return {"token": data["token"], "expires_at": data.get("expires_at")}
+        return None
+    return {"token": raw, "expires_at": None}
 
 
-def save_token(token: str):
+def save_token(token: str, expires_at: str | None = None) -> None:
+    """Persist the runtime token plus its expiry as a JSON envelope.
+
+    The envelope is ``{"token": "...", "expires_at": "..." | None}``.
+    Writing is atomic (tmp file + rename) so a crash mid-write never
+    leaves a truncated token file.
+    """
     tmp = TOKEN_PATH.with_suffix(TOKEN_PATH.suffix + ".tmp")
-    tmp.write_text(token + "\n")
+    tmp.write_text(json.dumps({"token": token, "expires_at": expires_at}) + "\n")
     tmp.rename(TOKEN_PATH)
 
 
