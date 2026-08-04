@@ -171,6 +171,11 @@ class RelayClient:
         self.meta = meta
         self.cfg = cfg
         self.base_url = _base_url(meta, cfg)
+        # TLS (T-111): optional CA cert path for nodes connecting over https
+        # to a relay using a private/self-signed CA. When set, httpx verifies
+        # against it instead of the system trust store. Default True = system
+        # trust store (public CA / Let's Encrypt).
+        self._verify: "str | bool" = cfg.get("tls_ca_cert") or True
         data = load_token()
         self.token = data["token"] if data else None
         # T-088: track the token expiry so the daemon can refresh
@@ -235,6 +240,7 @@ class RelayClient:
             headers={"Authorization": f"Bearer {self.token}"},
             json=body or {},
             timeout=timeout or self.cfg["request_timeout"],
+            verify=self._verify,
         )
 
     def _get(
@@ -244,6 +250,7 @@ class RelayClient:
             f"{self.base_url}{path}",
             headers={"Authorization": f"Bearer {self.token}"},
             timeout=timeout or self.cfg["request_timeout"],
+            verify=self._verify,
         )
 
     def _get_with_retry(
@@ -275,6 +282,7 @@ class RelayClient:
                 headers={"Authorization": f"Bearer {self.token}"},
                 json={"requested_credential": "runtime_token"},
                 timeout=self.cfg["request_timeout"],
+                verify=self._verify,
             )
             if r.status_code == 200:
                 data = r.json()
@@ -310,6 +318,7 @@ class RelayClient:
                     "registration_secret": self.meta.get("registration_secret"),
                 },
                 timeout=self.cfg["request_timeout"],
+                verify=self._verify,
             )
             r.raise_for_status()
             data = r.json()
@@ -557,6 +566,7 @@ class RelayClient:
                     files={"file": (upload_name, f, "application/octet-stream")},
                     params=params or None,
                     timeout=self.cfg.get("request_timeout", 30),
+                    verify=self._verify,
                 )
 
         resp = _do_upload()
