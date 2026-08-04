@@ -177,6 +177,10 @@ class RelayClient:
         # proactively before it expires. ``None`` means unknown (e.g.
         # a migrated legacy token or a server that omits expires_at).
         self.token_expires_at: str | None = data.get("expires_at") if data else None
+        # T-108: Auth-Failure-Streak für exponentiellen Backoff. Nach
+        # wiederholten 401/403-Fehlschlägen erhöht der Daemon den
+        # Heartbeat/Claim-Abstand, statt in einem engen Loop zu hämmern.
+        self._auth_fail_streak = 0
         if not self.token:
             print(
                 "no runtime token found, attempting recovery with registration secret",
@@ -185,6 +189,41 @@ class RelayClient:
             self.token = self._recover_runtime_token()
             if not self.token:
                 raise SystemExit("no runtime token available and recovery failed")
+
+    # -- T-108: backoff + self-healing -------------------------------------
+
+    # Backoff begins after this many consecutive auth failures.
+    _BACKOFF_THRESHOLD = 3
+    # Base delay (seconds) once the threshold is reached.
+    _BACKOFF_BASE = 10
+    # Hard cap (seconds) so the backoff never grows unbounded.
+    _BACKOFF_MAX = 300
+
+    def _register_backoff_failure(self) -> None:
+        """Record one consecutive auth failure (401/403)."""
+        self._auth_fail_streak += 1
+
+    def _register_backoff_success(self) -> None:
+        """Reset the auth-failure streak after a successful auth/refresh."""
+        self._auth_fail_streak = 0
+
+    def _current_backoff(self) -> float:
+        """Return the current auth-failure backoff in seconds (0 = none)."""
+        if self._auth_fail_streak < self._BACKOFF_THRESHOLD:
+            return 0.0
+        # Exponential: 10s, 20s, 40s, 80s, 160s — capped at _BACKOFF_MAX.
+        exp = min(self._auth_fail_streak - self._BACKOFF_THRESHOLD + 1, 5)
+        return float(min(self._BACKOFF_BASE * (2 ** (exp - 1)), self._BACKOFF_MAX))
+
+    def _reload_token_from_disk(self) -> None:
+        """Re-read the token file. Helps when an external process (or a
+        manual intervention) corrected the token after the daemon cached
+        an invalid value. Reads only — overwrites nothing on disk.
+        """
+        data = load_token()
+        if data and data.get("token"):
+            self.token = data["token"]
+            self.token_expires_at = data.get("expires_at")
 
     # -- low level ----------------------------------------------------------
 
@@ -245,10 +284,21 @@ class RelayClient:
                     save_token(new, expires_at=expires_at)
                     self.token = new
                     self.token_expires_at = expires_at
+                    self._register_backoff_success()
                     return True
         except Exception as exc:
             log.warning("runtime-token refresh failed: %s", exc)
-        return self._recover_runtime_token() is not None
+        recovered = self._recover_runtime_token()
+        if recovered is not None:
+            self._register_backoff_success()
+            return True
+        # Refresh + Recovery fehlgeschlagen: Datei neu lesen — ein externer
+        # Prozess/manueller Eingriff könnte den Token inzwischen korrigiert
+        # haben (T-108 Task 1). Backoff-Streak erhöhen, damit der Daemon
+        # nicht in einem engen 401-Loop verharrt (T-108 Task 2).
+        self._reload_token_from_disk()
+        self._register_backoff_failure()
+        return False
 
     def _recover_runtime_token(self) -> str | None:
         try:
@@ -590,6 +640,15 @@ class Daemon:
 
     def _write_status(self, error: str | None = None) -> None:
         caps = load_active_profile()
+        # T-108: Loop-Detection — wenn der Daemon in einem Auth-Fehler-Loop
+        # festhängt (Backoff > 0 + 401/403), reichern wir den Fehler-String
+        # an und markieren den Status als degraded, so dass `node info`/
+        # Dashboard und Log klar signalisieren, dass die Token-Datei
+        # geprüft oder der Daemon neu gestartet werden muss.
+        backoff = self.client._current_backoff()
+        auth_loop = backoff > 0 and "401" in (error or "")
+        if auth_loop:
+            error = (error or "") + " | AUTH-LOOP: token invalid — Datei prüfen oder Daemon neu starten"
         status = {
             "pid": os.getpid(),
             "node_id": self.client.meta.get("node_id"),
@@ -606,6 +665,8 @@ class Daemon:
             "tasks_failed": self.tasks_failed,
             "failed_tasks": dict(self._failed_tasks),
             "error": error,
+            "auth_loop": auth_loop,
+            "auth_backoff_seconds": backoff,
         }
         try:
             write_json_atomic(STATUS_PATH, status)
@@ -649,8 +710,10 @@ class Daemon:
                 error = str(exc)
                 log.error("heartbeat error: %s", exc)
             self._write_status(error=error)
-            # Sleep in 1s increments so shutdown is responsive.
-            for _ in range(max(1, interval)):
+            # T-108: Backoff nach wiederholten Auth-Fehlschlägen, damit
+            # der Daemon nicht alle ~8s hämmert. Nach Erfolg sofort 0.
+            sleep_interval = interval + self.client._current_backoff()
+            for _ in range(max(1, int(sleep_interval))):
                 if self._stop_event.is_set():
                     return
                 time.sleep(1)
@@ -761,7 +824,9 @@ class Daemon:
                 log.error("claim loop http error %s", exc.response.status_code)
             except Exception as exc:  # noqa: BLE001
                 log.error("claim loop error: %s", exc)
-            for _ in range(max(1, interval)):
+            # T-108: Backoff nach wiederholten Auth-Fehlschlägen.
+            sleep_interval = interval + self.client._current_backoff()
+            for _ in range(max(1, int(sleep_interval))):
                 if self._stop_event.is_set():
                     return
                 time.sleep(1)

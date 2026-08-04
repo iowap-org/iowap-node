@@ -122,6 +122,14 @@ class SseDaemon:
 
     def _write_status(self, error: str | None = None) -> None:
         caps = load_active_profile()
+        # T-108: Loop-Detection — wenn der Daemon in einem Auth-Fehler-Loop
+        # festhängt (Backoff > 0 + 401/403), reichern wir den Fehler-String
+        # an und markieren den Status als degraded. Zentrale Logik liegt
+        # im geteilten RelayClient (greift für beide Daemons).
+        backoff = self.client._current_backoff()
+        auth_loop = backoff > 0 and "401" in (error or "")
+        if auth_loop:
+            error = (error or "") + " | AUTH-LOOP: token invalid — Datei prüfen oder Daemon neu starten"
         status = {
             "pid": os.getpid(),
             "node_id": self.client.meta.get("node_id"),
@@ -139,6 +147,8 @@ class SseDaemon:
             "tasks_failed": self.tasks_failed,
             "failed_tasks": dict(self._failed_tasks),
             "error": error,
+            "auth_loop": auth_loop,
+            "auth_backoff_seconds": backoff,
         }
         try:
             write_json_atomic(STATUS_PATH, status)
@@ -166,7 +176,11 @@ class SseDaemon:
                 error = str(exc)
                 log.error("heartbeat error: %s", exc)
             self._write_status(error=error)
-            for _ in range(max(1, interval)):
+            # T-108: Backoff nach wiederholten Auth-Fehlschlägen (zentral
+            # im RelayClient). SSE-Reconnect bleibt separat via
+            # _RECONNECT_DELAY, da er andere Fehlerursachen abdeckt.
+            sleep_interval = interval + self.client._current_backoff()
+            for _ in range(max(1, int(sleep_interval))):
                 if self._stop_event.is_set():
                     return
                 time.sleep(1)
