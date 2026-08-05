@@ -81,6 +81,8 @@ from nodes.common.node_utils import (
     load_json,
     load_meta,
     load_token,
+    pid_running as _nu_pid_running,
+    read_pid as _nu_read_pid,
     save_meta,
     save_token,
     write_json_atomic,
@@ -401,20 +403,14 @@ class Daemon:
 # ---------------------------------------------------------------------------
 
 def _read_pid() -> int | None:
-    if not PID_PATH.exists():
-        return None
-    try:
-        return int(PID_PATH.read_text().strip())
-    except (ValueError, OSError):
-        return None
+    # T-117: thin wrapper over node_utils.read_pid(pid_path) so callers and
+    # tests keep the original no-arg signature (PID_PATH bound at call time).
+    return _nu_read_pid(PID_PATH)
 
 
 def _pid_running(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    # T-117: re-export wrapper over node_utils.pid_running(pid).
+    return _nu_pid_running(pid)
 
 
 def _daemon_start(args: argparse.Namespace) -> int:

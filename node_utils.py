@@ -113,6 +113,30 @@ def save_meta(meta: dict):
 
 
 # ---------------------------------------------------------------------------
+# PID helpers (T-117): parameterised so node_cli, node_daemon and a future
+# federation_node can share them. Each caller passes its own pid_path.
+# ---------------------------------------------------------------------------
+
+def read_pid(pid_path: Path) -> int | None:
+    """Read a PID file and return the pid, or ``None`` if missing/invalid."""
+    if not pid_path.exists():
+        return None
+    try:
+        return int(pid_path.read_text().strip())
+    except (ValueError, OSError):
+        return None
+
+
+def pid_running(pid: int) -> bool:
+    """Return True if a process with the given pid is currently alive."""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # T-062: git repo update helpers (update check / update apply)
 # ---------------------------------------------------------------------------
 
