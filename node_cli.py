@@ -127,7 +127,7 @@ from nodes.common.relay_client import (
 # must NOT import node_cli (avoids circular import + keeps the cli.RelayClient
 # monkeypatch working). Handlers are plain (client, args) -> int and wrapped
 # with @with_client here at registration time.
-from nodes.common.cli import cli_artifact, cli_docs, cli_task
+from nodes.common.cli import cli_artifact, cli_docs, cli_task, cli_update
 
 def with_client(func):
     """Decorator: injects (client, args) into _cmd_* functions.
@@ -607,47 +607,6 @@ def _cmd_complete(client: RelayClient, args: argparse.Namespace) -> int:
         return 0
     print(json.dumps(resp, indent=2, default=str))
     return 0
-
-
-# ---------------------------------------------------------------------------
-# update (T-062): check for and apply git-based updates
-# ---------------------------------------------------------------------------
-
-def _cmd_update_check(args: argparse.Namespace) -> int:
-    """node-cli update check — fetch origin and compare local vs. upstream."""
-    _setup_logging("ERROR" if args.json else args.log_level)
-    info = check_for_updates()
-    if args.json:
-        print(json.dumps(info, default=str))
-        return 0
-    print(f"Repo:           {REPO_DIR}")
-    print(f"Local commit:   {info.get('local_commit') or '-'}")
-    print(f"Local branch:   {info.get('local_branch') or '-'}")
-    print(f"Upstream:       {'yes' if info.get('has_upstream') else 'no (not configured)'}")
-    print(f"Remote commit:  {info.get('remote_commit') or '-'}")
-    behind = info.get("behind_count", 0)
-    if not info.get("has_upstream"):
-        print("Status:         no upstream configured — cannot determine updates")
-        return 1
-    if behind > 0:
-        print(f"Status:         {behind} commit{'s' if behind != 1 else ''} behind — update available")
-        return 0
-    print("Status:         up to date")
-    return 0
-
-
-def _cmd_update_apply(args: argparse.Namespace) -> int:
-    """node-cli update apply — git pull + restart the systemd service."""
-    _setup_logging("ERROR" if args.json else args.log_level)
-    result = apply_update(service_unit=args.service_unit)
-    if args.json:
-        print(json.dumps(result, default=str))
-        return 0 if result.get("success") else 1
-    print(f"Before: {result.get('before_commit') or '-'}")
-    print(f"After:  {result.get('after_commit') or '-'}")
-    print(f"Restarted: {'yes' if result.get('restarted') else 'no'}")
-    print(f"Result:  {result.get('message')}")
-    return 0 if result.get("success") else 1
 
 
 # ---------------------------------------------------------------------------
@@ -1341,7 +1300,7 @@ def build_parser() -> argparse.ArgumentParser:
         "check",
         help="Fetch origin and report whether the local branch is behind.",
     )
-    p_update_check.set_defaults(func=_cmd_update_check)
+    p_update_check.set_defaults(func=cli_update._cmd_update_check)
 
     p_update_apply = p_update_sub.add_parser(
         "apply",
@@ -1352,7 +1311,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=SERVICE_UNIT,
         help=f"systemd user unit to restart (default: {SERVICE_UNIT}).",
     )
-    p_update_apply.set_defaults(func=_cmd_update_apply)
+    p_update_apply.set_defaults(func=cli_update._cmd_update_apply)
 
     return parser
 
