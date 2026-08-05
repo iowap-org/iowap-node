@@ -11,8 +11,8 @@ from __future__ import annotations
 import json
 
 from nodes.common import node_utils as _nu
-from nodes.common.relay_client import _setup_logging
 from nodes.common.node_utils import apply_update, check_for_updates
+from nodes.common.relay_client import _setup_logging
 
 
 def _cmd_update_check(args) -> int:

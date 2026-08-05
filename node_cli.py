@@ -39,7 +39,6 @@ import functools
 import json
 import logging
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -47,45 +46,33 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
-from nodes.common.node_config import (
-    ACTIVE_PATH,
-    BASE_DIR,
-    PROFILES_DIR,
-    CapabilityValidationError,
-    current_profile_name,
-    diff_profiles,
-    invalidate_active_cache,
-    list_profiles,
-    load_active_profile,
-    load_active_status,
-    load_profile,
-    profile_path,
-    publish_profile,
-    validate_profile,
-    write_active_status,
-)
 from nodes.common.handler_runner import run_handler
+from nodes.common.node_config import (
+    ACTIVE_PATH,  # noqa: F401 — re-exported so the test fixture's cli.ACTIVE_PATH patch keeps working (T-117)
+    BASE_DIR,
+    PROFILES_DIR,  # noqa: F401 — re-exported for the test fixture's cli.PROFILES_DIR patch
+    current_profile_name,
+    invalidate_active_cache,
+    load_active_profile,
+)
 from nodes.common.node_utils import (
-    REPO_DIR,
+    REPO_DIR,  # noqa: F401 — re-exported for the test fixture's cli.REPO_DIR patch
     SERVICE_UNIT,
     STATUS_PATH,
     TOKEN_PATH,
-    apply_update,
-    check_for_updates,
-    get_repo_info,
-    load_config,
     load_json,
     load_meta,
-    load_token,
-    pid_running as _nu_pid_running,
-    read_pid as _nu_read_pid,
-    save_meta,
-    save_token,
     write_json_atomic,
+)
+from nodes.common.node_utils import (
+    pid_running as _nu_pid_running,
+)
+from nodes.common.node_utils import (
+    read_pid as _nu_read_pid,
 )
 
 # ---------------------------------------------------------------------------
@@ -107,22 +94,12 @@ log = logging.getLogger("node-cli")
 # Shared relay client — extracted to relay_client.py (T-112)
 # Re-exported here so node_daemon.py and existing tests that reference
 # node_cli.RelayClient / node_cli._effective_config / etc. keep working.
+# The underscore helpers are re-exported for downstream consumers; they
+# are not used directly in this module, hence the noqa.
 # ---------------------------------------------------------------------------
-from nodes.common.relay_client import (
-    RelayClient,
-    _base_url,
-    _effective_config,
-    _filename_from_response,
-    _setup_logging,
-    _utcnow_str,
-)
-
-
-
 # ---------------------------------------------------------------------------
 # @with_client decorator — eliminates boilerplate from _cmd_* functions
 # ---------------------------------------------------------------------------
-
 # T-117: cli submodules are imported for build_parser() registration. They
 # must NOT import node_cli (avoids circular import + keeps the cli.RelayClient
 # monkeypatch working). Handlers are plain (client, args) -> int and wrapped
@@ -135,6 +112,15 @@ from nodes.common.cli import (
     cli_task,
     cli_update,
 )
+from nodes.common.relay_client import (  # noqa: F401
+    RelayClient,
+    _base_url,
+    _effective_config,
+    _filename_from_response,
+    _setup_logging,
+    _utcnow_str,
+)
+
 
 def with_client(func):
     """Decorator: injects (client, args) into _cmd_* functions.
