@@ -127,7 +127,7 @@ from nodes.common.relay_client import (
 # must NOT import node_cli (avoids circular import + keeps the cli.RelayClient
 # monkeypatch working). Handlers are plain (client, args) -> int and wrapped
 # with @with_client here at registration time.
-from nodes.common.cli import cli_task
+from nodes.common.cli import cli_artifact, cli_task
 
 def with_client(func):
     """Decorator: injects (client, args) into _cmd_* functions.
@@ -606,36 +606,6 @@ def _cmd_complete(client: RelayClient, args: argparse.Namespace) -> int:
         print(json.dumps(resp, default=str))
         return 0
     print(json.dumps(resp, indent=2, default=str))
-    return 0
-
-
-@with_client
-def _cmd_artifact_download(client: RelayClient, args: argparse.Namespace) -> int:
-    target = client.download_artifact(args.artifact_id, output_path=args.output)
-    size = target.stat().st_size if target.exists() else 0
-    if args.json:
-        print(json.dumps({"path": str(target), "size_bytes": size}, default=str))
-        return 0
-    print(f"Downloaded {size} bytes to {target}")
-    return 0
-
-
-@with_client
-def _cmd_artifact_upload(client: RelayClient, args: argparse.Namespace) -> int:
-    file_path = Path(args.file)
-    if not file_path.exists():
-        print(f"file not found: {file_path}", file=sys.stderr)
-        return 2
-    result = client.upload_artifact(
-        file_path,
-        name=args.name,
-        task_id=args.task_id,
-        stage_id=args.stage_id,
-    )
-    if args.json:
-        print(json.dumps(result, default=str))
-        return 0
-    print(json.dumps(result, indent=2, default=str))
     return 0
 
 
@@ -1442,7 +1412,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", "-o", type=Path, default=None,
         help="Output path (default: <artifact name from server>).",
     )
-    p_artifact_download.set_defaults(func=_cmd_artifact_download)
+    p_artifact_download.set_defaults(func=with_client(cli_artifact._cmd_artifact_download))
 
     p_artifact_upload = p_artifact_sub.add_parser(
         "upload", help="Upload a local file as an artifact to the relay."
@@ -1457,7 +1427,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_artifact_upload.add_argument(
         "--stage-id", default=None, help="Optional stage ID to associate with."
     )
-    p_artifact_upload.set_defaults(func=_cmd_artifact_upload)
+    p_artifact_upload.set_defaults(func=with_client(cli_artifact._cmd_artifact_upload))
 
     # docs (T-059)
     p_docs = sub.add_parser(
