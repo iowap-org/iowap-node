@@ -45,7 +45,7 @@ from nodes.common.node_config import (
     load_active_profile,
 )
 from nodes.common.handler_runner import run_handler
-from nodes.common.node_cli import RelayClient, _effective_config, _setup_logging
+from nodes.common.relay_client import RelayClient, _effective_config, _setup_logging
 from nodes.common.node_utils import (
     BASE_DIR,
     STATUS_PATH,
