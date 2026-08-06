@@ -39,13 +39,12 @@ from typing import Any
 
 import httpx
 
+from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     current_profile_name,
     invalidate_active_cache,
     load_active_profile,
 )
-from nodes.common.handler_runner import run_handler
-from nodes.common.relay_client import RelayClient, _effective_config, _setup_logging
 from nodes.common.node_utils import (
     BASE_DIR,
     STATUS_PATH,
@@ -53,6 +52,7 @@ from nodes.common.node_utils import (
     load_meta,
     write_json_atomic,
 )
+from nodes.common.relay_client import RelayClient, _effective_config, _setup_logging
 
 # ---------------------------------------------------------------------------
 # Paths (mirrors node_cli.py)
@@ -163,6 +163,11 @@ class SseDaemon:
         while not self._stop_event.is_set():
             error: str | None = None
             try:
+                # T-118: proactively refresh the runtime token before it
+                # expires (centralized in RelayClient.maybe_refresh_token).
+                # Uses rt_refresh_before_seconds (24h) margin and also
+                # refreshes legacy tokens with unknown expiry.
+                self.client.maybe_refresh_token()
                 caps = load_active_profile()
                 with self._lock:
                     inflight = dict(self._in_flight)

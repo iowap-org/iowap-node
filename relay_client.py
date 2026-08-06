@@ -12,7 +12,6 @@ Also carries the small helpers that built the client's config/logging:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -260,6 +259,36 @@ class RelayClient:
         except Exception as exc:
             log.error("registration-secret recovery failed: %s", exc)
             return None
+
+    # -- proactive refresh (T-118) ------------------------------------------
+
+    def maybe_refresh_token(self) -> None:
+        """Proactively refresh the runtime token before it expires.
+
+        Centralized here so both daemons (node-cli and node-daemon) share one
+        implementation. Refreshes when the token expires within
+        ``rt_refresh_before_seconds`` (default 24h). When ``expires_at`` is
+        unknown (legacy plaintext token), refresh immediately — an unknown
+        expiry is treated as risky rather than trusted.
+        """
+        margin = float(self.cfg.get("rt_refresh_before_seconds", 86400))
+        if self.token_expires_at:
+            try:
+                exp = datetime.fromisoformat(self.token_expires_at)
+                if exp - datetime.now(timezone.utc) < timedelta(seconds=margin):
+                    log.info(
+                        "token expires soon (%s), refreshing proactively",
+                        self.token_expires_at,
+                    )
+                    self._refresh_token()
+            except (ValueError, TypeError):
+                # Malformed expires_at — fall through to the unknown-expiry
+                # path below so a bad value can't silently kill the node.
+                self._refresh_token()
+        else:
+            # No known expiry (legacy token): refresh to be safe.
+            log.info("token expiry unknown, refreshing proactively")
+            self._refresh_token()
 
     # -- public API ----------------------------------------------------------
 

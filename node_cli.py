@@ -44,7 +44,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -224,23 +224,11 @@ class Daemon:
         while not self._stop_event.is_set():
             error: str | None = None
             try:
-                # T-088: proactively refresh the runtime token before it
-                # expires so the daemon never loses connectivity because
-                # of a stale token. A 1h margin keeps the refresh well
-                # ahead of the expiry while avoiding refresh churn.
-                if self.client.token_expires_at:
-                    try:
-                        exp = datetime.fromisoformat(self.client.token_expires_at)
-                        if exp - datetime.now(timezone.utc) < timedelta(hours=1):
-                            log.info(
-                                "token expires soon (%s), refreshing proactively",
-                                self.client.token_expires_at,
-                            )
-                            self.client._refresh_token()
-                    except (ValueError, TypeError):
-                        # Malformed expires_at — ignore and let the normal
-                        # 401/403 retry path handle it when it expires.
-                        pass
+                # T-118: proactively refresh the runtime token before it
+                # expires (centralized in RelayClient.maybe_refresh_token).
+                # Uses rt_refresh_before_seconds (24h) margin and also
+                # refreshes legacy tokens with unknown expiry.
+                self.client.maybe_refresh_token()
                 caps = load_active_profile()
                 with self._lock:
                     inflight = dict(self.in_flight)
