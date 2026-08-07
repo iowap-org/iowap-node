@@ -438,6 +438,93 @@ class RelayClient:
         r.raise_for_status()
         return r.json()
 
+    # -- T-126: temporary bridge routes -------------------------------------
+
+    def register_temp_route(
+        self,
+        path: str,
+        method: str,
+        upstream: str,
+        *,
+        ttl_seconds: int,
+        channel_id: str,
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Register a temporary bridge route on the server (T-124/T-126).
+
+        The route is owned by this node (the node_id comes from the
+        Bearer token), lives for ``ttl_seconds`` and is tied to
+        ``channel_id`` so the caller can revoke it later. Use this for
+        large-file handoff (storage upload/download channels) where the
+        regular heartbeat routes would be replaced too eagerly.
+
+        Returns the server response dict containing ``expires_at``.
+        """
+        body = {
+            "path": path,
+            "method": method,
+            "upstream": upstream,
+            "ttl_seconds": ttl_seconds,
+            "channel_id": channel_id,
+            "description": description,
+        }
+        r = self._post_with_retry(
+            "/relay/v2/dashboard/api/node-routes/register", body
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def unregister_temp_route(self, path: str, method: str = "GET") -> None:
+        """Delete a route owned by this node before its TTL expires (T-126).
+
+        ``DELETE /api/node-routes/{node_id}/{path}?method=...``. The node
+        is resolved from the Bearer token on the server side, so this
+        client only needs the path + method it registered earlier. A 404
+        (route already expired/reaped) is swallowed.
+        """
+        import urllib.parse
+
+        # The path is matched verbatim by the server; keep the leading
+        # slash the server expects and URL-encode any segment so a path
+        # with special characters survives the routing layer.
+        sub = path if path.startswith("/") else "/" + path
+        url_path = urllib.parse.quote(sub, safe="/")
+        r = httpx.delete(
+            f"{self.base_url}/relay/v2/dashboard/api/node-routes/{self.meta['node_id']}{url_path}",
+            params={"method": method},
+            headers={"Authorization": f"Bearer {self.token}"},
+            timeout=self.cfg["request_timeout"],
+            verify=self._verify,
+        )
+        if r.status_code in (401, 403):
+            if self._refresh_token():
+                r = httpx.delete(
+                    f"{self.base_url}/relay/v2/dashboard/api/node-routes/{self.meta['node_id']}{url_path}",
+                    params={"method": method},
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    timeout=self.cfg["request_timeout"],
+                    verify=self._verify,
+                )
+        # 404 means the route already expired/reaped — fine.
+        if r.status_code not in (200, 404):
+            r.raise_for_status()
+
+    def list_temp_routes(self) -> list[dict[str, Any]]:
+        """List this node's own temp routes from the server (T-136).
+
+        ``GET /api/node-routes?node_id=<own>`` (rt-Token). The server
+        resolves the caller's node_id from the Bearer token and returns
+        only routes owned by this node, including ``expires_at`` and
+        ``channel_id`` for each row.
+        """
+        r = self._get_with_retry("/relay/v2/dashboard/api/node-routes")
+        r.raise_for_status()
+        data = r.json()
+        # Server returns ``{"routes": [...]}``.
+        if isinstance(data, list):
+            return data
+        return data.get("routes", [])
+
     # -- artifact download ---------------------------------------------------
 
     def download_artifact(

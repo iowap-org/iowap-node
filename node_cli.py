@@ -109,6 +109,7 @@ from nodes.common.cli import (
     cli_capabilities,
     cli_docs,
     cli_node,
+    cli_route,
     cli_task,
     cli_update,
 )
@@ -796,6 +797,27 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="Show the local + server-side node status."
     )
     p_node_status.set_defaults(func=with_client(cli_node._cmd_node_status))
+
+    # T-136: route register/unregister/list — temp bridge route management
+    p_route = sub.add_parser("route", help="Manage temporary bridge routes (T-136).")
+    p_route_sub = p_route.add_subparsers(dest="route_command", required=True, metavar="<action>")
+
+    p_route_register = p_route_sub.add_parser("register", help="Register a temporary bridge route.")
+    p_route_register.add_argument("--path", required=True, help="Route path (e.g. /upload/abc123).")
+    p_route_register.add_argument("--method", required=True, help="HTTP method (GET/POST/PUT/...).")
+    p_route_register.add_argument("--upstream", required=True, help="Upstream URL the relay proxies to.")
+    p_route_register.add_argument("--ttl", type=int, required=True, help="Time-to-live in seconds.")
+    p_route_register.add_argument("--channel", required=True, help="channel_id tying this route to a session.")
+    p_route_register.add_argument("--description", default="", help="Optional human-readable note.")
+    p_route_register.set_defaults(func=with_client(cli_route._cmd_route_register))
+
+    p_route_unregister = p_route_sub.add_parser("unregister", help="Revoke a temp route before its TTL.")
+    p_route_unregister.add_argument("--path", required=True, help="Route path to delete.")
+    p_route_unregister.add_argument("--method", required=True, help="HTTP method of the route.")
+    p_route_unregister.set_defaults(func=with_client(cli_route._cmd_route_unregister))
+
+    p_route_list = p_route_sub.add_parser("list", help="List this node's own routes (temp + permanent).")
+    p_route_list.set_defaults(func=with_client(cli_route._cmd_route_list))
 
     # status / reload
     p_status = sub.add_parser("status", help="Print worker_status.json content.")
