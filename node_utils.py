@@ -146,7 +146,7 @@ REPO_DIR = Path(os.environ.get("RELAY_REPO_DIR", str(Path.home() / "projects" / 
 
 # systemd user unit name restarted by `update apply`. Overridable via env
 # RELAY_SERVICE_UNIT so tests can substitute a no-op service name.
-SERVICE_UNIT = os.environ.get("RELAY_SERVICE_UNIT", "ai-relay-node-cli.service")
+SERVICE_UNIT = os.environ.get("RELAY_SERVICE_UNIT", "ai-relay-node-daemon.service")
 
 
 def _git(args: list[str], *, cwd: Path, timeout: float = 30.0) -> subprocess.CompletedProcess:
