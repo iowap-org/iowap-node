@@ -76,10 +76,75 @@ def _effective_config() -> dict[str, Any]:
 def _base_url(meta: dict[str, Any], cfg: dict[str, Any]) -> str:
     url = cfg.get("base_url") or meta.get("base_url")
     if not url:
+        # T-152: mDNS fallback — discover the relay on the local network
+        # when no base_url is configured. The relay advertises itself as
+        # `AI Relay Service._http._tcp.local.` (see core/zeroconf.py).
+        discovered = _discover_relay_mdns()
+        if discovered:
+            log.info("mDNS: discovered relay at %s", discovered)
+            url = discovered
+    if not url:
         raise SystemExit(
-            "no base_url configured (set base_url in relay_config.json or RELAY_BASE_URL)"
+            "no base_url configured (set base_url in relay_config.json, RELAY_BASE_URL, "
+            "or let the node discover the relay via mDNS)"
         )
     return url.rstrip("/")
+
+
+def _discover_relay_mdns(timeout: float = 2.0) -> str | None:
+    """Discover the relay via mDNS on the local network.
+
+    Returns the relay base URL (e.g. ``http://192.168.1.50:8788``) or ``None``
+    when no relay is found. Uses the ``zeroconf`` package (already a project
+    dependency). The relay advertises ``AI Relay Service._http._tcp.local.``
+    with a ``path`` property (default ``/health``) and the port.
+    """
+    try:
+        from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf  # noqa: PLC0415
+    except ImportError:
+        log.warning("mDNS discovery unavailable (zeroconf not installed)")
+        return None
+
+    found: dict[str, Any] = {}
+
+    class _Listener:
+        def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+            info = zc.get_service_info(type_, name)
+            if info:
+                found["info"] = info
+
+        def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+            pass
+
+        def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+            pass
+
+    zc = Zeroconf()
+    try:
+        listener = _Listener()
+        browser = ServiceBrowser(zc, "_http._tcp.local.", listener)
+        # Wait briefly for discovery.
+        import time  # noqa: PLC0415
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and "info" not in found:
+            time.sleep(0.1)
+        browser.cancel()
+    finally:
+        zc.close()
+
+    info = found.get("info")
+    if not info:
+        return None
+    # Build the base URL from the discovered address + port.
+    try:
+        addr = info.parsed_addresses()[0] if info.parsed_addresses() else None
+    except Exception:  # noqa: BLE001
+        addr = None
+    if not addr:
+        return None
+    port = info.port or 8788
+    return f"http://{addr}:{port}"
 
 
 # ---------------------------------------------------------------------------
