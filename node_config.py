@@ -116,7 +116,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
             if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
                 errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
             # Check for unknown keys
-            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes"}
+            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes", "long_run"}
             extra = set(entry.keys()) - allowed
             if extra:
                 errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
@@ -128,6 +128,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
                 ("handler", str),
                 ("max_parallel", int),
                 ("timeout", int),
+                ("long_run", bool),
             ]:
                 val = entry.get(key)
                 if val is not None and not isinstance(val, expected_type):

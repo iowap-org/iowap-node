@@ -348,6 +348,18 @@ class SseDaemon:
         if cap is None:
             log.warning("claimed stage for unknown capability %s", capability)
             return
+        # T-154: if the capability declares long_run, signal the relay
+        # immediately so the stage is switched to `accepted` and the
+        # 2h lease starts (instead of the 300s claim timeout killing it).
+        if task_id and cap.get("long_run"):
+            try:
+                self.client.add_task_note(
+                    task_id,
+                    f"long-running {capability} started",
+                    kind="longrun",
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort; never block the claim
+                log.warning("longrun note failed for %s: %s", task_id, exc)
         self._run_stage(cap, stage)
 
     # -- claim/execute/complete (mirrors node-cli daemon) ------------------

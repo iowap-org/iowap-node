@@ -494,11 +494,11 @@ class RelayClient:
         r.raise_for_status()
         return r.json()
 
-    def add_task_note(self, task_id: str, message: str) -> dict[str, Any]:
-        """Append a free-form note to a task (T-052 mini-chat)."""
+    def add_task_note(self, task_id: str, message: str, kind: str = "info") -> dict[str, Any]:
+        """Append a note to a task (T-052 mini-chat; T-154 kind drives Long-Run)."""
         r = self._post_with_retry(
             f"/relay/v2/scheduler/tasks/{task_id}/notes",
-            {"message": message},
+            {"message": message, "kind": kind},
         )
         r.raise_for_status()
         return r.json()
