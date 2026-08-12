@@ -106,6 +106,7 @@ log = logging.getLogger("node-cli")
 # with @with_client here at registration time.
 from nodes.common.cli import (
     cli_artifact,
+    cli_bridge,
     cli_capabilities,
     cli_docs,
     cli_node,
@@ -818,6 +819,54 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_route_list = p_route_sub.add_parser("list", help="List this node's own routes (temp + permanent).")
     p_route_list.set_defaults(func=with_client(cli_route._cmd_route_list))
+
+    # T-153: bridge upload/download — stream large files via temp bridge routes
+    p_bridge = sub.add_parser(
+        "bridge", help="Upload/download large files via a temp bridge route (T-129/T-153)."
+    )
+    p_bridge_sub = p_bridge.add_subparsers(dest="bridge_command", required=True, metavar="<action>")
+
+    p_bridge_upload = p_bridge_sub.add_parser(
+        "upload", help="Open a bridge channel and stream a local file TO the storage node."
+    )
+    p_bridge_upload.add_argument("file", type=str, help="Path to the file to upload.")
+    p_bridge_upload.add_argument(
+        "--channel", default=None,
+        help="Channel id (storage.upload_channel); minted when omitted.",
+    )
+    p_bridge_upload.add_argument(
+        "--backup", action="store_true",
+        help="Use backup.create (mode=bridge) instead of storage.upload_channel.",
+    )
+    p_bridge_upload.add_argument("--source", default=None, help="Backup source (default: filename).")
+    p_bridge_upload.add_argument("--type", default="full", choices=["full", "incremental"],
+                                 help="Backup type (default: full).")
+    p_bridge_upload.add_argument("--name", default="", help="Optional task name.")
+    p_bridge_upload.add_argument("--priority", type=int, default=0, help="Optional task priority.")
+    p_bridge_upload.add_argument("--interval", type=int, default=5,
+                                 help="Poll interval in seconds (default: 5).")
+    p_bridge_upload.set_defaults(func=with_client(cli_bridge._cmd_bridge_upload))
+
+    p_bridge_download = p_bridge_sub.add_parser(
+        "download", help="Open a bridge channel and stream a large file FROM the storage node."
+    )
+    p_bridge_download.add_argument(
+        "--channel", default=None,
+        help="Channel id (storage.download_channel); required unless --backup is set.",
+    )
+    p_bridge_download.add_argument(
+        "--backup", default=None,
+        help="Backup id (backup.restore). When set, --channel is ignored.",
+    )
+    p_bridge_download.add_argument(
+        "--output", "-o", type=Path, default=None,
+        help="Output path (default: <channel_id> or <backup_id>).",
+    )
+    p_bridge_download.add_argument("--name", default="", help="Optional task name.")
+    p_bridge_download.add_argument("--priority", type=int, default=0, help="Optional task priority.")
+    p_bridge_download.add_argument("--interval", type=int, default=5,
+                                   help="Poll interval in seconds (default: 5).")
+    p_bridge_download.set_defaults(func=with_client(cli_bridge._cmd_bridge_download))
 
     # status / reload
     p_status = sub.add_parser("status", help="Print worker_status.json content.")
