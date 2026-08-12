@@ -88,6 +88,9 @@ def _cmd_bridge_upload(client: RelayClient, args) -> int:
             "source": args.source or file_path.name,
             "type": args.type or "full",
             "mode": "bridge",
+            # T-162: preserve the original filename so a restore writes it
+            # back with the right name/suffix.
+            "filename": file_path.name,
         }
         capability = "backup.create"
     else:
