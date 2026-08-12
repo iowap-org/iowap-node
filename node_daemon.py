@@ -72,6 +72,27 @@ def _utcnow_str() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Long-Run lease budget on the relay (T-154): an accepted stage stays
+# alive for this long as long as progress notes keep resetting the TTL.
+# A long_run handler process gets the same budget so it is not killed by
+# the short per-stage timeout (T-163).
+_LONGRUN_HANDLER_TIMEOUT = 2 * 3600  # 2h
+
+
+def _handler_timeout(cap: dict[str, Any]) -> int:
+    """Return the subprocess timeout for a capability's handler.
+
+    A ``long_run`` capability (archive/extract) must not be killed by the
+    short per-stage timeout (default 300s) — the relay's Long-Run lease
+    keeps the stage ``accepted`` for up to 2h as long as progress notes
+    keep arriving, so the handler gets the same 2h budget. Non-long-run
+    capabilities keep their configured timeout.
+    """
+    if cap.get("long_run"):
+        return _LONGRUN_HANDLER_TIMEOUT
+    return int(cap.get("timeout", 300))
+
+
 # Event types the daemon is interested in.
 _SUBSCRIBED_TYPES = "stage_claimed,task_created"
 
@@ -384,7 +405,14 @@ class SseDaemon:
                 cap.get("handler", ""),
                 stage,
                 context=context,
-                timeout=int(cap.get("timeout", 300)),
+                # T-154/T-163: a long_run capability must not be killed by
+                # the short per-stage timeout (default 300s). The relay's
+                # Long-Run lease keeps the stage `accepted` for up to 2h as
+                # long as progress notes keep arriving, so the handler
+                # process gets the same 2h budget. Without this, a big
+                # archive/extract is killed mid-run and the stage is
+                # re-claimed to start over.
+                timeout=_handler_timeout(cap),
             )
             try:
                 self.client.complete(str(task_id), str(stage_id), result)
