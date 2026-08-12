@@ -111,9 +111,13 @@ def _cmd_bridge_upload(client: RelayClient, args) -> int:
         return 1
 
     # Stream the file chunkwise to the bridge URL (relay proxies it).
+    # T-162: send the original filename so the storage node preserves it
+    # (instead of storing under the opaque channel id / data.bin).
+    headers = _bearer(client)
+    headers["X-Filename"] = file_path.name
     try:
         with file_path.open("rb") as f, httpx.stream(
-            "POST", url, headers=_bearer(client), content=f,
+            "POST", url, headers=headers, content=f,
             timeout=httpx.Timeout(30.0, read=None),
         ) as r:
             r.raise_for_status()
@@ -166,8 +170,15 @@ def _cmd_bridge_download(client: RelayClient, args) -> int:
 
     out_path = args.output
     if out_path is None:
-        # Derive a sensible default filename.
-        default_name = (result.get("channel_id") or result.get("backup_id") or "download")
+        # T-162: prefer the original filename (from the backup manifest or
+        # the channel's X-Filename header) so a restore keeps the right
+        # name/suffix; fall back to the channel/backup id.
+        default_name = (
+            result.get("filename")
+            or result.get("channel_id")
+            or result.get("backup_id")
+            or "download"
+        )
         out_path = Path(default_name)
 
     # Small backups may come back inline as data_base64 — write that directly.
@@ -189,16 +200,26 @@ def _cmd_bridge_download(client: RelayClient, args) -> int:
         print(f"no download_url in result: {result}", file=sys.stderr)
         return 1
 
-    # Stream the response chunkwise to the output file.
+    # Stream the response chunkwise to the output file. For a channel
+    # download the storage node echoes the original filename in the
+    # X-Filename header (T-162) — use it as the default when no --output
+    # was given.
     try:
-        with out_path.open("wb") as f, httpx.stream(
+        with httpx.stream(
             "GET", url, headers=_bearer(client), timeout=httpx.Timeout(30.0, read=None)
         ) as r:
             r.raise_for_status()
+            if out_path is None:
+                header_name = r.headers.get("x-filename")
+                if header_name:
+                    out_path = Path(header_name)
+                else:
+                    out_path = Path(result.get("channel_id") or result.get("backup_id") or "download")
             total = 0
-            for chunk in r.iter_bytes(chunk_size=_CHUNK):
-                f.write(chunk)
-                total += len(chunk)
+            with out_path.open("wb") as f:
+                for chunk in r.iter_bytes(chunk_size=_CHUNK):
+                    f.write(chunk)
+                    total += len(chunk)
     except httpx.HTTPStatusError as exc:
         print(f"bridge download failed ({exc.response.status_code}): "
               f"{exc.response.text}", file=sys.stderr)
