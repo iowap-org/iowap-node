@@ -169,20 +169,23 @@ def _cmd_bridge_download(client: RelayClient, args) -> int:
         return 1
 
     out_path = args.output
-    if out_path is None:
-        # T-162: prefer the original filename (from the backup manifest or
-        # the channel's X-Filename header) so a restore keeps the right
-        # name/suffix; fall back to the channel/backup id.
-        default_name = (
-            result.get("filename")
-            or result.get("channel_id")
-            or result.get("backup_id")
-            or "download"
-        )
-        out_path = Path(default_name)
+    # NOTE: when out_path is None we do NOT derive a default here — the
+    # storage node echoes the original filename in the X-Filename response
+    # header (T-162), which is only known after the stream starts. We set
+    # the default inside the stream block below, falling back to the
+    # channel/backup id.
 
     # Small backups may come back inline as data_base64 — write that directly.
     if "data_base64" in result and not result.get("download_url"):
+        if out_path is None:
+            # Inline path: no X-Filename header, but the backup manifest
+            # carries the original filename (T-162).
+            out_path = Path(
+                result.get("filename")
+                or result.get("channel_id")
+                or result.get("backup_id")
+                or "download"
+            )
         try:
             out_path.write_bytes(base64.b64decode(result["data_base64"]))
         except Exception as exc:  # noqa: BLE001
