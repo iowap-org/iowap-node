@@ -206,10 +206,10 @@ def _cmd_bridge_download(client: RelayClient, args) -> int:
         print(f"no download_url in result: {result}", file=sys.stderr)
         return 1
 
-    # Stream the response chunkwise to the output file. For a channel
-    # download the storage node echoes the original filename in the
-    # X-Filename header (T-162) — use it as the default when no --output
-    # was given.
+    # Stream the response chunkwise to the output file. When no --output
+    # was given, restore the original filename (T-162): prefer the backup
+    # manifest's filename (result.filename), then the channel's X-Filename
+    # response header, then fall back to the channel/backup id.
     try:
         with httpx.stream(
             "GET", url, headers=_bearer(client), timeout=httpx.Timeout(30.0, read=None)
@@ -217,10 +217,13 @@ def _cmd_bridge_download(client: RelayClient, args) -> int:
             r.raise_for_status()
             if out_path is None:
                 header_name = r.headers.get("x-filename")
-                if header_name:
-                    out_path = Path(header_name)
-                else:
-                    out_path = Path(result.get("channel_id") or result.get("backup_id") or "download")
+                out_path = Path(
+                    result.get("filename")
+                    or header_name
+                    or result.get("channel_id")
+                    or result.get("backup_id")
+                    or "download"
+                )
             total = 0
             with out_path.open("wb") as f:
                 for chunk in r.iter_bytes(chunk_size=_CHUNK):
