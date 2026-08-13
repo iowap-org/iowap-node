@@ -109,6 +109,7 @@ from nodes.common.cli import (
     cli_bridge,
     cli_capabilities,
     cli_docs,
+    cli_file,
     cli_node,
     cli_route,
     cli_task,
@@ -867,6 +868,56 @@ def build_parser() -> argparse.ArgumentParser:
     p_bridge_download.add_argument("--interval", type=int, default=5,
                                    help="Poll interval in seconds (default: 5).")
     p_bridge_download.set_defaults(func=with_client(cli_bridge._cmd_bridge_download))
+
+    # T-164: file send/get — generic transfer-ladder wrapper.
+    p_file = sub.add_parser(
+        "file",
+        help="Send/get files via the generic transfer ladder (T-164).",
+    )
+    p_file_sub = p_file.add_subparsers(dest="file_command", required=True, metavar="<action>")
+
+    p_file_send = p_file_sub.add_parser(
+        "send", help="Send a file via inline/artifact/bridge (auto-chosen)."
+    )
+    p_file_send.add_argument("file", type=str, help="Path to the file to send.")
+    p_file_send.add_argument("--cap", required=True, help="Capability that accepts the file.")
+    p_file_send.add_argument(
+        "--force", choices=["inline", "artifact", "bridge"], default=None,
+        help="Force a transfer mode (must be in the capability's upload_modes).",
+    )
+    p_file_send.add_argument("--name", default="", help="Target filename / task name.")
+    p_file_send.add_argument("--priority", type=int, default=0, help="Task priority.")
+    p_file_send.add_argument("--owner", default=None, help="Node ID that must claim the task.")
+    p_file_send.add_argument("--source", default=None, help="Backup source (backup.create bridge).")
+    p_file_send.add_argument(
+        "--type", default="full", choices=["full", "incremental"],
+        help="Backup type (backup.create bridge).",
+    )
+    p_file_send.add_argument(
+        "--interval", type=int, default=5, help="Poll interval in seconds (bridge mode).",
+    )
+    p_file_send.set_defaults(func=with_client(cli_file._cmd_file_send))
+
+    p_file_get = p_file_sub.add_parser(
+        "get", help="Get a file via inline/bridge (auto-chosen by capability)."
+    )
+    p_file_get.add_argument(
+        "ref", type=str,
+        help="Generic file reference (path for storage.fetch, backup_id for backup.restore, "
+             "channel_id for storage.download_channel).",
+    )
+    p_file_get.add_argument("--cap", required=True, help="Capability that serves the file.")
+    p_file_get.add_argument(
+        "--output", "-o", type=Path, default=None,
+        help="Output path (default: filename from server/channel).",
+    )
+    p_file_get.add_argument("--name", default="", help="Task name.")
+    p_file_get.add_argument("--priority", type=int, default=0, help="Task priority.")
+    p_file_get.add_argument("--owner", default=None, help="Node ID that must claim the task.")
+    p_file_get.add_argument(
+        "--interval", type=int, default=5, help="Poll interval in seconds (bridge mode).",
+    )
+    p_file_get.set_defaults(func=with_client(cli_file._cmd_file_get))
 
     # status / reload
     p_status = sub.add_parser("status", help="Print worker_status.json content.")

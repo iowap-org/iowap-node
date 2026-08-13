@@ -390,6 +390,11 @@ class RelayClient:
                 entry["description"] = cap.get("description")
             if cap.get("input_schema"):
                 entry["input_schema"] = cap.get("input_schema")
+            # T-164: upload_modes (inline/artifact/bridge) an den Server
+            # durchreichen, damit die node-capabilities-Tabelle sie speichert
+            # und file send/file get sie für die Modus-Wahl nutzen kann.
+            if cap.get("upload_modes"):
+                entry["upload_modes"] = cap.get("upload_modes")
             cap_status.append(entry)
 
         queue_depth = sum(in_flight.values())
@@ -491,6 +496,29 @@ class RelayClient:
         r = self._get_with_retry(f"/relay/v2/scheduler/tasks/{task_id}")
         if r.status_code == 404:
             return {"error": "not found", "task_id": task_id}
+        r.raise_for_status()
+        return r.json()
+
+    # -- T-164: transfer ladder --------------------------------------------
+
+    def get_transfer_config(self) -> dict[str, Any]:
+        """Fetch the server's transfer-ladder config (T-164).
+
+        ``GET /relay/v2/discovery/transfer-config`` returns
+        ``{max_inline_bytes, max_artifact_bytes, max_payload_bytes}``.
+        """
+        r = self._get_with_retry("/relay/v2/discovery/transfer-config")
+        r.raise_for_status()
+        return r.json()
+
+    def get_capability_detail(self, name: str) -> dict[str, Any]:
+        """Fetch a single capability's details incl. ``upload_modes`` (T-164).
+
+        ``GET /relay/v2/discovery/capabilities/{name}`` returns the
+        capability with ``input_schema`` and ``upload_modes`` so the
+        ``file send``/``file get`` handler can pick the transfer mode.
+        """
+        r = self._get_with_retry(f"/relay/v2/discovery/capabilities/{name}")
         r.raise_for_status()
         return r.json()
 
