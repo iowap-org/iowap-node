@@ -116,7 +116,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
             if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
                 errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
             # Check for unknown keys
-            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes", "long_run"}
+            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes", "long_run", "upload_modes"}
             extra = set(entry.keys()) - allowed
             if extra:
                 errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
@@ -393,6 +393,11 @@ def _normalize_capability(
     # T-075: forward routes so the heartbeat can register dynamic API endpoints.
     if raw.get("routes") is not None:
         cap["routes"] = raw["routes"]
+    # T-164: forward upload_modes so the heartbeat can populate
+    # node_capabilities.upload_modes and the server can tell node-cli
+    # which transfer modes (inline/artifact/bridge) this capability supports.
+    if raw.get("upload_modes") is not None:
+        cap["upload_modes"] = raw["upload_modes"]
     # Apply env-var overrides (may raise CapabilityValidationError).
     _apply_env_overrides(cap)
     # Re-validate handler after overrides: an override could clear it.
