@@ -50,7 +50,9 @@ def load_json(path: Path, default=None):
 def write_json_atomic(path: Path, data: dict):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, default=str))
-    tmp.rename(path)
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+    os.chmod(path, 0o600)
 
 
 def load_config() -> dict:
@@ -99,13 +101,16 @@ def load_token() -> dict | None:
 def save_token(token: str, expires_at: str | None = None) -> None:
     """Persist the runtime token plus its expiry as a JSON envelope.
 
-    The envelope is ``{"token": "...", "expires_at": "..." | None}``.
+    The envelope is ``{"token": "..."|None, "expires_at": "..."|None}``.
     Writing is atomic (tmp file + rename) so a crash mid-write never
-    leaves a truncated token file.
+    leaves a truncated token file. The file is chmod 0o600 so other local
+    users cannot read the token (security hardening, T-171).
     """
     tmp = TOKEN_PATH.with_suffix(TOKEN_PATH.suffix + ".tmp")
     tmp.write_text(json.dumps({"token": token, "expires_at": expires_at}) + "\n")
-    tmp.rename(TOKEN_PATH)
+    os.chmod(tmp, 0o600)
+    tmp.replace(TOKEN_PATH)
+    os.chmod(TOKEN_PATH, 0o600)
 
 
 def save_meta(meta: dict):
