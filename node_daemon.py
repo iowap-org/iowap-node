@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from pathlib import Path
 import logging
 import os
 import signal
@@ -60,6 +61,30 @@ from nodes.common.relay_client import RelayClient, _effective_config, _setup_log
 
 PID_PATH = BASE_DIR / "node-daemon.pid"
 LOG_PATH = BASE_DIR / "node-daemon.log"
+
+# T-137b-Guard: the polling daemon's PID file. Both daemons must never run
+# at the same time as the same node (token fight + task race).
+_POLLING_PID_PATH = BASE_DIR / "node-cli.pid"
+
+
+def _check_other_daemon(
+    base_dir: Path | None = None,
+    other_pid_path: Path | None = None,
+    own_name: str = "node-daemon",
+    other_name: str = "node-cli daemon",
+) -> str | None:
+    """Return an error message if the polling daemon is running, else None."""
+    from nodes.common import node_utils as _nu
+
+    pid_file = other_pid_path or (base_dir or BASE_DIR) / "node-cli.pid"
+    pid = _nu.read_pid(pid_file)
+    if pid is not None and _nu.pid_running(pid):
+        return (
+            f"{own_name} refuses to start: {other_name} is already running "
+            f"(pid {pid}, {pid_file}). Stop it first — running both as the "
+            f"same node causes token fights and duplicate claims (T-137b)."
+        )
+    return None
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -523,6 +548,11 @@ def main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 1
     BASE_DIR.mkdir(parents=True, exist_ok=True)
+    # T-137b-Guard: refuse to start while the polling daemon is running.
+    conflict = _check_other_daemon(base_dir=BASE_DIR)
+    if conflict:
+        print(conflict, file=sys.stderr)
+        return 1
     PID_PATH.write_text(str(os.getpid()) + "\n", encoding="utf-8")
     try:
         SseDaemon(client, cfg).run()

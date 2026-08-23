@@ -508,10 +508,32 @@ def _daemon_foreground(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def _check_other_daemon(
+    other_pid_path: Path | None = None,
+    own_name: str = "node-cli daemon",
+    other_name: str = "node-daemon",
+) -> str | None:
+    """T-137b-Guard: return an error message if the SSE daemon is running."""
+    pid_file = other_pid_path or (BASE_DIR / "node-daemon.pid")
+    pid = _nu_read_pid(pid_file)
+    if pid is not None and _nu_pid_running(pid):
+        return (
+            f"{own_name} refuses to start: {other_name} is already running "
+            f"(pid {pid}, {pid_file}). Stop it first — running both as the "
+            f"same node causes token fights and duplicate claims (T-137b)."
+        )
+    return None
+
+
 def _daemon_internal() -> int:
     """Inner entry point for the self-spawned daemon process."""
     _setup_logging(os.environ.get("RELAY_LOG_LEVEL"))
     BASE_DIR.mkdir(parents=True, exist_ok=True)
+    # T-137b-Guard: refuse to start while the SSE daemon is running.
+    conflict = _check_other_daemon()
+    if conflict:
+        print(conflict, file=sys.stderr)
+        return 1
     try:
         meta = load_meta()
         cfg = _effective_config()
