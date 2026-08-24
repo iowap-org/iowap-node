@@ -1,48 +1,90 @@
-# Common AI Relay Node Utilities
+# iowap-node
 
-This directory contains the **node-cli daemon** (`node_cli.py`) and shared
-utility functions (`node_utils.py`) for AI Relay worker nodes.
+**IOWAP Node Framework — Build your own node in the IOWAP ecosystem**
 
-> **Note:** The legacy `poller.py` has been removed. All worker nodes should
-> use `node-cli` (the daemon) instead. See `docs/node/cli-reference.md` for
-> the full command reference.
+> **THIS IS THE REPO YOU WANT** if you want to run a node. Clone this, configure your capabilities, and join the network.
 
-## Files
+The node framework provides everything you need to register, heartbeat, claim tasks, and run handlers. Nodes are the workers — they advertise what they can do and execute tasks when matched.
 
-| File | Purpose |
-|------|---------|
-| `node_cli.py` | CLI + daemon: heartbeat, claim, execute, complete. The recommended worker implementation. |
-| `node_utils.py` | Shared utility functions (config/meta/token file I/O). Used by `RelayClient`. |
-| `node_config.py` | YAML profile loading, validation, publishing, and node-level config (status, node_name). |
-| `capability.py` | Capability data model (CapabilitySet, input schema, diff). |
-| `handler_runner.py` | Subprocess execution for capability handlers. |
-
-## Quick start
+## Quick Start
 
 ```bash
-# Start the daemon (runs heartbeat + claim loop)
-python -m nodes.common.node_cli daemon start
+# Clone
+git clone https://github.com/iowap-org/iowap-node.git
+cd iowap-node
 
-# Check status
-python -m nodes.common.node_cli status
+# Setup
+pip install -e .
+cp relay_config.json.example .relay/relay_config.json
+# Edit .relay/relay_config.json: set relay_url, register with a server
 
-# Query all capabilities on the relay server
-python -m nodes.common.node_cli capabilities server
-
-# Submit a task and wait for result
-python -m nodes.common.node_cli task submit --name "my-task" --stage 'chat.ai:{...}'
-python -m nodes.common.node_cli task wait <task_id>
+# Register & run
+node-cli node register    # Get a node ID and token
+node-cli capabilities publish default   # Publish your capabilities
+node-daemon               # Start the event-driven worker
 ```
 
-## Configuration
+## What You Can Build
 
-See `~/.relay/relay_config.json` and `docs/node/setup.md`.
+A node is just a process that:
 
-## Troubleshooting
+1. **Heartbeats** its capabilities to a relay server (what can I do?)
+2. **Claims tasks** that match its capabilities (I'll take this)
+3. **Runs handlers** — scripts or programs — to execute the work
+4. **Completes tasks** with results
 
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| `403 Forbidden` on `complete` | Node is `offline` because heartbeats stopped during long work. | Ensure `background_heartbeat: true` in config. |
-| `401 Unauthorized` on every call | Runtime token expired and recovery failed. | Re-register the node or restore a fresh `ai-relay-agent.json`. |
-| Scheduler never assigns work | Capabilities do not match any stage capability exactly. | Use full capability names with suffix, e.g. `chat.ai`. |
-| Heartbeats 200 but no claims | No pending matching stages. | Check dashboard or `node-cli capabilities server`. |
+Your capabilities are defined in a `node.yaml`:
+
+```yaml
+node_name: "my-storage-node"
+node_description: "Archives and retrieves files"
+capabilities:
+  storage.store:
+    description: "Upload and store a file"
+    type: script
+    input_schema:
+      fields:
+        - name: path
+          type: string
+          required: true
+          description: "Destination path"
+```
+
+## Components
+
+| Component | Description |
+|-----------|-------------|
+| `node-cli` | CLI tool — register, manage, submit tasks, list nodes |
+| `node-daemon` | Event-driven worker — listens for tasks via SSE, runs handlers |
+| `relay_client` | HTTP client library for relay API |
+| `handler_runner` | Execute custom handlers with stdin/stdout contract |
+| `node_config` | Capability/configuration management |
+
+## CLI Reference
+
+```bash
+node-cli register                  # Register with a relay server
+node-cli capabilities server       # List server-known capabilities
+node-cli capabilities publish      # Publish your capabilities
+node-cli task submit <capability>  # Submit a task
+node-cli task wait <id>            # Wait for task completion
+node-cli node list                 # List registered nodes
+node-cli node info <id>            # Node details
+node-cli daemon                    # Start the daemon (foreground)
+node-cli bridge upload <file>      # Upload via bridge route
+node-cli bridge download <url>     # Download via bridge route
+```
+
+## Docker
+
+A base Docker image is available for containerized nodes:
+
+```bash
+docker pull ghcr.io/iowap-org/iowap-node:latest
+```
+
+See `docker/nodes/base/` for the Dockerfile.
+
+## License
+
+AGPL-3.0
