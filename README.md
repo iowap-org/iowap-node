@@ -95,6 +95,16 @@ docker pull ghcr.io/iowap-org/iowap-node:latest
 
 See `docker/nodes/base/` for the Dockerfile.
 
+## Docs
+
+Full documentation in [iowap-org/iowap-docs](https://github.com/iowap-org/iowap-docs):
+
+- `docs/getting-started.md` — first steps
+- `docs/node/setup.md` — node setup
+- `docs/node/cli-reference.md` — full CLI reference
+- `docs/node/capabilities.md` — capability definitions
+- `docs/node/federation.md` — peer-to-peer federation
+
 ## License
 
 AGPL-3.0
