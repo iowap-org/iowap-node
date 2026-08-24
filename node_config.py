@@ -393,6 +393,10 @@ def _normalize_capability(
     # T-075: forward routes so the heartbeat can register dynamic API endpoints.
     if raw.get("routes") is not None:
         cap["routes"] = raw["routes"]
+    # T-154: forward long_run so the daemon can apply the 2h accepted-TTL
+    # instead of the default 300s claimed-TTL for long-running capabilities.
+    if raw.get("long_run") is not None:
+        cap["long_run"] = raw["long_run"]
     # T-164: forward upload_modes so the heartbeat can populate
     # node_capabilities.upload_modes and the server can tell node-cli
     # which transfer modes (inline/artifact/bridge) this capability supports.
