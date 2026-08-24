@@ -36,19 +36,29 @@ A node is just a process that:
 Your capabilities are defined in a `node.yaml`:
 
 ```yaml
-node_name: "my-storage-node"
-node_description: "Archives and retrieves files"
+node_name: "my-notifier"
+node_description: "Sends push notifications"
 capabilities:
-  storage.store:
-    description: "Upload and store a file"
+  notification.send:
+    description: "Send a push notification to my phone"
     type: script
     input_schema:
       fields:
-        - name: path
+        - name: title
           type: string
           required: true
-          description: "Destination path"
+          description: "Notification title"
+        - name: body
+          type: string
+          required: true
+          description: "Notification body"
+        - name: priority
+          type: string
+          required: false
+          description: "low / normal / high"
 ```
+
+Just write a handler script that reads the JSON payload from stdin, calls your push service, and writes the result to stdout. That's it — the node framework handles the rest.
 
 ## Components
 
