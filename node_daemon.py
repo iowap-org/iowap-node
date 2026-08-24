@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""node-daemon — SSE-driven reference daemon for the AI-Relay-Service.
+"""node-daemon — SSE-driven reference daemon for IOWAP.
 
 A sibling to ``node-cli daemon`` that replaces the polling claim loop with
 an SSE event stream. Instead of asking the scheduler for work every N
@@ -522,7 +522,7 @@ class SseDaemon:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="node-daemon",
-        description="SSE-driven daemon for the AI-Relay-Service.",
+        description="SSE-driven daemon for IOWAP.",
     )
     parser.add_argument(
         "--log-level",

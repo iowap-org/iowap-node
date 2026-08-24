@@ -54,7 +54,7 @@ def _load_token() -> str:
     ``{"token": "...", "expires_at": "..."}``. Legacy plaintext files
     (pre-T-088) are still tolerated as a fallback.
     """
-    meta_path = Path.home() / ".relay" / "ai-relay-agent.json"
+    meta_path = Path.home() / ".relay" / "iowap-agent.json"
     if not meta_path.exists():
         raise RuntimeError(f"SSN meta file not found: {meta_path}")
     meta = json.loads(meta_path.read_text())
@@ -62,7 +62,7 @@ def _load_token() -> str:
     token_path = Path.home() / ".relay" / f"{node_id}.token"
     if not token_path.exists():
         # Try the legacy path
-        token_path = Path.home() / ".relay" / "ai-relay-agent.token"
+        token_path = Path.home() / ".relay" / "iowap-agent.token"
     if not token_path.exists():
         raise RuntimeError(f"SSN token file not found for node {node_id}")
     raw = token_path.read_text().strip()

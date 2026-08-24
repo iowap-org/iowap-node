@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""node-cli — generic capability-driven daemon & CLI for the AI-Relay-Service.
+"""node-cli — generic capability-driven daemon & CLI for IOWAP.
 
 The CLI is fully capability-agnostic: all behaviour is driven by an
 external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
@@ -663,7 +663,7 @@ def _cmd_reload(args: argparse.Namespace) -> int:  # noqa: ARG001
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="node-cli",
-        description="Generic capability-driven daemon & CLI for the AI-Relay-Service.",
+        description="Generic capability-driven daemon & CLI for IOWAP.",
     )
     parser.add_argument(
         "--log-level",

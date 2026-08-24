@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.example.ai-relay-agent</string>
+  <string>com.example.iowap-agent</string>
 
   <key>ProgramArguments</key>
   <array>
@@ -24,10 +24,10 @@
   </dict>
 
   <key>StandardOutPath</key>
-  <string>{{HOME}}/.relay/ai-relay-agent.log</string>
+  <string>{{HOME}}/.relay/iowap-agent.log</string>
 
   <key>StandardErrorPath</key>
-  <string>{{HOME}}/.relay/ai-relay-agent.log</string>
+  <string>{{HOME}}/.relay/iowap-agent.log</string>
 
   <key>WorkingDirectory</key>
   <string>{{HOME}}/.relay</string>

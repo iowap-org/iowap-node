@@ -15,9 +15,11 @@ from pathlib import Path
 logger = logging.getLogger("node-utils")
 
 BASE_DIR = Path.home() / ".relay"
-META_PATH = BASE_DIR / "ai-relay-agent.json"
+LEGACY_META_PATH = BASE_DIR / "ai-relay-agent.json"
+LEGACY_TOKEN_PATH = BASE_DIR / "ai-relay-agent.token"
+META_PATH = BASE_DIR / "iowap-agent.json"
 CONFIG_PATH = BASE_DIR / "relay_config.json"
-TOKEN_PATH = BASE_DIR / "ai-relay-agent.token"
+TOKEN_PATH = BASE_DIR / "iowap-agent.token"
 STATUS_PATH = BASE_DIR / "worker_status.json"
 
 DEFAULT_CONFIG = {
@@ -65,9 +67,10 @@ def load_config() -> dict:
 
 
 def load_meta() -> dict:
-    if not META_PATH.exists():
-        raise FileNotFoundError(f"metadata missing: {META_PATH}")
-    return json.loads(META_PATH.read_text())
+    path = META_PATH if META_PATH.exists() else LEGACY_META_PATH
+    if not path.exists():
+        raise FileNotFoundError(f"metadata missing: {META_PATH} (legacy: {LEGACY_META_PATH})")
+    return json.loads(path.read_text())
 
 
 def load_token() -> dict | None:
@@ -79,9 +82,10 @@ def load_token() -> dict | None:
     with an unknown expiry — and migrated to the JSON format on the next
     ``save_token()`` call.
     """
-    if not TOKEN_PATH.exists():
+    if not TOKEN_PATH.exists() and not LEGACY_TOKEN_PATH.exists():
         return None
-    raw = TOKEN_PATH.read_text().strip()
+    token_path = TOKEN_PATH if TOKEN_PATH.exists() else LEGACY_TOKEN_PATH
+    raw = token_path.read_text().strip()
     if not raw:
         return None
     # T-088: prefer the JSON envelope. Fall back to the legacy
@@ -111,10 +115,16 @@ def save_token(token: str, expires_at: str | None = None) -> None:
     os.chmod(tmp, 0o600)
     tmp.replace(TOKEN_PATH)
     os.chmod(TOKEN_PATH, 0o600)
+    # Migrate: remove legacy token file after successful write
+    if LEGACY_TOKEN_PATH.exists() and LEGACY_TOKEN_PATH != TOKEN_PATH:
+        LEGACY_TOKEN_PATH.unlink(missing_ok=True)
 
 
 def save_meta(meta: dict):
     write_json_atomic(META_PATH, meta)
+    # Migrate: remove legacy file after successful write
+    if LEGACY_META_PATH.exists() and LEGACY_META_PATH != META_PATH:
+        LEGACY_META_PATH.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -147,11 +157,11 @@ def pid_running(pid: int) -> bool:
 
 # Location of the deployed repository on a node. Overridable via env var
 # RELAY_REPO_DIR so tests (or non-standard installs) can point it elsewhere.
-REPO_DIR = Path(os.environ.get("RELAY_REPO_DIR", str(Path.home() / "projects" / "ai-relay-service")))
+REPO_DIR = Path(os.environ.get("RELAY_REPO_DIR", str(Path.home() / "projects" / "iowap-server")))
 
 # systemd user unit name restarted by `update apply`. Overridable via env
 # RELAY_SERVICE_UNIT so tests can substitute a no-op service name.
-SERVICE_UNIT = os.environ.get("RELAY_SERVICE_UNIT", "ai-relay-node-daemon.service")
+SERVICE_UNIT = os.environ.get("RELAY_SERVICE_UNIT", "iowap-node-daemon.service")
 
 
 def _git(args: list[str], *, cwd: Path, timeout: float = 30.0) -> subprocess.CompletedProcess:

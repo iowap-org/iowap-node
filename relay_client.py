@@ -407,7 +407,7 @@ class RelayClient:
             "capabilities": cap_status,
         }
         # T-072: forward node-level node_name + description from the
-        # meta file (ai-relay-agent.json) so the server can store and
+        # meta file (iowap-agent.json) so the server can store and
         # surface them via `node list` / `node info`.
         node_name = self.meta.get("node_name")
         if node_name:
