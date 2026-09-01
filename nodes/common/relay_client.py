@@ -442,7 +442,15 @@ class RelayClient:
             body["routes"] = routes
 
         r = self._post_with_retry(
-            "/relay/v2/discovery/heartbeat",
+            # T-176: post to /worker-heartbeat (replace mode). The regular
+            # /heartbeat endpoint merges capabilities union-only on the
+            # server (core/discovery.py), so capabilities removed from the
+            # active profile would linger as ghosts on the relay forever.
+            # /worker-heartbeat hardcodes replace_capabilities=True, i.e.
+            # the server REPLACES the stored set with this heartbeat's
+            # list — removals propagate. Server-side this endpoint has
+            # existed and shipped since T-081 (api/v2/discovery.py).
+            "/relay/v2/discovery/worker-heartbeat",
             body,
         )
         r.raise_for_status()
