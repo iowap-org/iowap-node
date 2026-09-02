@@ -1,6 +1,6 @@
 [project]
 name = "iowap-node"
-version = "2.0.0"
+version = "2.1.0"
 description = "IOWAP Node Framework — daemon, CLI, and handler runner for distributed agent nodes"
 readme = "README.md"
 license = "AGPL-3.0-only"

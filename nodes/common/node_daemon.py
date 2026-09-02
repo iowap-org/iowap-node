@@ -139,6 +139,10 @@ class SseDaemon:
         self._stop_event = threading.Event()
         self._sse_thread: threading.Thread | None = None
         self._hb_thread: threading.Thread | None = None
+        # T-177: last server probe result (health/ready/metrics), written by
+        # the probe thread and merged into the status file by _write_status.
+        self.server_probe: dict[str, Any] = {"ok": False, "error": "probe pending"}
+        self._probe_thread: threading.Thread | None = None
         self._in_flight: dict[str, int] = {}
         self._lock = threading.Lock()
         self._started_at = datetime.now(timezone.utc)
@@ -195,6 +199,7 @@ class SseDaemon:
             "error": error,
             "auth_loop": auth_loop,
             "auth_backoff_seconds": backoff,
+            "server": self.server_probe,
         }
         try:
             write_json_atomic(STATUS_PATH, status)
@@ -241,6 +246,35 @@ class SseDaemon:
             target=self._heartbeat_loop, daemon=True, name="heartbeat"
         )
         self._hb_thread.start()
+
+    # -- T-177: server probe thread -------------------------------------------
+
+    def _probe_loop(self) -> None:
+        """Probe relay /health + /ready + /metrics on a fixed cadence.
+
+        Mirror of the node-cli daemon probe loop: own daemon thread so a
+        hanging HTTP call can never stall heartbeats or the SSE loop.
+        Failures are recorded (never raised): the next tick retries.
+        30 s cadence → worst-case server-outage visibility latency is
+        probe + telemetry interval (~90 s end-to-end).
+        """
+        interval = 30
+        while not self._stop_event.is_set():
+            try:
+                self.server_probe = self.client.probe_server()
+            except Exception as exc:  # noqa: BLE001 — probe must survive
+                log.warning("server probe failed: %s", exc)
+                self.server_probe = {"ok": False, "error": str(exc)}
+            for _ in range(interval):
+                if self._stop_event.is_set():
+                    return
+                time.sleep(1)
+
+    def _start_probe_thread(self) -> None:
+        self._probe_thread = threading.Thread(
+            target=self._probe_loop, daemon=True, name="server-probe"
+        )
+        self._probe_thread.start()
 
     # -- SSE client --------------------------------------------------------
 
@@ -494,6 +528,7 @@ class SseDaemon:
         BASE_DIR.mkdir(parents=True, exist_ok=True)
         self._write_status()
         self._start_heartbeat_thread()
+        self._start_probe_thread()
         self._sse_thread = threading.Thread(
             target=self._sse_loop, daemon=True, name="sse"
         )

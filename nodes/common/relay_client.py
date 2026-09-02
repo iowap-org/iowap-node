@@ -721,6 +721,115 @@ class RelayClient:
         resp.raise_for_status()
         return resp.json()
 
+    # -- T-177: unauthenticated server-status probe ---------------------------
+
+    def probe_server(self) -> dict[str, Any]:
+        """GET /health, /ready and /metrics and reduce them to a dict.
+
+        All three endpoints are public (no token) — this probe is read-only
+        monitoring for dashboards/telemetry. Never raises: on any failure
+        the probe degrades to ``{"ok": False, "error": ...}`` so callers
+        (daemon probe thread, status file, telemetry push) can treat the
+        server as unreachable without their own try/except.
+
+        Shape::
+
+            {"ok": True, "version": "2.0.0", "mode": "core",
+             "database": "ok", "scheduler": "ok",
+             "maintenance_age_seconds": 29.0,
+             "nodes_total": 6, "nodes_online": 4,
+             "queue_depth": 0,
+             "tasks_completed": 311, "tasks_failed": 24,
+             "tasks_cancelled": 7,
+             "stages_total": 311, "stages_retry_ratio": 0.0322,
+             "tasks_created_5m": 0, "tasks_completed_5m": 0,
+             "node_load": {"E4W3CBWQ": 12.87, ...}}
+        """
+        result: dict[str, Any] = {"ok": False, "error": ""}
+        timeout = self.cfg.get("request_timeout", 10)
+        try:
+            r = httpx.get(
+                f"{self.base_url}/health",
+                timeout=timeout,
+                verify=self._verify,
+            )
+            r.raise_for_status()
+            health = r.json()
+            result["version"] = health.get("version")
+            result["mode"] = health.get("mode")
+        except Exception as exc:  # noqa: BLE001 — probe must never throw
+            result["error"] = f"health: {exc}"
+            return result
+
+        try:
+            r = httpx.get(
+                f"{self.base_url}/ready",
+                timeout=timeout,
+                verify=self._verify,
+            )
+            r.raise_for_status()
+            ready = r.json()
+            result["database"] = ready.get("database")
+            result["scheduler"] = ready.get("scheduler")
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = f"ready: {exc}"
+            # /health OK but /ready down → server is up but degraded.
+
+        try:
+            r = httpx.get(
+                f"{self.base_url}/metrics",
+                timeout=timeout,
+                verify=self._verify,
+            )
+            r.raise_for_status()
+            result.update(_parse_prometheus_gauges(r.text))
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = f"metrics: {exc}"
+
+        result["ok"] = not result["error"]
+        return result
+
+
+def _parse_prometheus_gauges(text: str) -> dict[str, Any]:
+    """Pull the interesting gauges out of a Prometheus exposition dump.
+
+    Only simple gauges (``name value``) are collected — histograms are
+    skipped except for the pre-aggregated *_sum/_count lines. Labelled
+    series are mapped: relay_tasks{status=…} → tasks_<status>,
+    relay_node_load{node_id=…} → node_load[node_id].
+    """
+    gauges: dict[str, Any] = {}
+    node_load: dict[str, float] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, _, rest = line.partition(" ")
+        value_str = rest.strip()
+        try:
+            value = float(value_str)
+        except ValueError:
+            continue
+        # Labels? → map into structured fields, skip the raw name.
+        if "{" in name:
+            labels = dict(re.findall(r'(\w+)="([^"]*)"', name))
+            bare = name[: name.index("{")]
+            if bare == "relay_tasks":
+                gauges[f"tasks_{labels.get('status', 'unknown')}"] = value
+            elif bare == "relay_stages":
+                gauges[f"stages_{labels.get('status', 'unknown')}"] = value
+            elif bare == "relay_node_load":
+                node_id = labels.get("node_id")
+                if node_id:
+                    node_load[node_id] = value
+            continue
+        if name.startswith("relay_"):
+            name = name[len("relay_"):]
+        gauges[name] = value
+    if node_load:
+        gauges["node_load"] = node_load
+    return gauges
+
 
 def _filename_from_response(response: httpx.Response, fallback: str) -> str:
     """Extract a filename from Content-Disposition, falling back to the id."""
