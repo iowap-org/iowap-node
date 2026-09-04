@@ -112,6 +112,7 @@ from nodes.common.cli import (
     cli_file,
     cli_node,
     cli_route,
+    cli_server,
     cli_task,
     cli_update,
 )
@@ -855,6 +856,46 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="Show the local + server-side node status."
     )
     p_node_status.set_defaults(func=with_client(cli_node._cmd_node_status))
+
+    # T-178: node register — first-class registration (no client needed).
+    p_node_register = p_node_sub.add_parser(
+        "register",
+        help="Register this node on a relay server (creates local state files).",
+    )
+    p_node_register.add_argument(
+        "server",
+        help="Relay server: IP/host, IP:port, or full URL (default port 8788).",
+    )
+    p_node_register.add_argument("--name", default=None, help="Node name (default: hostname).")
+    p_node_register.add_argument(
+        "--force", action="store_true",
+        help="Re-register even if local node state already exists.",
+    )
+    p_node_register.add_argument(
+        "--timeout", type=float, default=15.0,
+        help="HTTP timeout for the registration request (default: 15s).",
+    )
+    p_node_register.set_defaults(func=cli_server._cmd_node_register)
+
+    # T-178: server status commands — unauthenticated health/metrics probe.
+    p_server_cmd = sub.add_parser(
+        "server", help="Inspect a relay server (health, metrics) without node credentials."
+    )
+    p_server_sub = p_server_cmd.add_subparsers(dest="server_command", required=True, metavar="<action>")
+    p_server_health = p_server_sub.add_parser("health", help="One-shot health probe (/health + /ready).")
+    p_server_health.add_argument(
+        "server", nargs="?", default=None,
+        help="Relay server: IP/host, IP:port, or full URL (default port 8788).",
+    )
+    p_server_health.set_defaults(func=cli_server._cmd_server_health)
+    p_server_metrics = p_server_sub.add_parser(
+        "metrics", help="Show Prometheus metrics (gauges) from the relay server."
+    )
+    p_server_metrics.add_argument(
+        "server", nargs="?", default=None,
+        help="Relay server: IP/host, IP:port, or full URL (default port 8788).",
+    )
+    p_server_metrics.set_defaults(func=cli_server._cmd_server_metrics)
 
     # T-136: route register/unregister/list — temp bridge route management
     p_route = sub.add_parser("route", help="Manage temporary bridge routes (T-136).")
