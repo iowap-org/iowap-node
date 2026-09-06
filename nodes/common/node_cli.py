@@ -15,6 +15,10 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
         node-cli artifact download <artifact_id> [--output <path>]
         node-cli artifact upload <file> [--name <name>] [--task-id <id>] [--stage-id <id>]
 
+    Handler primitives (T-179):
+        node-cli hp put <path> --cap <capability> [--name <name>]
+        node-cli hp get [--file <envelope.json>] [--output <path>] [--out-dir <dir>]
+
     Capability profile management:
         node-cli capabilities list | validate [profile] | publish <profile>
         node-cli capabilities diff [profile] | current
@@ -110,6 +114,7 @@ from nodes.common.cli import (
     cli_capabilities,
     cli_docs,
     cli_file,
+    cli_hp,  # T-179: handler primitives (hp put/get) — subcommand registration below
     cli_node,
     cli_route,
     cli_server,
@@ -1015,6 +1020,43 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval", type=int, default=5, help="Poll interval in seconds (bridge mode).",
     )
     p_file_get.set_defaults(func=with_client(cli_file._cmd_file_get))
+
+    # T-179: hp put/get — handler primitives for handler scripts.
+    # Scripts reden ausschließlich mit dem lokalen node-cli (Subprocess-
+    # Contract); Token/Ladder/Envelope-Verhandlung bleiben im CLI-Prozess.
+    p_hp = sub.add_parser(
+        "hp", help="Handler primitives for handler scripts (T-179)."
+    )
+    p_hp_sub = p_hp.add_subparsers(dest="hp_cmd", required=True, metavar="<action>")
+
+    p_hp_put = p_hp_sub.add_parser(
+        "put", help="Wrap a local file as an envelope (ladder-negotiated)."
+    )
+    p_hp_put.add_argument("path", help="Path to the local file to wrap.")
+    p_hp_put.add_argument(
+        "--cap", required=True, help="Receiving capability (decides upload modes)."
+    )
+    p_hp_put.add_argument(
+        "--name", default=None, help="Override filename inside the envelope."
+    )
+    p_hp_put.set_defaults(func=with_client(cli_hp.dispatch_put))
+
+    p_hp_get = p_hp_sub.add_parser(
+        "get", help="Resolve an __iowap_ref__ envelope (inline/artifact) to a local file."
+    )
+    p_hp_get.add_argument(
+        "--file", default=None,
+        help="Read the envelope JSON from this file (default: stdin).",
+    )
+    p_hp_get.add_argument(
+        "--output", "-o", type=Path, default=None,
+        help="Output path (default: <out_dir>/<filename from envelope>).",
+    )
+    p_hp_get.add_argument(
+        "--out-dir", type=Path, default=None,
+        help="Default drop directory (default: ~/.relay/tmp/${RELAY_TASK_ID:-adhoc}/).",
+    )
+    p_hp_get.set_defaults(func=with_client(cli_hp.dispatch_get))
 
     # status / reload
     p_status = sub.add_parser("status", help="Print worker_status.json content.")
