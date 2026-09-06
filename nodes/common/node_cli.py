@@ -637,8 +637,23 @@ def _cmd_claim(client: RelayClient, args: argparse.Namespace) -> int:
     return 0
 
 
-@with_client
 def _cmd_complete(client: RelayClient, args: argparse.Namespace) -> int:
+    """Complete a claimed stage (T-179 Task 4: env-defaults for IDs).
+
+    ``--task``/``stage_id`` fallen back to ``RELAY_TASK_ID``/
+    ``RELAY_STAGE_ID`` (set by handler_runner for every handler) —
+    handler scripts can complete without repeating their IDs. Explicit
+    flags win over env. Without any ID → stderr message + exit 1.
+    """
+    task_id = getattr(args, "task", None) or os.environ.get("RELAY_TASK_ID")
+    stage_id = args.stage_id or os.environ.get("RELAY_STAGE_ID")
+    if not task_id or not stage_id:
+        print(
+            "complete: no --task/--task-id and no RELAY_TASK_ID/"
+            "RELAY_STAGE_ID in env",
+            file=sys.stderr,
+        )
+        return 1
     if not Path(args.result_file).exists():
         print(f"result file not found: {args.result_file}", file=sys.stderr)
         return 2
@@ -647,7 +662,7 @@ def _cmd_complete(client: RelayClient, args: argparse.Namespace) -> int:
     except json.JSONDecodeError as exc:
         print(f"result file is not valid JSON: {exc}", file=sys.stderr)
         return 2
-    resp = client.complete(args.task, args.stage_id, result)
+    resp = client.complete(task_id, stage_id, result)
     if args.json:
         print(json.dumps(resp, default=str))
         return 0
@@ -738,13 +753,18 @@ def build_parser() -> argparse.ArgumentParser:
     # complete
     p_complete = sub.add_parser("complete", help="Complete a claimed stage.")
     p_complete.add_argument("stage_id", help="Stage ID to complete.")
-    p_complete.add_argument("--task", required=True, help="Task ID of the stage.")
+    p_complete.add_argument(
+        "--task",
+        required=False,
+        default=None,
+        help="Task ID of the stage (default: RELAY_TASK_ID env, T-179).",
+    )
     p_complete.add_argument(
         "--result-file",
         required=True,
         help="Path to a JSON file containing the result dict.",
     )
-    p_complete.set_defaults(func=_cmd_complete)
+    p_complete.set_defaults(func=with_client(_cmd_complete))
 
     # task submit
     p_task = sub.add_parser("task", help="Task operations.")

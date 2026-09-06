@@ -124,6 +124,28 @@ _SUBSCRIBED_TYPES = "stage_claimed,task_created"
 # Reconnect delay after a broken SSE connection.
 _RECONNECT_DELAY = 5.0
 
+# T-179 Task 5: the relay's 404 detail when a stage is already completed
+# (iowap-server api/v2/scheduler.py, complete endpoint).
+_ALREADY_COMPLETED_DETAIL = "not claimed by this node, or not in claimed status"
+
+
+def _is_already_completed(exc: BaseException) -> bool:
+    """Return True if ``exc`` is the relay's 404 'already completed' answer.
+
+    Used by the ``complete_by_script`` opt-in (T-179 Task 5): when a
+    handler script completes the stage itself, the daemon's fallback
+    ``complete`` call is rejected with this exact 404 detail — that is a
+    success, not a failure.
+    """
+    response = getattr(exc, "response", None)
+    if response is None or getattr(response, "status_code", None) != 404:
+        return False
+    try:
+        detail = response.json().get("detail", "")
+    except Exception:  # noqa: BLE001 — non-JSON body can never match
+        return False
+    return _ALREADY_COMPLETED_DETAIL in detail
+
 
 class SseDaemon:
     """SSE-driven daemon: heartbeat thread + SSE event loop + execution.
@@ -486,6 +508,21 @@ class SseDaemon:
                         self.tasks_completed += 1
                 log.info("completed stage %s", stage_id)
             except Exception as exc:  # noqa: BLE001
+                # T-179 Task 5: complete_by_script — wenn das Handler-Script
+                # den Stage selbst completed hat, antwortet das Relay mit
+                # dem 404 "not claimed"-Detail. Bei Opt-in zählt das als
+                # Erfolg, nicht als Fehler.
+                script_complete = bool((cap.get("config") or {}).get(
+                    "complete_by_script"
+                ))
+                if script_complete and _is_already_completed(exc):
+                    with self._lock:
+                        self.tasks_completed += 1
+                    log.info(
+                        "stage %s already completed by script — counted as done",
+                        stage_id,
+                    )
+                    return
                 with self._lock:
                     self.tasks_failed += 1
                     if task_id is not None:

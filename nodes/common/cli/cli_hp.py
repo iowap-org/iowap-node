@@ -31,12 +31,19 @@ Test-Stubs, die hier bereits vorbereitet sind).
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import sys
 from pathlib import Path
 from typing import Any, TextIO
 
+import httpx
+
 from nodes.common.cli.cli_file import _load_capability_modes  # noqa: F401
-from nodes.common.envelope import (  # noqa: F401 — genutzt ab Phase 3
+from nodes.common.envelope import (  # noqa: F401
+    ENVELOPE_KEY,
     EnvelopeError,
+    dump,
     is_envelope,
     make_envelope,
     parse_envelope,
@@ -108,7 +115,31 @@ def decide_mode(
     "fehlender Key = unbegrenzt"-Verhalten von decide_mode ohne Wirkung
     auf den cli_file-Pfad.)
     """
-    raise NotImplementedError("Phase 3 (T-179 Task 2/2b): implement decide_mode")
+    if force is not None:
+        if force not in upload_modes:
+            raise ValueError(
+                f"--force {force!r} not supported by capability "
+                f"(upload_modes={upload_modes})"
+            )
+        return force
+
+    th = thresholds or {}
+    max_inline = th.get("max_inline_bytes")
+    max_artifact = th.get("max_artifact_bytes")
+
+    if "inline" in upload_modes and (max_inline is None or size_bytes <= max_inline):
+        return "inline"
+    if "artifact" in upload_modes and (
+        max_artifact is None or size_bytes <= max_artifact
+    ):
+        return "artifact"
+    if "bridge" in upload_modes:
+        return "bridge"
+    raise ValueError(
+        f"file too big: {size_bytes} bytes, capability supports only {upload_modes} "
+        f"(server ladder: inline<={(th or {}).get('max_inline_bytes', 0)}, "
+        f"artifact<={(th or {}).get('max_artifact_bytes', 0)})"
+    )
 
 
 def cmd_put(
@@ -153,7 +184,69 @@ def cmd_put(
 
     ``name`` überschreibt den Dateinamen im Umschlag (Default: path.name).
     """
-    raise NotImplementedError("Phase 3 (T-179 Task 2): implement cmd_put")
+    if not path.is_file():
+        print(f"file not found: {path}", file=sys.stderr)
+        return 2
+
+    # 1. Capability-Details (upload_modes); SystemExit bei Lookup-Fehlern
+    #    propagiert — main() macht daraus den exit code.
+    cap_detail = _load_capability_modes(client, cap)
+    upload_modes = list(
+        cap_detail.get("upload_modes") or ["inline", "artifact", "bridge"]
+    )
+
+    # 2. Server-Treppen-Konfig laden; defensiv: nur echte ints übernehmen,
+    #    alles andere = Key weglassen → Stufe unbegrenzt (F2.5-Semantik).
+    try:
+        transfer_cfg = client.get_transfer_config()
+    except httpx.HTTPError as exc:
+        print(f"failed to load transfer config: {exc}", file=sys.stderr)
+        return 1
+    thresholds: dict[str, int] = {}
+    if isinstance(transfer_cfg, dict):
+        for key in ("max_inline_bytes", "max_artifact_bytes"):
+            value = transfer_cfg.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                thresholds[key] = value
+
+    # 3. Größe via stat (F2.9) — Bytes erst nach der Entscheidung lesen.
+    size = path.stat().st_size
+    try:
+        mode = decide_mode(size, upload_modes, thresholds)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    # 4. Umschlag je Modus bauen.
+    if mode == "inline":
+        envelope = make_envelope(
+            src="inline", filename=name or path.name, data=path.read_bytes()
+        )
+    elif mode == "artifact":
+        try:
+            resp = client.upload_artifact(path, name=name or path.name)
+        except httpx.HTTPError as exc:
+            print(f"artifact upload failed: {exc}", file=sys.stderr)
+            return 1
+        artifact_id = resp.get("artifact_id") if isinstance(resp, dict) else None
+        if not artifact_id:
+            print(
+                "artifact upload response without artifact_id", file=sys.stderr
+            )
+            return 1
+        envelope = make_envelope(
+            src="artifact",
+            filename=name or path.name,
+            artifact_id=str(artifact_id),
+        )
+    else:  # bridge — MVP-Grenze (F2.10), bewusst.
+        raise NotImplementedError("bridge-put folgt in Task 3")
+
+    # 5. stdout: GENAU EINE compacte JSON-Zeile; out=None → sys.stdout zur
+    #    CALL-Zeit (capsys-kompatibel).
+    stream = out if out is not None else sys.stdout
+    stream.write(dump(envelope) + "\n")
+    return 0
 
 
 def cmd_get(
@@ -195,7 +288,68 @@ def cmd_get(
     * Exit codes: ``0`` ok, ``1`` Auflöse-/Verifikationsfehler,
       ``2`` usage.
     """
-    raise NotImplementedError("Phase 3 (T-179 Task 3): implement cmd_get")
+    try:
+        src, ref = parse_envelope(envelope)
+    except EnvelopeError as exc:
+        print(f"hp get: {exc}", file=sys.stderr)
+        return 1
+
+    # Dateiname aus dem Umschlag ist NICHT trustbar (keine ../absoluten
+    # Pfade) — sanitizen.
+    raw_name = (envelope.get(ENVELOPE_KEY) or {}).get("filename")
+    if not isinstance(raw_name, str) or not raw_name:
+        raw_name = "download"
+    safe_name = Path(raw_name).name
+    if safe_name in ("", ".", ".."):
+        safe_name = "download"
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if src == "bridge":
+        print(
+            "hp get: bridge resolution not supported by this node-cli version",
+            file=sys.stderr,
+        )
+        return 1
+
+    if src == "inline":
+        target = output or out_dir / safe_name
+        target.write_bytes(ref)
+    else:  # artifact — RelayClient kümmert sich ums Streaming.
+        try:
+            target = client.download_artifact(ref, output or out_dir / safe_name)
+        except httpx.HTTPError as exc:
+            print(f"hp get: artifact download failed: {exc}", file=sys.stderr)
+            return 1
+
+    # sha256-Verifikation, wenn der Umschlag einen trägt (inline immer).
+    expected = (envelope.get(ENVELOPE_KEY) or {}).get("sha256")
+    if expected:
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        if digest != expected:
+            print(
+                f"hp get: sha256 mismatch ({digest} != {expected})",
+                file=sys.stderr,
+            )
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            return 1
+
+    stream = out if out is not None else sys.stdout
+    stream.write(
+        json.dumps(
+            {
+                "path": str(target),
+                "size_bytes": target.stat().st_size,
+                "src": src,
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    return 0
 
 
 def default_out_dir() -> Path:
@@ -229,7 +383,11 @@ def dispatch_put(client: RelayClient, args: argparse.Namespace) -> int:
     Delegiert an ``cmd_put(client, cap=args.cap, path=Path(args.path),
     name=args.name)``.
     """
-    raise NotImplementedError("Phase 3 (T-179 Task 2): implement dispatch_put")
+    path = Path(args.path)
+    if not path.is_file():
+        print(f"file not found: {path}", file=sys.stderr)
+        return 2
+    return cmd_put(client, cap=args.cap, path=path, name=args.name)
 
 
 def dispatch_get(client: RelayClient, args: argparse.Namespace) -> int:
@@ -251,4 +409,28 @@ def dispatch_get(client: RelayClient, args: argparse.Namespace) -> int:
     Eingabe muss ein JSON-Objekt mit ``__iowap_ref__`` sein; ungültiges
     JSON → stderr + ``return 2`` (usage). Delegiert an ``cmd_get``.
     """
-    raise NotImplementedError("Phase 3 (T-179 Task 3): implement dispatch_get")
+    if args.file:
+        try:
+            raw = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"hp get: cannot read {args.file}: {exc}", file=sys.stderr)
+            return 2
+    else:
+        raw = sys.stdin.read()
+
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"hp get: invalid JSON: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(envelope, dict) or ENVELOPE_KEY not in envelope:
+        print(
+            f"hp get: no {ENVELOPE_KEY} key — not an envelope",
+            file=sys.stderr,
+        )
+        return 2
+
+    out_dir = args.out_dir if args.out_dir is not None else default_out_dir()
+    return cmd_get(
+        client, envelope=envelope, out_dir=out_dir, output=args.output
+    )

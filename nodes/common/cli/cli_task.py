@@ -9,6 +9,7 @@ circular import and keeps the ``cli.RelayClient`` monkeypatch working).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from typing import Any
@@ -64,19 +65,32 @@ def _cmd_task_result(client: RelayClient, args) -> int:
 
 
 def _cmd_task_note(client: RelayClient, args) -> int:
-    """node-cli task note <task_id> <message> — append a note to a task."""
+    """node-cli task note <task_id> <message> — append a note to a task.
+
+    T-179 Task 4: ``task_id`` falls back to ``RELAY_TASK_ID`` (set by
+    handler_runner for every handler) — handler scripts can post notes
+    without repeating their task ID. Explicit argument wins over env.
+    Without any ID → stderr message + exit 1.
+    """
+    task_id = args.task_id or os.environ.get("RELAY_TASK_ID")
+    if not task_id:
+        print(
+            "note: no task_id and no RELAY_TASK_ID in env",
+            file=sys.stderr,
+        )
+        return 1
     try:
-        data = client.add_task_note(args.task_id, args.message)
+        data = client.add_task_note(task_id, args.message)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
-            print(f"Task {args.task_id} not found", file=sys.stderr)
+            print(f"Task {task_id} not found", file=sys.stderr)
             return 1
         print(f"Error: {exc.response.status_code} {exc.response.text}", file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(data, default=str))
         return 0
-    print(f"✅ Note added to task {data.get('task_id', args.task_id)}")
+    print(f"✅ Note added to task {data.get('task_id', task_id)}")
     print(f"   {data.get('message', '')} ({data.get('created_at', '')})")
     return 0
 

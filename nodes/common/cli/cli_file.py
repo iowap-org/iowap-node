@@ -89,20 +89,24 @@ def _choose_mode(
             )
         return force
 
-    max_inline = int(transfer_cfg.get("max_inline_bytes", 0))
-    max_artifact = int(transfer_cfg.get("max_artifact_bytes", 0))
+    # T-179 Task 2b: the decision point is shared with ``hp put`` via
+    # ``cli_hp.decide_mode``. The import stays function-local because
+    # ``cli_hp`` imports ``_load_capability_modes`` from this module at
+    # module level (a module-level back-import would be circular). The
+    # 0-defaults are materialized HERE (not inside decide_mode) so
+    # cli_file keeps its exact current behavior: a missing server key
+    # forbids the rung on this path. Error strings stay byte-identical
+    # (frozen decide_mode contract).
+    from nodes.common.cli import cli_hp
 
-    if "inline" in upload_modes and size <= max_inline:
-        return "inline"
-    if "artifact" in upload_modes and size <= max_artifact:
-        return "artifact"
-    if "bridge" in upload_modes:
-        return "bridge"
-    # No supported mode fits → caller surfaces a "file too big" error.
-    raise SystemExit(
-        f"file too big: {size} bytes, capability supports only {upload_modes} "
-        f"(server ladder: inline<={max_inline}, artifact<={max_artifact})"
-    )
+    thresholds = {
+        "max_inline_bytes": int(transfer_cfg.get("max_inline_bytes", 0)),
+        "max_artifact_bytes": int(transfer_cfg.get("max_artifact_bytes", 0)),
+    }
+    try:
+        return cli_hp.decide_mode(size, upload_modes, thresholds, force=force)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
 
 
 def _load_capability_modes(client: RelayClient, cap: str) -> dict[str, Any]:
