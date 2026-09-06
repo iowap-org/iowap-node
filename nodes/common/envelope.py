@@ -80,7 +80,13 @@ def make_envelope(
     }
     if data is not None:
         ref["data_base64"] = base64.b64encode(data).decode("ascii")
-        ref["sha256"] = sha256 or hashlib.sha256(data).hexdigest()
+    # T-166 (F8): sha256 im Envelope — inline berechnet sie aus den Daten,
+    # bridge/artifact tragen den Sender-Hash explizit (F8-Verifizierung beim
+    # Empfänger auch ohne inline-Payload).
+    if sha256 is not None:
+        ref["sha256"] = sha256
+    elif data is not None:
+        ref["sha256"] = hashlib.sha256(data).hexdigest()
     if artifact_id is not None:
         ref["artifact_id"] = artifact_id
     if storage_ref is not None:

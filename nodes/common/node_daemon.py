@@ -40,6 +40,7 @@ from typing import Any
 
 import httpx
 
+from nodes.common import file_serve
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     current_profile_name,
@@ -566,6 +567,24 @@ class SseDaemon:
         self._write_status()
         self._start_heartbeat_thread()
         self._start_probe_thread()
+        # T-166 (F1): ephemeral file serve im Daemon — der CLI-Prozess stirbt
+        # nach dem stdout-Envelope, der Serve-Endpoint muss überleben. Bind-
+        # Fehler (Port belegt) = WARNING, der Node läuft ohne Serve weiter
+        # (hp put bridge meldet dann den F5-Fehler statt zu crashen).
+        try:
+            file_serve.set_on_exhausted(
+                lambda route_path: file_serve.unregister_after_transfer(
+                    self.client, route_path
+                )
+            )
+            file_serve.start_serve_thread()
+            log.info(
+                "ephemeral file serve listening on %s:%d",
+                file_serve.SERVE_HOST,
+                file_serve.serve_port(),
+            )
+        except (OSError, RuntimeError) as exc:
+            log.warning("ephemeral file serve unavailable: %s", exc)
         self._sse_thread = threading.Thread(
             target=self._sse_loop, daemon=True, name="sse"
         )

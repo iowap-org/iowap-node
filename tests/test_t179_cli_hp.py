@@ -220,13 +220,9 @@ def test_put_artifact_without_artifact_id_returns_exit_1(
     assert cli_hp.cmd_put(client, cap="cap.x", path=f) == 1
 
 
-def test_put_bridge_raises_notimplementederror(tmp_path, client, monkeypatch):
-    # FROZEN (F2.10): NotImplementedError("bridge-put folgt in Task 3").
-    f = tmp_path / "blob.bin"
-    f.write_bytes(b"0123456789")
-    _modes(monkeypatch, ["bridge"])
-    with pytest.raises(NotImplementedError, match="bridge-put folgt in Task 3"):
-        cli_hp.cmd_put(client, cap="cap.x", path=f)
+# (T-166 Phase 3: die MVP-Grenz-Pins test_put_bridge_raises_notimplementederror
+# und test_get_bridge_not_supported_returns_exit_1 sind ersetzt — bridge-put/get
+# sind implementiert, Verträge jetzt in tests/test_t166_hp_bridge.py.)
 
 
 def test_put_name_override_sets_envelope_filename(tmp_path, client, monkeypatch, capsys):
@@ -348,21 +344,6 @@ def test_get_artifact_downloads_via_client(client, tmp_path, capsys):
     rc = cli_hp.cmd_get(client, envelope=env, out_dir=tmp_path / "out")
     assert rc == 0
     client.download_artifact.assert_called_once()
-
-
-def test_get_bridge_not_supported_returns_exit_1(client, tmp_path, capsys):
-    # FROZEN Meldung (F2.10).
-    env = cli_hp.make_envelope(
-        src="bridge", filename="x.bin", storage_ref={"type": "channel", "id": "ch_1"}
-    )
-    rc = cli_hp.cmd_get(
-        client, envelope=env, out_dir=tmp_path / "out"
-    )
-    assert rc == 1
-    assert (
-        "hp get: bridge resolution not supported by this node-cli version"
-        in capsys.readouterr().err
-    )
 
 
 def test_get_invalid_envelope_returns_exit_1(client, tmp_path, capsys):

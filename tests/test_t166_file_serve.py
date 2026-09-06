@@ -89,13 +89,220 @@ def test_frozen_signatures():
         assert str(inspect.signature(getattr(file_serve, name))) == expected, name
 
 
-def test_task23_skeletons_present():
-    # Skeletons existieren mit FROZENER Signatur; Körper füllt Phase 3.
-    assert issubclass(file_serve.EphemeralServeHandler, BaseHTTPRequestHandler)
-    for method in ("do_GET", "do_POST"):
-        assert callable(getattr(file_serve.EphemeralServeHandler, method))
-    with pytest.raises(NotImplementedError):
-        file_serve.start_serve_thread()
+# --- Serve-Handler + start_serve_thread (Task 2/3, Phase 3) ---------------------
+#
+# Der Skeleton-Pin-Test (Phase 1) ist hier ersetzt: Phase 3 füllt die Körper,
+# die Verträge stehen im Handler-/start_serve_thread-Docstring.
+
+
+import time
+
+
+@pytest.fixture
+def serve_globals(monkeypatch):
+    """Serve-Laufzeit isolieren: Threads/Server/Hook/Sweep-Zeitstempel."""
+    monkeypatch.setattr(file_serve, "_serve_thread", None)
+    monkeypatch.setattr(file_serve, "_serve_server", None)
+    monkeypatch.setattr(file_serve, "_ON_EXHAUSTED", None)
+    monkeypatch.setattr(file_serve, "_last_sweep", 0.0)
+
+
+def _stage(serve_dir: Path, payload: bytes, max_downloads: int = 1):
+    src = serve_dir.parent / "src.bin"
+    src.write_bytes(payload)
+    return file_serve.stage_file(src, max_downloads=max_downloads)
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    """Sync mit dem Request-Thread: Zählen/aufräumen passiert NACH dem Senden."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_serve_post_streams_staged_file(serve_dir, serve_globals):
+    payload = b"bridge-payload-123"
+    tid, _, _ = _stage(serve_dir, payload)
+    server, port = _spawn(file_serve.EphemeralServeHandler)
+    try:
+        r = httpx.post(f"http://127.0.0.1:{port}/transfer/{tid}", content=b"")
+        assert r.status_code == 200
+        assert r.content == payload
+        assert r.headers["Content-Length"] == str(len(payload))
+        assert r.headers["Content-Type"] == "application/octet-stream"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_serve_post_unknown_or_malformed_id_404(serve_dir, serve_globals):
+    server, port = _spawn(file_serve.EphemeralServeHandler)
+    try:
+        unknown = httpx.post(
+            f"http://127.0.0.1:{port}/transfer/{'a' * 22}", content=b""
+        )
+        assert unknown.status_code == 404
+        malformed = httpx.post(
+            f"http://127.0.0.1:{port}/transfer/too-short", content=b""
+        )
+        assert malformed.status_code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_serve_max_downloads_exhausts_and_fires_hook(serve_dir, serve_globals):
+    payload = b"once-only"
+    tid, staged, _ = _stage(serve_dir, payload)
+    hook_calls: list[str] = []
+    file_serve.set_on_exhausted(hook_calls.append)
+    server, port = _spawn(file_serve.EphemeralServeHandler)
+    url = f"http://127.0.0.1:{port}/transfer/{tid}"
+    try:
+        r = httpx.post(url, content=b"")
+        assert r.status_code == 200
+        assert r.content == payload
+        # F6: Datei + Manifest weg, Hook mit route_path gefeuert — Zählen
+        # passiert nach dem Senden → poll-sync mit dem Request-Thread.
+        assert _wait_until(lambda: not staged.exists())
+        assert _wait_until(lambda: hook_calls == [f"/download/{tid}"])
+        assert not (serve_dir / f"{tid}.json").exists()
+        # Ephemeral bewiesen: zweiter Pull ist 404.
+        r2 = httpx.post(url, content=b"")
+        assert r2.status_code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_serve_health_and_post_only_channel(serve_globals):
+    server, port = _spawn(file_serve.EphemeralServeHandler)
+    try:
+        r = httpx.get(f"http://127.0.0.1:{port}/health")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True}
+        assert httpx.get(f"http://127.0.0.1:{port}/other").status_code == 404
+        # GET auf /transfer → 404 (POST-only; Proxy matcht Methode exakt).
+        assert (
+            httpx.get(f"http://127.0.0.1:{port}/transfer/{'a' * 22}").status_code
+            == 404
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_serve_post_body_ignored(serve_dir, serve_globals):
+    payload = b"body-must-not-matter"
+    tid, _, _ = _stage(serve_dir, payload)
+    server, port = _spawn(file_serve.EphemeralServeHandler)
+    try:
+        r = httpx.post(
+            f"http://127.0.0.1:{port}/transfer/{tid}", content=b"garbage"
+        )
+        assert r.status_code == 200
+        assert r.content == payload
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_serve_count_persists_between_downloads(serve_dir, serve_globals):
+    payload = b"two-downloads"
+    tid, staged, _ = _stage(serve_dir, payload, max_downloads=2)
+    server, port = _spawn(file_serve.EphemeralServeHandler)
+    url = f"http://127.0.0.1:{port}/transfer/{tid}"
+    try:
+        r1 = httpx.post(url, content=b"")
+        assert r1.status_code == 200
+        # Download-Zählen passiert nach dem Senden (Request-Thread) → poll-sync.
+        manifest_file = serve_dir / f"{tid}.json"
+        assert _wait_until(
+            lambda: manifest_file.exists()
+            and json.loads(manifest_file.read_text()).get("downloads") == 1
+        )
+        manifest = json.loads(manifest_file.read_text())
+        assert manifest["downloads"] == 1
+        r2 = httpx.post(url, content=b"")
+        assert r2.status_code == 200
+        assert _wait_until(lambda: not staged.exists())
+        r3 = httpx.post(url, content=b"")
+        assert r3.status_code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_sweep_removes_stale_files(serve_dir, serve_globals):
+    serve_dir.mkdir(parents=True, exist_ok=True)
+    old_ts = time.time() - 7200
+    stale_file = serve_dir / "stalefile"
+    stale_file.write_bytes(b"x")
+    os.utime(stale_file, (old_ts, old_ts))
+    stale_manifest = serve_dir / ("d" * 22 + ".json")
+    stale_manifest.write_text("{}")
+    os.utime(stale_manifest, (old_ts, old_ts))
+    fresh = serve_dir / "fresh.bin"
+    fresh.write_bytes(b"y")
+
+    file_serve._sweep_stale_transfers()
+
+    assert not stale_file.exists()
+    assert not stale_manifest.exists()
+    assert fresh.exists()
+
+
+def test_sweep_rate_limited(serve_dir, serve_globals):
+    serve_dir.mkdir(parents=True, exist_ok=True)
+    file_serve._last_sweep = time.time()  # gerade gesweept
+    stale_file = serve_dir / "stale.bin"
+    stale_file.write_bytes(b"x")
+    old_ts = time.time() - 7200
+    os.utime(stale_file, (old_ts, old_ts))
+
+    file_serve._sweep_stale_transfers()
+
+    assert stale_file.exists()  # Intervall nicht erreicht → nichts getan
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_start_serve_thread_binds_writes_manifest_idempotent(
+    serve_dir, serve_globals, manifest_path, monkeypatch
+):
+    port = _free_port()
+    monkeypatch.setenv("IOWAP_SERVE_PORT", str(port))
+    try:
+        t1 = file_serve.start_serve_thread()
+        assert t1.is_alive() and t1.daemon
+        assert file_serve.read_manifest() == {"port": port}
+        assert file_serve.probe_serve(port) is True
+        t2 = file_serve.start_serve_thread()
+        assert t2 is t1  # Idempotenz — kein Doppel-Bind
+    finally:
+        if file_serve._serve_server is not None:
+            file_serve._serve_server.shutdown()
+            file_serve._serve_server.server_close()
+
+
+def test_start_serve_thread_bind_fail_raises_no_manifest(
+    serve_dir, serve_globals, manifest_path, monkeypatch
+):
+    port = _free_port()
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", port))
+        blocker.listen(1)
+        monkeypatch.setenv("IOWAP_SERVE_PORT", str(port))
+        with pytest.raises(RuntimeError, match="bind failed"):
+            file_serve.start_serve_thread()
+    assert not manifest_path.exists()  # kein Manifest bei Bind-Fehl
 
 
 # --- serve_port ---------------------------------------------------------------

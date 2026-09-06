@@ -49,10 +49,13 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import threading
-from http.server import BaseHTTPRequestHandler
+import time
+from collections.abc import Callable
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -67,6 +70,67 @@ SERVE_DIR = Path.home() / ".relay" / "serve"
 MANIFEST_PATH = Path.home() / ".relay" / "serve.json"
 
 _ROUTE_BASE = "/relay/v2/dashboard/api/node-routes"
+
+# --- Laufzeitzustand (Task 2/3) ------------------------------------------------
+# TTL für staged Reste ohne Route (Sweep-Backstop, F6); Sweep-Intervall im
+# Serve-Thread. transfer_id: genau 22 url-safe Zeichen (F2).
+_SERVE_TTL_SECONDS = 3600.0
+_SWEEP_INTERVAL = 60.0
+_TRANSFER_RE = re.compile(r"^/transfer/([A-Za-z0-9_-]{22})$")
+
+# Daemon-Laufzeit: Tests patchen diese Modul-Attribute (Call-Zeit-Lookup).
+_serve_thread: threading.Thread | None = None
+_serve_server: ThreadingHTTPServer | None = None
+_ON_EXHAUSTED: Callable[[str], None] | None = None
+_last_sweep = 0.0
+_transfer_lock = threading.Lock()
+
+
+def set_on_exhausted(hook: Callable[[str], None] | None) -> None:
+    """Hook ``(route_path) -> None`` nach erschöpftem Transfer (F6).
+
+    Der Daemon verdrahtet hier ``unregister_after_transfer`` (Closure über
+    seinen RelayClient); Tests setzen einen Spy. Aufruf erfolgt im
+    Request-Thread NACH vollständig gesendeter Antwort — Hook-Fehler
+    werden geloggt, brechen den Download nie.
+    """
+    global _ON_EXHAUSTED
+    _ON_EXHAUSTED = hook
+
+
+def discard_staged(transfer_id: str) -> None:
+    """Staged Datei + Transfer-Manifest entfernen (Rollback nach Register-Fail).
+
+    ``hp put`` (Task 4) ruft das, wenn die Route-Registrierung scheitert —
+    kein stale Rest ohne Route im SERVE_DIR (der Sweep ist der Backstop).
+    """
+    (SERVE_DIR / transfer_id).unlink(missing_ok=True)
+    (SERVE_DIR / (transfer_id + ".json")).unlink(missing_ok=True)
+
+
+def _sweep_stale_transfers() -> None:
+    """Lösche SERVE_DIR-Reste älter als ``_SERVE_TTL_SECONDS`` (rate-limited).
+
+    Deckt Abbrüche zwischen Staging und Register ab (Datei ohne Route).
+    Läuft im Request-Pfad, aber höchstens alle ``_SWEEP_INTERVAL`` Sekunden
+    (``_last_sweep``); jede Datei-Operation ist best-effort.
+    """
+    global _last_sweep
+    now = time.time()
+    if now - _last_sweep < _SWEEP_INTERVAL:
+        return
+    _last_sweep = now
+    cutoff = now - _SERVE_TTL_SECONDS
+    try:
+        entries = list(SERVE_DIR.iterdir())
+    except OSError:
+        return
+    for p in entries:
+        try:
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 def serve_port() -> int:
@@ -235,45 +299,147 @@ def probe_serve(port: int, timeout: float = 2.0) -> bool:
 
 
 class EphemeralServeHandler(BaseHTTPRequestHandler):
-    """Skeleton (Phase 3 / Plan Task 2): POST ``/transfer/{id}`` + GET ``/health``.
+    """POST ``/transfer/{id}`` + GET ``/health`` (T-166, F2/F6/F7).
 
-    FROZEN Verträge für Phase 3:
+    Verträge (FROZEN aus Phase 1, jetzt implementiert):
 
-    * POST ``/transfer/{transfer_id}`` (leerer Body, Body wird ignoriert):
-      streamt die staged Datei chunkwise (``shutil.copyfileobj``, 64 KiB),
-      setzt ``Content-Length``; zählt den Download erst bei vollständigem
-      Senden (HTTP 200); löscht Datei + Manifest nach ``max_downloads``
-      und triggert den ``on_exhausted(route_path)``-Hook (Daemon verdrahtet
-      dort ``unregister_after_transfer``); räumt Staged-Files ohne Route
-      im Idle nach TTL auf (Plan Task 2).
+    * POST ``/transfer/{transfer_id}`` (Body wird ignoriert/drainiert):
+      streamt die staged Datei chunkwise (``shutil.copyfileobj``, 64 KiB)
+      mit ``Content-Length``; zählt den Download erst bei vollständig
+      gesendetem Body (HTTP 200, kein Abbruch); löscht Datei + Manifest
+      nach ``max_downloads`` (F6) und triggert den ``on_exhausted``-Hook
+      (Daemon verdrahtet dort ``unregister_after_transfer``); Abbrüche
+      zählen NICHT → Retry bis TTL. Nebeneffekt: rate-limited Sweep.
     * GET ``/health`` → 200 ``{"ok": true}`` (Contract für ``probe_serve``).
-    * Unbekannte transfer_id → 404. Abgebrochene/fehlerhafte Downloads
-      zählen NICHT (F6 — Retry möglich bis TTL).
-    * Logging quiet (kein Stderr-Spam pro Request im Daemon).
+    * Unbekannte/fremde Pfade oder falsche ID-Form → 404. GET auf
+      ``/transfer/...`` → 404 (POST-only-Kanal — der Proxy matcht die
+      registrierte Methode exakt).
+    * Logging quiet (Debug-Level, kein Stderr-Spam pro Request im Daemon).
     """
 
-    def do_GET(self) -> None:  # pragma: no cover — Phase 3 (Plan Task 2)
-        raise NotImplementedError("serve handler folgt in Task 2")
+    def log_message(self, format: str, *args) -> None:
+        log.debug("serve: " + format, *args)
 
-    def do_POST(self) -> None:  # pragma: no cover — Phase 3 (Plan Task 2)
-        raise NotImplementedError("serve handler folgt in Task 2")
+    def _drain_body(self) -> None:
+        """Request-Body konsumieren (F7 sendet leer; Proxy kann mehr schicken)."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        remaining = max(0, length)
+        while remaining > 0:
+            chunk = self.rfile.read(min(64 * 1024, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
+    def _send_json(self, code: int, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        self._drain_body()
+        if self.path == "/health":
+            self._send_json(200, b'{"ok": true}')
+        else:
+            self._send_json(404, b'{"error": "not found"}')
+
+    def do_POST(self) -> None:
+        self._drain_body()
+        m = _TRANSFER_RE.match(self.path)
+        if not m:
+            self._send_json(404, b'{"error": "not found"}')
+            return
+        transfer_id = m.group(1)
+        staged = SERVE_DIR / transfer_id
+        manifest_file = Path(str(staged) + ".json")
+        with _transfer_lock:
+            try:
+                fh = staged.open("rb")
+            except OSError:
+                self._send_json(404, b'{"error": "unknown transfer"}')
+                return
+            size = staged.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        try:
+            with fh:
+                shutil.copyfileobj(fh, self.wfile, length=64 * 1024)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            # Abgebrochener Download zählt NICHT (F6 — Retry möglich bis TTL).
+            log.warning("transfer %s aborted mid-stream: %s", transfer_id, exc)
+            return
+        self._record_download(transfer_id, staged, manifest_file)
+
+    def _record_download(
+        self, transfer_id: str, staged: Path, manifest_file: Path
+    ) -> None:
+        """Download zählen; bei ``max_downloads`` abräumen + Hook feuern (F6)."""
+        with _transfer_lock:
+            try:
+                data = json.loads(manifest_file.read_text())
+            except (OSError, ValueError):
+                # Parallel-Request hat bereits erschöpft — nichts mehr zu zählen.
+                return
+            downloads = int(data.get("downloads", 0)) + 1
+            max_downloads = int(data.get("max_downloads", 1))
+            if downloads >= max_downloads:
+                staged.unlink(missing_ok=True)
+                manifest_file.unlink(missing_ok=True)
+                exhausted = True
+            else:
+                data["downloads"] = downloads
+                tmp = Path(str(manifest_file) + ".tmp")
+                tmp.write_text(json.dumps(data))
+                os.replace(tmp, manifest_file)
+                exhausted = False
+        if exhausted:
+            hook = _ON_EXHAUSTED
+            if hook is not None:
+                try:
+                    hook(f"/download/{transfer_id}")
+                except Exception:
+                    log.exception("on_exhausted hook failed for %s", transfer_id)
+        _sweep_stale_transfers()
 
 
 def start_serve_thread() -> threading.Thread:
-    """Skeleton (Phase 3 / Plan Task 3): Serve-Thread im Daemon starten.
+    """Serve-Thread im Daemon starten (F1) — bind, Manifest, daemon-Thread.
 
-    FROZEN Verträge für Phase 3:
-
-    * bind ``SERVE_HOST:serve_port()`` (``ThreadingHTTPServer``);
-      ``write_manifest(port)`` nach erfolgreichem Bind.
+    * bind ``SERVE_HOST:serve_port()`` (``ThreadingHTTPServer``),
+      ``write_manifest(port)`` nach erfolgreichem Bind (F5 Port-Discovery).
     * Thread ``daemon=True`` → stirbt mit dem Daemon-Prozess.
-    * ``RuntimeError`` bei Bind-Fehl — der Daemon-Wrapper (FROZEN-Snippet
-      im Plan) fängt OSError/RuntimeError → WARNING, Node läuft ohne
-      Serve weiter (F1: bridge put meldet dann den F5-Fehler).
-    * Idempotenz: bereits laufender Serve-Thread → denselben Thread
-      zurückgeben (kein Doppel-Bind beim Re-Run).
+    * ``RuntimeError`` bei Bind-Fehl — der Daemon-Wrapper fängt
+      OSError/RuntimeError → WARNING, Node läuft ohne Serve weiter (F1:
+      ``hp put`` bridge meldet dann den F5-Fehler).
+    * Idempotenz: bereits laufender Serve-Thread → derselbe Thread
+      zurückgegeben (kein Doppel-Bind beim Re-Run).
     """
-    raise NotImplementedError("serve thread folgt in Task 3")
+    global _serve_server, _serve_thread
+    existing = _serve_thread
+    if existing is not None and existing.is_alive():
+        return existing
+    port = serve_port()
+    try:
+        server = ThreadingHTTPServer((SERVE_HOST, port), EphemeralServeHandler)
+    except OSError as exc:
+        raise RuntimeError(
+            f"ephemeral serve bind failed on {SERVE_HOST}:{port}: {exc}"
+        ) from exc
+    _serve_server = server
+    write_manifest(port)
+    t = threading.Thread(
+        target=server.serve_forever, daemon=True, name="file-serve"
+    )
+    t.start()
+    _serve_thread = t
+    return t
 
 
 def unregister_after_transfer(

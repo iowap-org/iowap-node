@@ -33,13 +33,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TextIO
 
 import httpx
 
-from nodes.common.cli.cli_file import _load_capability_modes  # noqa: F401
+from nodes.common import file_serve
+from nodes.common.cli.cli_file import _load_capability_modes
 from nodes.common.envelope import (  # noqa: F401
     ENVELOPE_KEY,
     EnvelopeError,
@@ -142,6 +145,24 @@ def decide_mode(
     )
 
 
+def _serve_count_from_env() -> int:
+    """``--serve-count``-Äquivalent aus ``IOWAP_SERVE_COUNT`` (1–10, F6).
+
+    Die FROZEN ``cmd_put``-Signatur (F9) hat keinen ``serve_count``-Param —
+    der F6-Mehrfach-Download läuft über die Env (0/ungültig/out-of-range →
+    1, kein WARNING-Spam für den Normalfall). Ein ``< 1``-Wert würde in
+    ``stage_file`` eh fail-fasten — hier normalisieren wir sauber auf 1.
+    """
+    raw = os.environ.get("IOWAP_SERVE_COUNT")
+    if not raw:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        return 1
+    return value if 1 <= value <= 10 else 1
+
+
 def cmd_put(
     client: RelayClient,
     *,
@@ -239,8 +260,47 @@ def cmd_put(
             filename=name or path.name,
             artifact_id=str(artifact_id),
         )
-    else:  # bridge — MVP-Grenze (F2.10), bewusst.
-        raise NotImplementedError("bridge-put folgt in Task 3")
+    else:  # bridge — ephemeral serve handoff (T-166, F1/F5/F6/F8)
+        manifest = file_serve.read_manifest()
+        if manifest is None or not file_serve.probe_serve(manifest["port"]):
+            print(
+                "hp put: ephemeral serve not reachable (is the node daemon "
+                "running?) — use artifact fallback",
+                file=sys.stderr,
+            )
+            return 1
+        transfer_id, _staged, sha_hex = file_serve.stage_file(
+            path, max_downloads=_serve_count_from_env()
+        )
+        route_path = f"/download/{transfer_id}"
+        upstream = (
+            f"http://{file_serve.SERVE_HOST}:{manifest['port']}"
+            f"/transfer/{transfer_id}"
+        )
+        node_id = str((client.meta or {}).get("node_id") or "unknown")
+        expires = (
+            datetime.now(UTC) + timedelta(seconds=3600)
+        ).isoformat()
+        try:
+            client.register_temp_route(
+                route_path,
+                "POST",
+                upstream,
+                ttl_seconds=3600,
+                channel_id=transfer_id,
+                description="iowap ephemeral file serve (T-166)",
+            )
+        except httpx.HTTPError as exc:
+            # Kein stale Rest ohne Route (F6): staged Datei + Manifest weg.
+            file_serve.discard_staged(transfer_id)
+            print(f"hp put: route registration failed: {exc}", file=sys.stderr)
+            return 1
+        envelope = make_envelope(
+            src="bridge",
+            filename=name or path.name,
+            storage_ref=file_serve.build_storage_ref(node_id, route_path, expires),
+            sha256=sha_hex,
+        )
 
     # 5. stdout: GENAU EINE compacte JSON-Zeile; out=None → sys.stdout zur
     #    CALL-Zeit (capsys-kompatibel).
@@ -306,13 +366,51 @@ def cmd_get(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if src == "bridge":
-        print(
-            "hp get: bridge resolution not supported by this node-cli version",
-            file=sys.stderr,
+        serve_ref = ref if isinstance(ref, dict) else {}
+        if (
+            serve_ref.get("type") != "node_serve"
+            or not serve_ref.get("node_id")
+            or not serve_ref.get("path")
+        ):
+            print(
+                "hp get: bridge storage_ref missing node_serve fields "
+                "(node_id/path)",
+                file=sys.stderr,
+            )
+            return 1
+        url = file_serve.proxy_url(
+            client.base_url, str(serve_ref["node_id"]), str(serve_ref["path"])
         )
-        return 1
+        target = output or out_dir / safe_name
+        headers: dict[str, str] = {}
+        if client.token:
+            headers["Authorization"] = f"Bearer {client.token}"
+        try:
+            # POST mit leerem Body — der Proxy matcht die registrierte
+            # Methode exakt (route_registry.py:194-200); GET auf einer
+            # POST-Route wäre 404. Der Serve-Handler ignoriert den Body.
+            with httpx.stream(
+                "POST",
+                url,
+                headers=headers,
+                content=b"",
+                timeout=httpx.Timeout(30.0, read=None),
+            ) as r:
+                r.raise_for_status()
+                with target.open("wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=64 * 1024):
+                        f.write(chunk)
+        except httpx.HTTPError as exc:
+            print(f"hp get: bridge pull failed: {exc}", file=sys.stderr)
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return 1
+        # F7: Der Empfänger unregistriert NIEMALS (nicht Owner) —
+        # Ephemeralität/TTL liegt beim Sender-Daemon.
 
-    if src == "inline":
+    elif src == "inline":
         target = output or out_dir / safe_name
         target.write_bytes(ref)
     else:  # artifact — RelayClient kümmert sich ums Streaming.
