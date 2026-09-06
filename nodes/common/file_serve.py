@@ -72,6 +72,14 @@ SERVE_HOST = "127.0.0.1"          # Default — der Relay-Proxy ist der einzige 
 # ``IOWAP_SERVE_HOST`` überschreibt Bind- UND Advertise-Adresse (z. B. die
 # LAN-IP); Default bleibt das Single-Host-Verhalten des Plans.
 
+# T-166 D9: Source-IP-Allowlist (T-128-Muster vom Storage-Node). Bindet
+# der Serve auf 0.0.0.0, sind die Transfer-Endpunkte im LAN erreichbar —
+# akzeptiert werden nur Verbindungen von der Relay-Server-IP (T-128:
+# "der Relay-Proxy ist der einzige legitime Dialer") plus loopback für
+# den lokalen CLI-Probe-Pfad. Fail-closed, wenn die IP nicht auflösbar
+# ist. X-Forwarded-For wird nie ausgewertet — der Socket-Peer ist
+# autoritativ (sonst spoofbar).
+
 
 def serve_host() -> str:
     """Bind-/Advertise-Host: env ``IOWAP_SERVE_HOST``, sonst ``SERVE_HOST``.
@@ -89,6 +97,100 @@ def serve_host() -> str:
         log.warning("ignoring invalid IOWAP_SERVE_HOST=%r", raw)
         return SERVE_HOST
     return host
+
+
+def _relay_host_ip() -> str | None:
+    """Erste IPv4 des Relay-Hostnamens aus der Node-Relay-Config (D9).
+
+    Reihenfolge wie ``_effective_config()``/Storage-Node-T-128: env
+    ``RELAY_BASE_URL`` → relay_config.json ``base_url`` → mDNS-Discovery.
+    ``None``, wenn nichts davon auflösbar ist (Caller entscheidet dann
+    fail-closed).
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    from nodes.common.relay_client import (
+        _discover_relay_mdns,
+        _effective_config,
+    )
+
+    cfg = _effective_config()
+    relay_url = str(cfg.get("base_url") or "")
+    if not relay_url:
+        discovered = _discover_relay_mdns()
+        if discovered:
+            relay_url = discovered
+    if not relay_url:
+        return None
+    host = urlparse(relay_url).hostname
+    if not host:
+        return None
+    try:
+        infos = socket.getaddrinfo(
+            host, None, family=socket.AF_INET, type=socket.SOCK_STREAM
+        )
+    except socket.gaierror:
+        return None
+    for info in infos:
+        if info[0] == socket.AF_INET:
+            return str(info[4][0])
+    return None
+
+
+def serve_allow_ip() -> str | None:
+    """Die eine erlaubte Client-IP am Serve-Endpoint (D9).
+
+    Kette: env ``IOWAP_SERVE_ALLOW`` (explizite Override) → Relay-IP aus
+    der Node-Config. ``None`` = nicht auflösbar → LAN-Peers werden
+    abgewiesen (fail-closed für den Remote-Pfad); der lokale Probe-Pfad
+    (loopback/advertise-IP) bleibt unabhängig davon bedienbar (D8-Lektion:
+    ``hp put`` probt die advertise-Adresse — Peer ist die eigene LAN-IP).
+    Wird beim Server-Bind gecacht (T-128-Semantik: Relay-IP-Änderung →
+    Daemon-Restart).
+    """
+    raw = os.environ.get("IOWAP_SERVE_ALLOW")
+    if raw and raw.strip():
+        ip = raw.strip().split(",")[0].strip()
+        try:
+            import ipaddress
+
+            ipaddress.IPv4Address(ip)
+        except ValueError:
+            log.warning("ignoring invalid IOWAP_SERVE_ALLOW=%r", raw)
+        else:
+            return ip
+    return _relay_host_ip()
+
+
+def _allowed_peers() -> frozenset[str]:
+    """Vollständige Peer-Allowlist (D9): Relay + advertise + loopback.
+
+    Legitime Clients am Serve-Endpoint:
+
+    * der Relay-Proxy (Relay-IP — ``serve_allow_ip()``),
+    * die Node-CLI auf demselben Host (loopback; via advertise-Adresse
+      getarnt als die eigene LAN-IP — D8: ``probe_serve`` zielt auf die
+      advertise-Adresse, daher ist die eigene advertise-IP ebenfalls
+      erlaubt),
+    * loopback generell (Probe, lokale Tools).
+
+    Ein Relay-IP-Ausfall degradiert nur den Remote-Pfad (WARNING beim
+    Bind), nie den lokalen.
+    """
+    import socket
+
+    peers = {"127.0.0.1", "::1"}
+    relay_ip = serve_allow_ip()
+    if relay_ip:
+        peers.add(relay_ip)
+    host = serve_host()
+    if host not in ("", "0.0.0.0", "127.0.0.1", "localhost"):
+        try:
+            peers.add(socket.gethostbyname(host))
+        except OSError:
+            log.debug("cannot resolve advertise host %r — skipping in allowlist", host)
+    return frozenset(peers)
 
 
 SERVE_DIR = Path.home() / ".relay" / "serve"
@@ -382,8 +484,32 @@ class EphemeralServeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _peer_allowed(self) -> bool:
+        """D9: Socket-Peer gegen die gecachte Allowlist prüfen.
+
+        Gecacht am Server-Objekt (T-128-Semantik: einmalig beim Start,
+        ``_allowed_peers``). Fail-closed gilt für den Remote-Pfad: keine
+        Relay-IP auflösbar → LAN-Peers abgewiesen; loopback und die
+        advertise-IP bleiben legitim (lokaler Probe-/CLI-Pfad, D8).
+        """
+        allowed: frozenset[str] | None = getattr(self.server, "_allow_ip", None)
+        peer = self.client_address[0]
+        if not allowed:
+            log.warning(
+                "serve allowlist unresolved — rejecting remote request from %s",
+                peer,
+            )
+            return False
+        if peer in allowed:
+            return True
+        log.warning("rejected serve request from %s (allowed: %s)", peer, sorted(allowed))
+        return False
+
     def do_GET(self) -> None:
         self._drain_body()
+        if not self._peer_allowed():
+            self._send_json(403, b'{"error": "forbidden"}')
+            return
         if self.path == "/health":
             self._send_json(200, b'{"ok": true}')
         else:
@@ -391,6 +517,9 @@ class EphemeralServeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._drain_body()
+        if not self._peer_allowed():
+            self._send_json(403, b'{"error": "forbidden"}')
+            return
         m = _TRANSFER_RE.match(self.path)
         if not m:
             self._send_json(404, b'{"error": "not found"}')
@@ -469,12 +598,22 @@ def start_serve_thread() -> threading.Thread:
         return existing
     port = serve_port()
     host = serve_host()
+    # D9: Peer-Allowlist einmalig beim Bind auflösen und am Server-Objekt
+    # cachen (T-128-Semantik). Ohne Relay-IP läuft der Serve fail-closed
+    # für Remote-Peers — der lokale Probe-Pfad bleibt bedienbar.
+    allow_peers = _allowed_peers()
+    if serve_allow_ip() is None:
+        log.warning(
+            "serve allowlist: relay IP unresolved (set IOWAP_SERVE_ALLOW) "
+            "— remote serve requests will be rejected until daemon restart"
+        )
     try:
         server = ThreadingHTTPServer((host, port), EphemeralServeHandler)
     except OSError as exc:
         raise RuntimeError(
             f"ephemeral serve bind failed on {host}:{port}: {exc}"
         ) from exc
+    server._allow_ip = allow_peers  # type: ignore[attr-defined]
     _serve_server = server
     write_manifest(port, host=host)
     t = threading.Thread(

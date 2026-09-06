@@ -389,6 +389,8 @@ def test_bridge_roundtrip_end_to_end(
 
     # Echter Serve-Server (Phase-3-Handler) statt Daemon.
     server = ThreadingHTTPServer(("127.0.0.1", 0), file_serve.EphemeralServeHandler)
+    # D9-Cache wie im Daemon: loopback legitim (Peer ist hier loopback).
+    server._allow_ip = frozenset({"127.0.0.1", "::1"})  # type: ignore[attr-defined]
     serve_port = server.server_address[1]
     threading.Thread(
         target=server.serve_forever, daemon=True, name="serve-test"

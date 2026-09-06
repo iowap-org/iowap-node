@@ -561,6 +561,10 @@ class _Always404Handler(BaseHTTPRequestHandler):
 
 def _spawn(handler_cls) -> tuple[ThreadingHTTPServer, int]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    # D9-Cache wie im Daemon (Contract: Handler liest server._allow_ip);
+    # Test-Peer ist loopback → loopback-Allowlist genügt.
+    if hasattr(handler_cls, "_peer_allowed"):
+        server._allow_ip = frozenset({"127.0.0.1", "::1"})  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1]
 
