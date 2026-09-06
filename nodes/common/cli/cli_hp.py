@@ -259,10 +259,13 @@ def cmd_put(
             src="artifact",
             filename=name or path.name,
             artifact_id=str(artifact_id),
+            size_bytes=size,
         )
     else:  # bridge — ephemeral serve handoff (T-166, F1/F5/F6/F8)
         manifest = file_serve.read_manifest()
-        if manifest is None or not file_serve.probe_serve(manifest["port"]):
+        if manifest is None or not file_serve.probe_serve(
+            manifest["port"], host=manifest.get("host")
+        ):
             print(
                 "hp put: ephemeral serve not reachable (is the node daemon "
                 "running?) — use artifact fallback",
@@ -273,8 +276,12 @@ def cmd_put(
             path, max_downloads=_serve_count_from_env()
         )
         route_path = f"/download/{transfer_id}"
+        # D8: advertise-Host aus dem Manifest (Daemon schreibt die
+        # serve_host()-Adresse) — der Proxy dialt die Adresse WÖRTLICH,
+        # also muss sie von der Relay-Maschine auflösbar sein, nicht nur
+        # von hier (Live: LXC 903 ↔ Hermes-Host).
         upstream = (
-            f"http://{file_serve.SERVE_HOST}:{manifest['port']}"
+            f"http://{manifest.get('host', file_serve.SERVE_HOST)}:{manifest['port']}"
             f"/transfer/{transfer_id}"
         )
         node_id = str((client.meta or {}).get("node_id") or "unknown")
@@ -300,6 +307,7 @@ def cmd_put(
             filename=name or path.name,
             storage_ref=file_serve.build_storage_ref(node_id, route_path, expires),
             sha256=sha_hex,
+            size_bytes=size,  # vor stage_file gelesen — Move-Semantik (F5)
         )
 
     # 5. stdout: GENAU EINE compacte JSON-Zeile; out=None → sys.stdout zur

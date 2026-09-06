@@ -67,7 +67,7 @@ def test_frozen_signatures():
     pins = {
         "serve_port": "() -> 'int'",
         "read_manifest": "() -> 'dict | None'",
-        "write_manifest": "(port: 'int') -> 'None'",
+        "write_manifest": "(port: 'int', host: 'str | None' = None) -> 'None'",
         "new_transfer_id": "() -> 'str'",
         # Phase-1-Präzisierung D5: max_downloads keyword-only, Default 1 —
         # call-kompatibel zum Plan-Snippet stage_file(path), s. Plan Phase 1.
@@ -78,7 +78,9 @@ def test_frozen_signatures():
             "(node_id: 'str', route_path: 'str', expires_at: 'str') -> 'dict'"
         ),
         "proxy_url": "(base_url: 'str', node_id: 'str', route_path: 'str') -> 'str'",
-        "probe_serve": "(port: 'int', timeout: 'float' = 2.0) -> 'bool'",
+        "probe_serve": (
+            "(port: 'int', timeout: 'float' = 2.0, host: 'str | None' = None) -> 'bool'"
+        ),
         "start_serve_thread": "() -> 'threading.Thread'",
         "unregister_after_transfer": (
             "(client: 'RelayClient', route_path: 'str', method: 'str' = 'POST')"
@@ -282,7 +284,7 @@ def test_start_serve_thread_binds_writes_manifest_idempotent(
     try:
         t1 = file_serve.start_serve_thread()
         assert t1.is_alive() and t1.daemon
-        assert file_serve.read_manifest() == {"port": port}
+        assert file_serve.read_manifest() == {"port": port, "host": "127.0.0.1"}
         assert file_serve.probe_serve(port) is True
         t2 = file_serve.start_serve_thread()
         assert t2 is t1  # Idempotenz — kein Doppel-Bind
@@ -332,20 +334,63 @@ def test_serve_port_out_of_range_env_falls_back(monkeypatch):
     assert file_serve.serve_port() == 8792
 
 
+# --- D8: advertise-/bind-Host (IOWAP_SERVE_HOST) --------------------------------
+
+
+def test_serve_host_default_without_env(monkeypatch):
+    monkeypatch.delenv("IOWAP_SERVE_HOST", raising=False)
+    assert file_serve.serve_host() == "127.0.0.1"
+
+
+def test_serve_host_env_override(monkeypatch):
+    # Live-Fall: Relay (LXC 903) dialt die LAN-IP des Nodes.
+    monkeypatch.setenv("IOWAP_SERVE_HOST", "192.168.2.168")
+    assert file_serve.serve_host() == "192.168.2.168"
+
+
+def test_serve_host_invalid_env_falls_back(monkeypatch):
+    # Haus-Pattern wie serve_port(): WARNING + Default, kein Absturz.
+    monkeypatch.setenv("IOWAP_SERVE_HOST", "   ")
+    assert file_serve.serve_host() == "127.0.0.1"
+    monkeypatch.setenv("IOWAP_SERVE_HOST", "x" * 256)
+    assert file_serve.serve_host() == "127.0.0.1"
+
+
+def test_read_manifest_invalid_host_falls_back_to_default(manifest_path: Path):
+    # Kaputter host-Wert im Manifest: Port bleibt verwertbar, host → Default.
+    manifest_path.write_text('{"port": 8792, "host": 42}')
+    assert file_serve.read_manifest() == {"port": 8792, "host": "127.0.0.1"}
+
+
 # --- manifest (serve.json) roundtrip --------------------------------------------
 
 
 def test_manifest_roundtrip(manifest_path: Path):
     file_serve.write_manifest(8792)
     assert manifest_path.exists()
-    assert file_serve.read_manifest() == {"port": 8792}
+    assert file_serve.read_manifest() == {"port": 8792, "host": "127.0.0.1"}
+
+
+def test_manifest_roundtrip_with_host(manifest_path: Path):
+    # D8: advertise-Host im Manifest — Daemon schreibt serve_host().
+    file_serve.write_manifest(8792, host="192.168.2.168")
+    assert file_serve.read_manifest() == {
+        "port": 8792,
+        "host": "192.168.2.168",
+    }
 
 
 def test_write_manifest_leaves_no_tmp(manifest_path: Path):
     # Atomar via tmp + os.replace: kein .tmp-Rest, kein torn read.
     file_serve.write_manifest(9123)
     assert not (manifest_path.parent / (manifest_path.name + ".tmp")).exists()
-    assert file_serve.read_manifest() == {"port": 9123}
+    assert file_serve.read_manifest() == {"port": 9123, "host": "127.0.0.1"}
+
+
+def test_read_manifest_without_host_key_falls_back(manifest_path: Path):
+    # Vor-D8-Manifeste ohne host-Key bleiben lesbar → Default.
+    manifest_path.write_text('{"port": 8792}')
+    assert file_serve.read_manifest() == {"port": 8792, "host": "127.0.0.1"}
 
 
 def test_read_manifest_missing_returns_none(manifest_path: Path):

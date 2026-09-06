@@ -65,7 +65,32 @@ from nodes.common.relay_client import RelayClient
 log = logging.getLogger("file-serve")
 
 SERVE_PORT_DEFAULT = 8792
-SERVE_HOST = "127.0.0.1"          # NUR localhost — der Relay-Proxy ist der einzige Client
+SERVE_HOST = "127.0.0.1"          # Default — der Relay-Proxy ist der einzige Client.
+# T-166 Live-Smoke-Deviation (D8): Relay und Node laufen auf verschiedenen
+# Maschinen (LXC 903 vs. Hermes-Host). Der Proxy dialt die registrierte
+# upstream-Adresse WÖRTLICH — ``127.0.0.1`` zeigt dort ins Leere (502).
+# ``IOWAP_SERVE_HOST`` überschreibt Bind- UND Advertise-Adresse (z. B. die
+# LAN-IP); Default bleibt das Single-Host-Verhalten des Plans.
+
+
+def serve_host() -> str:
+    """Bind-/Advertise-Host: env ``IOWAP_SERVE_HOST``, sonst ``SERVE_HOST``.
+
+    Haus-Pattern wie ``serve_port()``: ein unsinniger Env-Wert (leer,
+    Whitespace, >255 Zeichen) → WARNING + Default, kein harter Absturz.
+    Wird im Daemon UND im CLI ausgewertet — beide laufen auf derselben
+    Maschine, also liefert derselbe Env-Satz dieselbe Adresse.
+    """
+    raw = os.environ.get("IOWAP_SERVE_HOST")
+    if raw is None:
+        return SERVE_HOST
+    host = raw.strip()
+    if not host or len(host) > 255:
+        log.warning("ignoring invalid IOWAP_SERVE_HOST=%r", raw)
+        return SERVE_HOST
+    return host
+
+
 SERVE_DIR = Path.home() / ".relay" / "serve"
 MANIFEST_PATH = Path.home() / ".relay" / "serve.json"
 
@@ -160,6 +185,12 @@ def read_manifest() -> dict | None:
     „Ungültig“ schließt explizit ein: kein JSON, kein dict, ``port``
     fehlt/kein int/kein gültiger Port-Wert. Der Normalfall ohne Daemon
     ist ``None`` (CLI meldet dann den F5-Fehler).
+
+    D8: Rückgabe enthält zusätzlich ``host`` (Advertise-Adresse für die
+    upstream-URL). Manifeste ohne ``host``-Key (vor D8) erhalten den
+    Default ``SERVE_HOST`` — ein ungültiger ``host``-Wert fällt ebenso
+    auf den Default zurück, statt das Manifest komplett zu verwerfen
+    (Port bleibt der relevante Teil des Contracts).
     """
     try:
         raw = MANIFEST_PATH.read_text()
@@ -179,18 +210,27 @@ def read_manifest() -> dict | None:
     # bool ist eine int-Unterklasse — True wäre sonst „Port 1“.
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         return None
-    return {"port": port}
+    host = data.get("host", SERVE_HOST)
+    if not isinstance(host, str) or not host or len(host) > 255:
+        log.warning("serve manifest has invalid host %r — using default", host)
+        host = SERVE_HOST
+    return {"port": port, "host": host}
 
 
-def write_manifest(port: int) -> None:
-    """``{"port": port}`` nach ``MANIFEST_PATH`` — atomar (tmp+replace).
+def write_manifest(port: int, host: str | None = None) -> None:
+    """``{"port": port, "host": host}`` nach ``MANIFEST_PATH`` — atomar.
 
     Der Daemon schreibt das Manifest beim Serve-Start (F5 Port-Discovery);
     ein CLI, das mitten im Write liest, sieht nie ein halbes JSON.
+    ``host`` ist die D8-Advertise-Adresse (``serve_host()``); ``None``
+    schreibt den Default ``SERVE_HOST`` — alte Manifeste ohne ``host``-Key
+    bleiben lesbar (read_manifest ergänzt ihn, siehe dort).
     """
     MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = MANIFEST_PATH.with_name(MANIFEST_PATH.name + ".tmp")
-    tmp.write_text(json.dumps({"port": port}))
+    tmp.write_text(
+        json.dumps({"port": port, "host": host if host is not None else SERVE_HOST})
+    )
     os.replace(tmp, MANIFEST_PATH)
 
 
@@ -283,15 +323,17 @@ def proxy_url(base_url: str, node_id: str, route_path: str) -> str:
     return f"{base_url.rstrip('/')}{_ROUTE_BASE}/{node_id}{path}"
 
 
-def probe_serve(port: int, timeout: float = 2.0) -> bool:
-    """``GET http://127.0.0.1:{port}/health`` — ``True`` gdw. HTTP 200.
+def probe_serve(port: int, timeout: float = 2.0, host: str | None = None) -> bool:
+    """``GET http://{host|SERVE_HOST}:{port}/health`` — ``True`` gdw. 200.
 
     Alles andere (Connection refused, Timeout, 4xx/5xx, ungültige
     Antwort) ist „nicht erreichbar“ → ``False`` ohne Raise. Der CLI
-    (Task 4) leitet daraus den F5-Fehler ab.
+    (Task 4) leitet daraus den F5-Fehler ab. ``host`` (D8) erlaubt das
+    Probe gegen die advertise-Adresse aus dem Manifest; Default bleibt
+    ``SERVE_HOST`` (localhost, Plan-Verhalten).
     """
     try:
-        r = httpx.get(f"http://{SERVE_HOST}:{port}/health", timeout=timeout)
+        r = httpx.get(f"http://{host or SERVE_HOST}:{port}/health", timeout=timeout)
     except httpx.HTTPError as exc:
         log.debug("serve probe on port %d failed: %s", port, exc)
         return False
@@ -426,14 +468,15 @@ def start_serve_thread() -> threading.Thread:
     if existing is not None and existing.is_alive():
         return existing
     port = serve_port()
+    host = serve_host()
     try:
-        server = ThreadingHTTPServer((SERVE_HOST, port), EphemeralServeHandler)
+        server = ThreadingHTTPServer((host, port), EphemeralServeHandler)
     except OSError as exc:
         raise RuntimeError(
-            f"ephemeral serve bind failed on {SERVE_HOST}:{port}: {exc}"
+            f"ephemeral serve bind failed on {host}:{port}: {exc}"
         ) from exc
     _serve_server = server
-    write_manifest(port)
+    write_manifest(port, host=host)
     t = threading.Thread(
         target=server.serve_forever, daemon=True, name="file-serve"
     )

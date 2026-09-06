@@ -46,6 +46,7 @@ def make_envelope(
     artifact_id: str | None = None,
     storage_ref: dict | None = None,
     sha256: str | None = None,
+    size_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Baue einen v1-Umschlag. ``data`` nur bei src=inline (wird base64-kodiert).
 
@@ -53,7 +54,18 @@ def make_envelope(
     Feld-Kombination (inline+artifact_id, inline ohne data, bridge+data …).
     Fail-fast am Erzeuger — ein ungültiger Umschlag soll nie das Repo
     verlassen, damit der Empfänger nur noch transport-bedingte Fehler sieht.
+
+    ``size_bytes``: tatsächliche Dateigröße für artifact/bridge (dort ist
+    ``data`` nicht im Umschlag). Default ``0`` — T-166-Lieferung hatte
+    fälschlich immer ``0`` für Nicht-Inline (Bugfix nach Live-E2E).
+    Negativ oder kleiner als eine gesetzte ``data``-Länge → EnvelopeError.
     """
+    if not isinstance(size_bytes, int) or isinstance(size_bytes, bool):
+        if size_bytes is not None:
+            raise EnvelopeError("size_bytes must be an int")
+        size_bytes = None
+    if size_bytes is not None and size_bytes < 0:
+        raise EnvelopeError("size_bytes must be >= 0")
     if src not in SUPPORTED_SOURCES:
         raise EnvelopeError(f"unsupported src {src!r}")
     if not filename:
@@ -76,7 +88,11 @@ def make_envelope(
         "v": SUPPORTED_VERSION,
         "src": src,
         "filename": filename,
-        "size_bytes": len(data) if data is not None else 0,
+        # inline: immer aus data hergeleitet; artifact/bridge: explizite
+        # Größe (Datei liegt nicht im Umschlag), Default 0.
+        "size_bytes": len(data) if data is not None else (
+            size_bytes if size_bytes is not None else 0
+        ),
     }
     if data is not None:
         ref["data_base64"] = base64.b64encode(data).decode("ascii")

@@ -135,3 +135,38 @@ def test_is_envelope_and_dump_roundtrip():
     round = json.loads(dump(env))
     assert round == env
     assert parse_envelope(round) == ("inline", b"hi")
+
+
+# --- T-166-Bugfix: size_bytes für artifact/bridge (war immer 0) ----------
+
+
+def test_make_envelope_bridge_size_bytes():
+    env = make_envelope(src="bridge", filename="big.bin",
+                        storage_ref={"type": "node_serve"}, size_bytes=53477376)
+    assert env["__iowap_ref__"]["size_bytes"] == 53477376
+
+
+def test_make_envelope_artifact_size_bytes():
+    env = make_envelope(src="artifact", filename="a.bin",
+                        artifact_id="art_1", size_bytes=7)
+    assert env["__iowap_ref__"]["size_bytes"] == 7
+
+
+def test_make_envelope_inline_ignores_wrong_size():
+    # inline leitet aus data her; explizite size tritt nicht dazwischen
+    env = make_envelope(src="inline", filename="a.txt", data=b"hi",
+                        size_bytes=99)
+    assert env["__iowap_ref__"]["size_bytes"] == 2
+
+
+def test_make_envelope_rejects_negative_size():
+    with pytest.raises(EnvelopeError):
+        make_envelope(src="bridge", filename="a.bin",
+                      storage_ref={"type": "node_serve"}, size_bytes=-1)
+
+
+def test_make_envelope_rejects_non_int_size():
+    with pytest.raises(EnvelopeError):
+        make_envelope(src="artifact", filename="a.bin",
+                      artifact_id="art_1",
+                      size_bytes="7")  # type: ignore[arg-type]

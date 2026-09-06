@@ -134,7 +134,7 @@ def test_put_bridge_happy_path_via_fake_client(
     f.write_bytes(payload)
     file_serve.write_manifest(9123)  # F5: Daemon hat serve.json geschrieben
     monkeypatch.setattr(
-        file_serve, "probe_serve", lambda port, timeout=2.0: True
+        file_serve, "probe_serve", lambda port, timeout=2.0, host=None: True
     )
     _modes(monkeypatch, ["bridge"])
     client.get_transfer_config.return_value = {}  # Stufen-Konfig (ladder-frei)
@@ -215,7 +215,7 @@ def test_put_bridge_register_http_error_returns_exit_1_and_deletes_staged(
     f.write_bytes(payload)
     file_serve.write_manifest(9123)
     monkeypatch.setattr(
-        file_serve, "probe_serve", lambda port, timeout=2.0: True
+        file_serve, "probe_serve", lambda port, timeout=2.0, host=None: True
     )
     _modes(monkeypatch, ["bridge"])
     client.register_temp_route.side_effect = httpx.ConnectError("relay down")

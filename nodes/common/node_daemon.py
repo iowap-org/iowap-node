@@ -580,7 +580,7 @@ class SseDaemon:
             file_serve.start_serve_thread()
             log.info(
                 "ephemeral file serve listening on %s:%d",
-                file_serve.SERVE_HOST,
+                file_serve.serve_host(),
                 file_serve.serve_port(),
             )
         except (OSError, RuntimeError) as exc:

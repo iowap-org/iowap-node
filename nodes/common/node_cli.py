@@ -54,6 +54,7 @@ from typing import Any
 
 import httpx
 
+from nodes.common import file_serve
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     ACTIVE_PATH,  # noqa: F401 — re-exported so the test fixture's cli.ACTIVE_PATH patch keeps working (T-117)
@@ -418,6 +419,25 @@ class Daemon:
         self._write_status()
         self._start_heartbeat_thread()
         self._start_probe_thread()
+        # T-166 (F1): ephemeral file serve im Daemon — der CLI-Prozess stirbt
+        # nach dem stdout-Envelope, der Serve-Endpoint muss überleben.
+        # Spiegelt die Verdrahtung aus node_daemon.py (SSE-Daemon); Bind-
+        # Fehler (Port belegt) = WARNING, der Node läuft ohne Serve weiter
+        # (hp put bridge meldet dann den F5-Fehler statt zu crashen).
+        try:
+            file_serve.set_on_exhausted(
+                lambda route_path: file_serve.unregister_after_transfer(
+                    self.client, route_path
+                )
+            )
+            file_serve.start_serve_thread()
+            log.info(
+                "ephemeral file serve listening on %s:%d",
+                file_serve.serve_host(),
+                file_serve.serve_port(),
+            )
+        except (OSError, RuntimeError) as exc:
+            log.warning("ephemeral file serve unavailable: %s", exc)
         try:
             self._claim_loop()
         finally:

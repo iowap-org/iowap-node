@@ -96,7 +96,7 @@ def test_daemon_start_starts_serve_and_writes_manifest(
         # Serve-Thread läuft, Manifest mit gebundenem Port (F5-Discovery).
         assert file_serve._serve_thread is not None
         assert file_serve._serve_thread.is_alive()
-        assert file_serve.read_manifest() == {"port": port}
+        assert file_serve.read_manifest() == {"port": port, "host": "127.0.0.1"}
         assert file_serve.probe_serve(port) is True
     finally:
         timer.cancel()
