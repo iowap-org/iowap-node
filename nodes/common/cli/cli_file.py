@@ -57,6 +57,29 @@ def _choose_mode(
     ``max_artifact_bytes``); the capability's ``upload_modes`` restricts
     which rungs are available. We pick the lowest rung that fits both.
     ``force`` overrides the choice but must be in ``upload_modes``.
+
+    T-179 Task 2b (FROZEN decision, Phase 1): this decision point will
+    delegate to ``cli_hp.decide_mode`` (identical behavior, shared
+    ladder logic for ``file send`` and ``hp put``). Import must stay
+    *function-local* (``from nodes.common.cli import cli_hp`` inside the
+    function body) because ``cli_hp`` imports ``_load_capability_modes``
+    from this module at module level — a module-level back-import would
+    be circular. Phase 3 implements it as::
+
+        thresholds = {
+            "max_inline_bytes": int(transfer_cfg.get("max_inline_bytes", 0)),
+            "max_artifact_bytes": int(transfer_cfg.get("max_artifact_bytes", 0)),
+        }
+        try:
+            return cli_hp.decide_mode(size, upload_modes, thresholds, force=force)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+
+    The 0-defaults are materialized here (not inside decide_mode) so
+    cli_file keeps its exact current behavior: a missing server key
+    forbids the rung on this path, while decide_mode alone treats a
+    missing key as unlimited. Error strings stay byte-identical (they
+    are part of the frozen decide_mode contract).
     """
     if force is not None:
         if force not in upload_modes:
