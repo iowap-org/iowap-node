@@ -10,9 +10,16 @@ import json
 import logging
 import os
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger("node-utils")
+
+
+def _utcnow_str() -> str:
+    """Current UTC time as an ISO-8601 string (token cadence anchor)."""
+    return datetime.now(UTC).isoformat()
+
 
 BASE_DIR = Path.home() / ".relay"
 LEGACY_META_PATH = BASE_DIR / "ai-relay-agent.json"
@@ -99,23 +106,45 @@ def load_token() -> dict | None:
             data = json.loads(raw)
         except json.JSONDecodeError:
             logger.warning("token file %s is not valid JSON, treating as plaintext", TOKEN_PATH)
-            return {"token": raw, "expires_at": None}
+            return {"token": raw, "expires_at": None, "refreshed_at": None}
         if isinstance(data, dict) and data.get("token"):
-            return {"token": data["token"], "expires_at": data.get("expires_at")}
+            return {
+                "token": data["token"],
+                "expires_at": data.get("expires_at"),
+                # T-185: cadence anchor for the 6-day rt interval; None
+                # means "unknown" (legacy envelope) — the daemon then
+                # stamps it on the next rotation.
+                "refreshed_at": data.get("refreshed_at"),
+            }
         return None
-    return {"token": raw, "expires_at": None}
+    return {"token": raw, "expires_at": None, "refreshed_at": None}
 
 
-def save_token(token: str, expires_at: str | None = None) -> None:
+def save_token(
+    token: str, expires_at: str | None = None, refreshed_at: str | None = None
+) -> None:
     """Persist the runtime token plus its expiry as a JSON envelope.
 
-    The envelope is ``{"token": "..."|None, "expires_at": "..."|None}``.
-    Writing is atomic (tmp file + rename) so a crash mid-write never
-    leaves a truncated token file. The file is chmod 0o600 so other local
-    users cannot read the token (security hardening, T-171).
+    The envelope is
+    ``{"token": "...", "expires_at": "...|None", "refreshed_at": "...|None"}``.
+    ``refreshed_at`` (T-185) is the cadence anchor for the 6-day rt
+    refresh interval: it counts from the LAST REFRESH, not from daemon
+    start, so the stamp must survive restarts on disk. ``None`` stamps
+    the current UTC time — every token write IS a refresh of the
+    credential. Writing is atomic (tmp file + rename) so a crash
+    mid-write never leaves a truncated token file. The file is chmod
+    0o600 so other local users cannot read the token (security
+    hardening, T-171).
     """
+    if refreshed_at is None:
+        refreshed_at = _utcnow_str()
     tmp = TOKEN_PATH.with_suffix(TOKEN_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps({"token": token, "expires_at": expires_at}) + "\n")
+    tmp.write_text(
+        json.dumps(
+            {"token": token, "expires_at": expires_at, "refreshed_at": refreshed_at}
+        )
+        + "\n"
+    )
     os.chmod(tmp, 0o600)
     tmp.replace(TOKEN_PATH)
     os.chmod(TOKEN_PATH, 0o600)

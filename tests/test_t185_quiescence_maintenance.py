@@ -6,7 +6,9 @@ token afterwards. Intervals (Ronny, fixed cadences):
 - rs: refreshed synchronously at daemon start BEFORE any connection starts,
   + every 24h inside the window.
 - rt: NOT refreshed at start (Ronny's correction) — only every 6 days
-  inside the window.
+  inside the window, counted from the LAST REFRESH (persisted as
+  ``refreshed_at`` in the token envelope, so the cadence survives
+  daemon restarts).
 
 Server finding: the SSE endpoint sends no keepalive (core/events.py:
 naked ``await queue.get()``), so quiescence must ACTIVELY cancel the
@@ -19,6 +21,7 @@ import asyncio
 import json
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -151,11 +154,17 @@ def test_rt_refreshed_after_backdating_6d(isolated_relay_dir, monkeypatch):
     rt_calls = [c for c in calls if c["kind"] == "runtime_token"]
     assert rt_calls == []
 
-    client._rt_last_refresh = time.monotonic() - (6 * 86400 + 1)
+    # The 6-day cadence counts from the LAST REFRESH (persisted), not from
+    # daemon start — so the test seeds a 7-day-old refresh timestamp.
+    old = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    node_utils.save_token("rt_current", expires_at=None, refreshed_at=old)
+    client._reload_token_from_disk()
     client.maybe_refresh_token()
     rt_calls = [c for c in calls if c["kind"] == "runtime_token"]
     assert len(rt_calls) == 1
-    assert json.loads(node_utils.TOKEN_PATH.read_text())["token"] == RT_NEW
+    envelope = json.loads(node_utils.TOKEN_PATH.read_text())
+    assert envelope["token"] == RT_NEW
+    assert envelope["refreshed_at"] is not None  # cadence anchor re-stamped
 
 
 # ---------------------------------------------------------------------------
@@ -188,9 +197,55 @@ def test_maintenance_due_reflects_cadences(isolated_relay_dir, monkeypatch):
     client2.refresh_registration_secret()
     assert client2.maintenance_due() is True
 
-    # rt due again after backdating past the 6-day cadence.
-    client._rt_last_refresh = time.monotonic() - (6 * 86400 + 1)
+    # rt due again once the persisted stamp passes the 6-day cadence.
+    old = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    node_utils.save_token("rt_current", expires_at=None, refreshed_at=old)
+    client._reload_token_from_disk()
     assert client.maintenance_due() is True
+
+
+# ---------------------------------------------------------------------------
+# rt cadence anchor: the 6 days count from the LAST REFRESH, persisted in
+# the token envelope — never from daemon start (a restart must not reset
+# the timer of an aging token).
+# ---------------------------------------------------------------------------
+
+
+def test_rt_cadence_survives_restart(isolated_relay_dir, monkeypatch):
+    """Restart 5 days after the last refresh: the stamp lives in the token
+    envelope on disk, so the fresh daemon must NOT reset the 6-day timer —
+    no rt rotation, no matter how many maintenance ticks run."""
+    calls: list = []
+    monkeypatch.setattr(
+        relay_client.httpx, "post",
+        _fake_http({"registration_secret": [(200, {"token": RS_NEW})],
+                    "runtime_token": [], "recovery": []}, calls),
+    )
+    stamp = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+    node_utils.save_token("rt_current", expires_at=None, refreshed_at=stamp)
+    client = _make_client()  # fresh daemon start
+    client.maybe_refresh_token()
+    client.maybe_refresh_token()  # a second plain tick must not flip it either
+    assert sum(1 for c in calls if c["kind"] == "runtime_token") == 0
+
+
+def test_rt_rotation_restamps_refreshed_at(isolated_relay_dir, monkeypatch):
+    """A successful rt rotation re-anchors the persisted cadence stamp."""
+    stamp = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    node_utils.save_token("rt_current", expires_at=None, refreshed_at=stamp)
+    calls: list = []
+    monkeypatch.setattr(
+        relay_client.httpx, "post",
+        _fake_http({"registration_secret": [(200, {"token": RS_NEW})],
+                    "runtime_token": [(200, {"token": RT_NEW})],
+                    "recovery": []}, calls),
+    )
+    client = _make_client()
+    client.maybe_refresh_token()
+    envelope = json.loads(node_utils.TOKEN_PATH.read_text())
+    assert envelope["refreshed_at"] != stamp
+    re_stamped = datetime.fromisoformat(envelope["refreshed_at"])
+    assert re_stamped > datetime.now(UTC) - timedelta(minutes=1)
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -243,9 +244,11 @@ def test_run_credential_maintenance_performs_rotation(isolated_relay_dir, monkey
                     "recovery": []}, calls),
     )
     client = _make_client()
-    # Backdate rt past the 6-day cadence so the window rotates BOTH
-    # credentials (rs due at start, rt due after backdating).
-    client._rt_last_refresh = time.monotonic() - (6 * 86400 + 1)
+    # Backdate the PERSISTED last refresh past the 6-day cadence so the
+    # window rotates BOTH credentials (rs due at start, rt due by stamp).
+    old = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    node_utils.save_token("rt_current", expires_at=None, refreshed_at=old)
+    client._reload_token_from_disk()
     client.run_credential_maintenance()
     kinds = {c["kind"] for c in calls}
     assert kinds == {"runtime_token", "registration_secret"}

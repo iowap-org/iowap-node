@@ -2,7 +2,9 @@
 
 Model: no more expiry math. Nodes act on their own:
 - rs (registration secret): refreshed on daemon start + every 24h
-- rt (runtime token): refreshed every 6 days
+- rt (runtime token): refreshed every 6 days, counted from the LAST
+  REFRESH (persisted ``refreshed_at`` in the token envelope — survives
+  daemon restarts; T-185 correction: not from daemon start)
 - TTL stays 7 days on both (server config.py, unchanged)
 
 Bug context: the server never rotates the rs on rt-refresh (Case 1), the
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -191,7 +194,12 @@ def test_rt_refreshed_after_6_days(isolated_relay_dir, monkeypatch):
     client = _make_client()
     client.maybe_refresh_token()
 
-    client._rt_last_refresh = time.monotonic() - (6 * 86400 + 1)
+    # The 6-day cadence anchors at the PERSISTED last refresh (token
+    # envelope ``refreshed_at``), not at daemon start — seed a 7-day-old
+    # stamp on disk and reload.
+    old = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    node_utils.save_token("rt_current", expires_at=None, refreshed_at=old)
+    client._reload_token_from_disk()
     client.maybe_refresh_token()
     assert sum(1 for c in calls if c["kind"] == "runtime_token") == 1
     assert json.loads(node_utils.TOKEN_PATH.read_text())["token"] == "rt_newer"
@@ -220,8 +228,10 @@ def test_recovery_persists_rotated_rs(isolated_relay_dir, monkeypatch):
     meta = json.loads(node_utils.META_PATH.read_text())
     assert meta["registration_secret"] == RS_NEW
     assert client.meta["registration_secret"] == RS_NEW
-    # Recovery counts as an rt refresh for the interval timer.
-    assert client._rt_last_refresh is not None
+    # Recovery counts as an rt refresh — the refreshed_at stamp in the
+    # token envelope must be re-anchored (cadence restarts from NOW).
+    envelope = json.loads(node_utils.TOKEN_PATH.read_text())
+    assert envelope["refreshed_at"] is not None
 
 
 def test_refresh_response_rs_is_persisted_when_present(isolated_relay_dir, monkeypatch):
@@ -236,11 +246,13 @@ def test_refresh_response_rs_is_persisted_when_present(isolated_relay_dir, monke
                     "recovery": []}, calls),
     )
     client = _make_client()
-    # Isolate the Bug-4 path: only the rt rotation runs (backdated past the
-    # 6-day cadence), no proactive rs rotation — the rt response still
-    # carries an rs that must be persisted.
+    # Isolate the Bug-4 path: only the rt rotation runs (7-day-old persisted
+    # stamp, past the 6-day cadence), no proactive rs rotation — the rt
+    # response still carries an rs that must be persisted.
     client._rs_last_refresh = time.monotonic()
-    client._rt_last_refresh = time.monotonic() - (6 * 86400 + 1)
+    old = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    node_utils.save_token("rt_current", expires_at=None, refreshed_at=old)
+    client._reload_token_from_disk()
     client.maybe_refresh_token()
     meta = json.loads(node_utils.META_PATH.read_text())
     assert meta["registration_secret"] == "rs_alongside"

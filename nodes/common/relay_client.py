@@ -198,14 +198,20 @@ class RelayClient:
         # T-182: fixed-interval credential maintenance. The daemons call
         # maybe_refresh_token() every heartbeat tick; the client tracks
         # per-credential timers here.
-        # T-185: rt is NOT due at start (Ronny's correction) — a start is
-        # fresh enough; the 6-day cadence counts from now. rs IS due at
-        # start (``_rs_last_refresh is None``): the daemons consume it
+        # T-185 (Ronny's correction): rt is NOT due at start just because
+        # the daemon (re)started — the 6-day cadence counts from the LAST
+        # REFRESH, persisted as ``refreshed_at`` in the token envelope so
+        # it survives restarts. A missing/unparseable stamp (legacy
+        # envelope, fresh install) counts as due: the next maintenance
+        # window rotates rt once and re-anchors it. rs IS due at start
+        # (``_rs_last_refresh is None``): the daemons consume it
         # synchronously BEFORE any connection starts (quiescence model),
         # and a failed startup rotation stays due so the next maintenance
         # window retries it.
         self._rs_last_refresh: float | None = None
-        self._rt_last_refresh: float | None = time.monotonic()
+        self._rt_refreshed_at: str | None = (
+            data.get("refreshed_at") if data else None
+        )
         # T-183: claim pause during credential maintenance. The gate is
         # SET = claims allowed (open). During run_credential_maintenance()
         # it is cleared: claim() skips without HTTP and the 401 fallback
@@ -259,11 +265,14 @@ class RelayClient:
         """Re-read the token file. Helps when an external process (or a
         manual intervention) corrected the token after the daemon cached
         an invalid value. Reads only — overwrites nothing on disk.
+        T-185: adopts the persisted ``refreshed_at`` cadence anchor too,
+        so the rt timer follows whatever is actually on disk.
         """
         data = load_token()
         if data and data.get("token"):
             self.token = data["token"]
             self.token_expires_at = data.get("expires_at")
+            self._rt_refreshed_at = data.get("refreshed_at")
 
     # -- low level ----------------------------------------------------------
 
@@ -338,7 +347,13 @@ class RelayClient:
                 new = data.get("token")
                 expires_at = data.get("expires_at")
                 if new:
-                    save_token(new, expires_at=expires_at)
+                    # T-185: re-anchor the persisted cadence stamp — the
+                    # 6-day interval counts from THIS refresh.
+                    self._rt_refreshed_at = _utcnow_str()
+                    save_token(
+                        new, expires_at=expires_at,
+                        refreshed_at=self._rt_refreshed_at,
+                    )
                     self.token = new
                     self.token_expires_at = expires_at
                     # T-182: if the server rotates the rs alongside, keep it.
@@ -376,15 +391,20 @@ class RelayClient:
             new = data.get("token")
             expires_at = data.get("expires_at")
             if new:
-                save_token(new, expires_at=expires_at)
+                # T-185: the recovered token is brand-new — re-anchor the
+                # persisted cadence stamp; the 6-day interval counts from
+                # THIS recovery.
+                self._rt_refreshed_at = _utcnow_str()
+                save_token(
+                    new, expires_at=expires_at,
+                    refreshed_at=self._rt_refreshed_at,
+                )
                 self.token = new
                 self.token_expires_at = expires_at
                 # T-182 (Bug 4): the server rotates the rs on recovery and
                 # returns it. Persisting it is the whole point — a node that
                 # drops the rotated rs cannot recover the NEXT time.
                 self._persist_rotated_secret(data)
-                # The recovered token is brand-new: mark rt as freshly done.
-                self._rt_last_refresh = time.monotonic()
             return new
         except Exception as exc:
             log.error("registration-secret recovery failed: %s", exc)
@@ -450,6 +470,39 @@ class RelayClient:
         except Exception as exc:  # noqa: BLE001 — maintenance must not kill the daemon
             log.warning("rs rotation error: %s", exc)
 
+    # -- T-185: rt cadence anchored at the persisted last refresh -----------
+
+    @staticmethod
+    def _parse_iso_ts(value: Any) -> datetime | None:
+        """Parse an ISO-8601 timestamp; returns None when unusable."""
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            ts = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+
+    def _rt_due(self) -> bool:
+        """Whether the rt refresh interval has elapsed since the LAST
+        REFRESH (persisted ``refreshed_at`` in the token envelope).
+
+        T-185 correction (Ronny): the 6-day cadence must NOT count from
+        daemon start — a restart would reset the timer of an aging token
+        and it could silently run past its 7-day TTL. The stamp lives on
+        disk, so restarts preserve it. Unknown/unparseable stamp → due
+        (self-healing: the next window rotates once and re-anchors).
+
+        Stamping: ``save_token()`` anchors ``refreshed_at`` to NOW on
+        every token write, so the refresh/recovery paths re-anchor the
+        cadence implicitly; only the RAM mirror is updated here.
+        """
+        interval = float(self.cfg.get("rt_refresh_interval_seconds", 6 * 86400))
+        ts = self._parse_iso_ts(self._rt_refreshed_at)
+        if ts is None:
+            return True
+        return (datetime.now(UTC) - ts).total_seconds() >= interval
+
     def maybe_refresh_token(self) -> None:
         """Fixed-interval credential maintenance (T-182).
 
@@ -466,6 +519,13 @@ class RelayClient:
         daemons use :meth:`run_credential_maintenance`, which pauses the
         claim loop for the duration. This method only guards against a
         direct call while another maintenance is in flight.
+
+        T-185 correction (Ronny): the rt cadence counts from the LAST
+        REFRESH, persisted as ``refreshed_at`` in the token envelope —
+        never from daemon start, so a restart cannot reset the timer of
+        an aging token. A missing/unparseable stamp counts as due: the
+        next window rotates rt once and re-anchors the stamp (legacy
+        envelopes bootstrap cleanly on the rs-start rotation).
         """
         if self._maintenance_owner == threading.get_ident():
             # This thread IS the maintenance (T-184): never skip your own
@@ -474,14 +534,9 @@ class RelayClient:
         elif not self._maintenance_gate.is_set():
             # Another thread is inside run_credential_maintenance().
             return
-        now = time.monotonic()
-        rt_interval = float(self.cfg.get("rt_refresh_interval_seconds", 6 * 86400))
-        rt_due = self._rt_last_refresh is None or (
-            now - self._rt_last_refresh
-        ) >= rt_interval
+        rt_due = self._rt_due()
         if rt_due:
-            if self._refresh_token():
-                self._rt_last_refresh = now
+            self._refresh_token()
         self._maybe_rotate_rs()
 
     def run_credential_maintenance(self) -> None:
@@ -506,11 +561,11 @@ class RelayClient:
         The heartbeat loop opens the quiescence window ONLY when this is
         true — the window drops SSE/claims/heartbeat, so it must never run
         on a plain 8 s tick without a pending rotation.
+
+        rt: counted from the persisted last refresh (T-185 correction) —
+        see :meth:`_rt_due`. rs: start tick outstanding or 24h elapsed.
         """
-        rt_interval = float(self.cfg.get("rt_refresh_interval_seconds", 6 * 86400))
-        rt_due = self._rt_last_refresh is None or (
-            time.monotonic() - self._rt_last_refresh
-        ) >= rt_interval
+        rt_due = self._rt_due()
         rs_interval = float(self.cfg.get("rs_refresh_interval_seconds", 86400))
         rs_due = self._rs_last_refresh is None or (
             time.monotonic() - self._rs_last_refresh
