@@ -60,7 +60,7 @@ def _fake_http(responses: dict[str, list], calls: list):
     ``recovery``.
     """
 
-    def fake_post(url, json=None, headers=None, **kw):  # noqa: A002
+    def fake_post(url, json=None, headers=None, **kw):
         body = json or {}
         req = body.get("requested_credential")
         if req == "runtime_token" and headers is None:
