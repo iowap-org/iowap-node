@@ -83,21 +83,21 @@ def test_rs_rotated_on_first_maintenance(isolated_relay_dir, monkeypatch):
     monkeypatch.setattr(
         relay_client.httpx, "post",
         _fake_http({"registration_secret": [(200, {"token": RS_NEW})],
-                    "runtime_token": [(200, {"token": RT_NEW})],
-                    "recovery": []}, calls),
+                    "runtime_token": [], "recovery": []}, calls),
     )
     client = _make_client()
     client.maybe_refresh_token()
 
     kinds = [c["kind"] for c in calls]
-    assert "registration_secret" in kinds
+    assert kinds == ["registration_secret"]
     rs_call = next(c for c in calls if c["kind"] == "registration_secret")
     assert rs_call["body"] == {"requested_credential": "registration_secret"}
-    # rs rotation runs AFTER the rt refresh in the same tick — it must use
-    # the freshly rotated runtime token (the old one is already invalidated).
-    assert rs_call["headers"]["Authorization"] == f"Bearer {RT_NEW}"
+    # rt is NOT rotated at start (T-185), so the rs rotation uses the
+    # runtime token loaded from disk at construction.
+    assert rs_call["headers"]["Authorization"] == "Bearer rt_current"
 
-    # The fresh rs must be persisted in the meta file (the whole point of T-182).
+    # The fresh rs must be persisted in the meta file (the whole point of T-182);
+    # the rotation itself calls save_meta.
     meta = json.loads(node_utils.META_PATH.read_text())
     assert meta["registration_secret"] == RS_NEW
     assert client.meta["registration_secret"] == RS_NEW
@@ -146,38 +146,38 @@ def test_rs_rotated_again_after_24h(isolated_relay_dir, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_rt_refreshed_on_first_maintenance(isolated_relay_dir, monkeypatch):
+def test_rt_not_refreshed_on_first_maintenance(isolated_relay_dir, monkeypatch):
+    """T-185 (Ronny's correction): rt is NOT due at start — a start is
+    fresh enough, rotation happens only on the 6-day cadence inside the
+    window. rs still rotates (start tick)."""
     calls: list = []
     monkeypatch.setattr(
         relay_client.httpx, "post",
         _fake_http({"registration_secret": [(200, {"token": RS_NEW})],
-                    "runtime_token": [(200, {"token": RT_NEW})],
-                    "recovery": []}, calls),
+                    "runtime_token": [], "recovery": []}, calls),
     )
     client = _make_client()
     client.maybe_refresh_token()
 
-    rt_call = next(c for c in calls if c["kind"] == "runtime_token")
-    assert rt_call["headers"]["Authorization"] == "Bearer rt_current"
-    tok = json.loads(node_utils.TOKEN_PATH.read_text())
-    assert tok["token"] == RT_NEW
-    assert client.token == RT_NEW
+    assert sum(1 for c in calls if c["kind"] == "runtime_token") == 0
+    assert sum(1 for c in calls if c["kind"] == "registration_secret") == 1
 
 
 def test_rt_not_refreshed_again_within_6_days(isolated_relay_dir, monkeypatch):
+    """T-185: rt rotates only inside the 6-day cadence — never on plain
+    heartbeat ticks right after start."""
     calls: list = []
     monkeypatch.setattr(
         relay_client.httpx, "post",
         _fake_http({"registration_secret": [(200, {"token": RS_NEW})],
-                    "runtime_token": [(200, {"token": RT_NEW})],
-                    "recovery": []}, calls),
+                    "runtime_token": [], "recovery": []}, calls),
     )
     client = _make_client()
     client.maybe_refresh_token()
-    assert sum(1 for c in calls if c["kind"] == "runtime_token") == 1
+    assert sum(1 for c in calls if c["kind"] == "runtime_token") == 0
 
     client.maybe_refresh_token()
-    assert sum(1 for c in calls if c["kind"] == "runtime_token") == 1
+    assert sum(1 for c in calls if c["kind"] == "runtime_token") == 0
 
 
 def test_rt_refreshed_after_6_days(isolated_relay_dir, monkeypatch):
@@ -185,8 +185,7 @@ def test_rt_refreshed_after_6_days(isolated_relay_dir, monkeypatch):
     monkeypatch.setattr(
         relay_client.httpx, "post",
         _fake_http({"registration_secret": [(200, {"token": RS_NEW})],
-                    "runtime_token": [(200, {"token": RT_NEW}),
-                                      (200, {"token": "rt_newer"})],
+                    "runtime_token": [(200, {"token": "rt_newer"})],
                     "recovery": []}, calls),
     )
     client = _make_client()
@@ -194,7 +193,7 @@ def test_rt_refreshed_after_6_days(isolated_relay_dir, monkeypatch):
 
     client._rt_last_refresh = time.monotonic() - (6 * 86400 + 1)
     client.maybe_refresh_token()
-    assert sum(1 for c in calls if c["kind"] == "runtime_token") == 2
+    assert sum(1 for c in calls if c["kind"] == "runtime_token") == 1
     assert json.loads(node_utils.TOKEN_PATH.read_text())["token"] == "rt_newer"
 
 
@@ -231,16 +230,17 @@ def test_refresh_response_rs_is_persisted_when_present(isolated_relay_dir, monke
     calls: list = []
     monkeypatch.setattr(
         relay_client.httpx, "post",
-        _fake_http({"registration_secret": [(200, {"token": RS_NEW})],
+        _fake_http({"registration_secret": [],
                     "runtime_token": [(200, {"token": RT_NEW,
                                              "registration_secret": "rs_alongside"})],
                     "recovery": []}, calls),
     )
     client = _make_client()
-    # Isolate the Bug-4 path: suppress the proactive rs rotation so the
-    # only rs source is the registration_secret field on the rt response.
-    client._rs_due_on_start = False
+    # Isolate the Bug-4 path: only the rt rotation runs (backdated past the
+    # 6-day cadence), no proactive rs rotation — the rt response still
+    # carries an rs that must be persisted.
     client._rs_last_refresh = time.monotonic()
+    client._rt_last_refresh = time.monotonic() - (6 * 86400 + 1)
     client.maybe_refresh_token()
     meta = json.loads(node_utils.META_PATH.read_text())
     assert meta["registration_secret"] == "rs_alongside"

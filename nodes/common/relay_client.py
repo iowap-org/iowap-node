@@ -197,11 +197,15 @@ class RelayClient:
         self._auth_fail_streak = 0
         # T-182: fixed-interval credential maintenance. The daemons call
         # maybe_refresh_token() every heartbeat tick; the client tracks
-        # per-credential timers here (None = due now / never done).
+        # per-credential timers here.
+        # T-185: rt is NOT due at start (Ronny's correction) — a start is
+        # fresh enough; the 6-day cadence counts from now. rs IS due at
+        # start (``_rs_last_refresh is None``): the daemons consume it
+        # synchronously BEFORE any connection starts (quiescence model),
+        # and a failed startup rotation stays due so the next maintenance
+        # window retries it.
         self._rs_last_refresh: float | None = None
-        self._rt_last_refresh: float | None = None
-        # rs refreshes on every daemon start (T-182), not on a timer.
-        self._rs_due_on_start = True
+        self._rt_last_refresh: float | None = time.monotonic()
         # T-183: claim pause during credential maintenance. The gate is
         # SET = claims allowed (open). During run_credential_maintenance()
         # it is cleared: claim() skips without HTTP and the 401 fallback
@@ -407,15 +411,17 @@ class RelayClient:
     def _maybe_rotate_rs(self) -> None:
         """Rotate the registration secret on start + every rs interval (T-182).
 
-        Uses the valid runtime token (server auth.py Case 3). A failed
-        rotation is non-fatal: keep the old secret and try again next tick.
+        Due when ``_rs_last_refresh is None`` (never done since daemon
+        start — T-185: the startup wrapper consumes this synchronously
+        before any connection) or the 24h interval has elapsed. Uses the
+        valid runtime token (server auth.py Case 3). A failed rotation is
+        non-fatal: keep the old secret and try again next tick.
         """
         interval = float(self.cfg.get("rs_refresh_interval_seconds", 86400))
-        due = (
-            self._rs_last_refresh is None
-            or (time.monotonic() - self._rs_last_refresh) >= interval
-        )
-        if not (due or self._rs_due_on_start):
+        due = self._rs_last_refresh is None or (
+            time.monotonic() - self._rs_last_refresh
+        ) >= interval
+        if not due:
             return
         if not self.token:
             return
@@ -443,8 +449,6 @@ class RelayClient:
                 )
         except Exception as exc:  # noqa: BLE001 — maintenance must not kill the daemon
             log.warning("rs rotation error: %s", exc)
-        finally:
-            self._rs_due_on_start = False
 
     def maybe_refresh_token(self) -> None:
         """Fixed-interval credential maintenance (T-182).
@@ -495,6 +499,34 @@ class RelayClient:
         finally:
             self._maintenance_owner = None
             self._maintenance_gate.set()
+
+    def maintenance_due(self) -> bool:
+        """Whether a rotation is due right now (T-185).
+
+        The heartbeat loop opens the quiescence window ONLY when this is
+        true — the window drops SSE/claims/heartbeat, so it must never run
+        on a plain 8 s tick without a pending rotation.
+        """
+        rt_interval = float(self.cfg.get("rt_refresh_interval_seconds", 6 * 86400))
+        rt_due = self._rt_last_refresh is None or (
+            time.monotonic() - self._rt_last_refresh
+        ) >= rt_interval
+        rs_interval = float(self.cfg.get("rs_refresh_interval_seconds", 86400))
+        rs_due = self._rs_last_refresh is None or (
+            time.monotonic() - self._rs_last_refresh
+        ) >= rs_interval
+        return rt_due or rs_due
+
+    def refresh_registration_secret(self) -> None:
+        """Synchronous rs rotation for daemon startup (T-185).
+
+        The daemons call this BEFORE starting any connection thread, so the
+        very first heartbeat/SSE request presents fresh credentials. A
+        failure is non-fatal: rs stays due (``_rs_last_refresh is None``)
+        and the next maintenance window retries (same semantics as
+        ``_maybe_rotate_rs``).
+        """
+        self._maybe_rotate_rs()
 
     # -- public API ----------------------------------------------------------
 

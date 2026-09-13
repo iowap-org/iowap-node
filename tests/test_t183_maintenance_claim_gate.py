@@ -221,7 +221,8 @@ def test_maybe_refresh_works_when_gate_open(isolated_relay_dir, monkeypatch):
     client = _make_client()
     client.maybe_refresh_token()
     kinds = {c["kind"] for c in calls}
-    assert kinds == {"runtime_token", "registration_secret"}
+    # rt is not due at start (T-185) — only rs rotates on the first tick.
+    assert kinds == {"registration_secret"}
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +243,9 @@ def test_run_credential_maintenance_performs_rotation(isolated_relay_dir, monkey
                     "recovery": []}, calls),
     )
     client = _make_client()
+    # Backdate rt past the 6-day cadence so the window rotates BOTH
+    # credentials (rs due at start, rt due after backdating).
+    client._rt_last_refresh = time.monotonic() - (6 * 86400 + 1)
     client.run_credential_maintenance()
     kinds = {c["kind"] for c in calls}
     assert kinds == {"runtime_token", "registration_secret"}

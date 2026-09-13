@@ -162,6 +162,13 @@ class SseDaemon:
         self._stop_event = threading.Event()
         self._sse_thread: threading.Thread | None = None
         self._hb_thread: threading.Thread | None = None
+        # T-185: quiescence window. SET = normal operation, CLEAR = a
+        # credential-maintenance window is open: the SSE loop drops its
+        # active connection (the server sends no keepalive —
+        # core/events.py) and holds reconnects; the heartbeat thread is
+        # the window owner and pauses itself while rotating.
+        self._quiesce = threading.Event()
+        self._quiesce.set()
         # T-177: last server probe result (health/ready/metrics), written by
         # the probe thread and merged into the status file by _write_status.
         self.server_probe: dict[str, Any] = {"ok": False, "error": "probe pending"}
@@ -238,9 +245,12 @@ class SseDaemon:
             error: str | None = None
             try:
                 # T-182/T-183: fixed-interval credential maintenance with
-                # claims paused (sequence model: pause -> rotate rt/rs ->
-                # resume so claims inherit the fresh tokens; no 401 race).
-                self.client.run_credential_maintenance()
+                # claims paused. T-185: the rotation runs inside a
+                # quiescence window (SSE dropped + reconnects held) and
+                # ONLY when a rotation is actually due — an idle window on
+                # every 8 s tick would drop SSE for nothing.
+                if self.client.maintenance_due():
+                    self._run_maintenance_window()
                 caps = load_active_profile()
                 with self._lock:
                     inflight = dict(self._in_flight)
@@ -262,6 +272,25 @@ class SseDaemon:
                 if self._stop_event.is_set():
                     return
                 time.sleep(1)
+
+    def _run_maintenance_window(self) -> None:
+        """Open the quiescence window around one maintenance tick (T-185).
+
+        Window owner = the heartbeat thread. While the window is open the
+        SSE loop cancels its active stream and holds reconnects, so the
+        rotation never runs against a live connection presenting the old
+        token. The window ALWAYS re-opens (finally), even on failure —
+        a wedged daemon must not outlive one bad tick.
+        """
+        log.info("maintenance window open — dropping SSE, pausing rotation")
+        self._quiesce.clear()
+        try:
+            self.client.run_credential_maintenance()
+        except Exception as exc:  # noqa: BLE001 — the window must always close
+            log.error("maintenance window: rotation failed: %s", exc)
+        finally:
+            self._quiesce.set()
+            log.info("maintenance window closed — connections rebuilt with fresh token")
 
     def _start_heartbeat_thread(self) -> None:
         self._hb_thread = threading.Thread(
@@ -323,25 +352,73 @@ class SseDaemon:
         url = self._stream_url()
         async with httpx.AsyncClient() as http:
             while not self._stop_event.is_set():
+                # T-185: while a maintenance window is open, hold the loop —
+                # no connection attempt presents a token about to rotate.
+                await self._wait_until_normal()
+                if self._stop_event.is_set():
+                    return
                 # T-184: rebuild the auth header on EVERY attempt. A token
                 # rotation (credential maintenance) must not leave the SSE
                 # loop presenting a stale snapshot forever — that caused a
                 # permanent 401 reconnect cycle (2026-09-13).
                 headers = {"Authorization": f"Bearer {self.client.token}"}
+                consume = asyncio.ensure_future(
+                    self._consume_stream(http, url, headers)
+                )
+                watch = asyncio.ensure_future(self._watch_quiesce())
                 try:
-                    await self._consume_stream(http, url, headers)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 — reconnect on any error
+                    await asyncio.wait(
+                        {consume, watch}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    # T-185: if the window opened (or we are stopping), the
+                    # active stream is cancelled — the server sends no
+                    # keepalive, so quiescence must drop it actively.
+                    for task in (consume, watch):
+                        if not task.done():
+                            task.cancel()
+                    # Await both so nothing is left dangling; swallow every
+                    # outcome — a consume error is handled below, a cancel
+                    # is expected here.
+                    for task in (consume, watch):
+                        try:
+                            await task
+                        except BaseException as task_exc:  # noqa: BLE001 — cleanup only
+                            log.debug("SSE task cleanup: %r", task_exc)
+                exc = (
+                    consume.exception()
+                    if consume.done() and not consume.cancelled()
+                    else None
+                )
+                if exc is not None:
                     log.warning("SSE connection error: %s", exc)
+                if (
+                    watch.done()
+                    and not watch.cancelled()
+                    and not watch.exception()
+                ):
+                    log.info("quiescence window: SSE connection dropped")
                 if self._stop_event.is_set():
                     return
+                if not self._quiesce.is_set():
+                    # Window still open: hold (no reconnect attempts).
+                    continue
                 # Wait before reconnecting, but stay responsive to stop.
                 log.info("SSE reconnecting in %.0fs …", _RECONNECT_DELAY)
                 for _ in range(int(_RECONNECT_DELAY * 10)):
                     if self._stop_event.is_set():
                         return
                     await asyncio.sleep(0.1)
+
+    async def _wait_until_normal(self) -> None:
+        """Block until the quiescence window closes (T-185)."""
+        while not self._quiesce.is_set() and not self._stop_event.is_set():
+            await asyncio.sleep(0.05)
+
+    async def _watch_quiesce(self) -> None:
+        """Return when a maintenance window opens (T-185)."""
+        while self._quiesce.is_set() and not self._stop_event.is_set():
+            await asyncio.sleep(0.05)
 
     async def _consume_stream(
         self,
@@ -567,6 +644,15 @@ class SseDaemon:
             self.client.base_url,
         )
         BASE_DIR.mkdir(parents=True, exist_ok=True)
+        # T-185: refresh the registration secret synchronously BEFORE any
+        # connection thread starts — the very first heartbeat/SSE request
+        # presents fresh credentials (no startup 401 race). Non-fatal on
+        # failure: rs stays due and the next maintenance window retries.
+        try:
+            self.client.refresh_registration_secret()
+            log.info("startup: registration secret refreshed before connections")
+        except Exception as exc:  # noqa: BLE001 — startup must survive
+            log.warning("startup rs refresh failed: %s", exc)
         self._write_status()
         self._start_heartbeat_thread()
         self._start_probe_thread()

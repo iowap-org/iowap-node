@@ -240,9 +240,10 @@ class Daemon:
             error: str | None = None
             try:
                 # T-182/T-183: fixed-interval credential maintenance with
-                # claims paused (sequence model: pause -> rotate rt/rs ->
-                # resume so claims inherit the fresh tokens; no 401 race).
-                self.client.run_credential_maintenance()
+                # claims paused. T-185: only when a rotation is actually
+                # due — the heartbeat tick must not rotate without need.
+                if self.client.maintenance_due():
+                    self.client.run_credential_maintenance()
                 caps = load_active_profile()
                 with self._lock:
                     inflight = dict(self.in_flight)
@@ -415,6 +416,15 @@ class Daemon:
             self.client.base_url,
         )
         BASE_DIR.mkdir(parents=True, exist_ok=True)
+        # T-185: refresh the registration secret synchronously BEFORE any
+        # connection thread starts (same quiescence model as the SSE
+        # daemon). Non-fatal on failure: rs stays due and the next
+        # maintenance window retries.
+        try:
+            self.client.refresh_registration_secret()
+            log.info("startup: registration secret refreshed before connections")
+        except Exception as exc:  # noqa: BLE001 — startup must survive
+            log.warning("startup rs refresh failed: %s", exc)
         self._write_status()
         self._start_heartbeat_thread()
         self._start_probe_thread()
