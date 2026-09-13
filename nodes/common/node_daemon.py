@@ -125,6 +125,20 @@ _SUBSCRIBED_TYPES = "stage_claimed,task_created"
 # Reconnect delay after a broken SSE connection.
 _RECONNECT_DELAY = 5.0
 
+# T-186: SSE timeouts — timeout=None disabled BOTH connect and read
+# timeouts: with the server down, each reconnect attempt hung ~2min in
+# SYN retransmits; after a hard server kill (no EOF) the connection
+# became a TCP zombie and never reconnected. Read timeout is 3× the
+# server's SSE ping interval (T-207 iowap-server, default 20s).
+_SSE_CONNECT_TIMEOUT = 5.0
+_SSE_READ_TIMEOUT = 60.0
+_SSE_STREAM_TIMEOUT = httpx.Timeout(
+    connect=_SSE_CONNECT_TIMEOUT,
+    write=5.0,
+    read=_SSE_READ_TIMEOUT,
+    pool=5.0,
+)
+
 # T-179 Task 5: the relay's 404 detail when a stage is already completed
 # (iowap-server api/v2/scheduler.py, complete endpoint).
 _ALREADY_COMPLETED_DETAIL = "not claimed by this node, or not in claimed status"
@@ -427,7 +441,7 @@ class SseDaemon:
         headers: dict[str, str],
     ) -> None:
         async with http.stream(
-            "GET", url, headers=headers, timeout=None
+            "GET", url, headers=headers, timeout=_SSE_STREAM_TIMEOUT
         ) as resp:
             resp.raise_for_status()
             log.info("SSE connected to %s", url)
