@@ -27,8 +27,12 @@ DEFAULT_CONFIG = {
     "heartbeat_interval": 8,
     "claim_interval": 5,
     "status_interval": 7200,
-    "rt_refresh_before_seconds": 86400,
-    "rs_refresh_before_seconds": 3600,
+    # T-182: fixed maintenance intervals instead of expiry-margin math.
+    # rt (TTL 7d): refresh every 6 days. rs (TTL 7d): rotate on every
+    # start + every 24h. Env overrides: RELAY_RS_REFRESH_INTERVAL /
+    # RELAY_RT_REFRESH_INTERVAL (seconds).
+    "rs_refresh_interval_seconds": 86400,
+    "rt_refresh_interval_seconds": 518400,
     "request_timeout": 10,
     "task_timeout": 600,
     "log_level": "INFO",

@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -23,7 +24,7 @@ from typing import Any, Optional
 import httpx
 
 from nodes.common.node_config import load_active_status
-from nodes.common.node_utils import load_config, load_token, save_token
+from nodes.common.node_utils import load_config, load_meta, load_token, save_meta, save_token
 
 log = logging.getLogger("relay-client")
 
@@ -70,6 +71,21 @@ def _effective_config() -> dict[str, Any]:
             cfg["max_retries"] = int(mr)
         except ValueError:
             log.warning("ignoring invalid RELAY_MAX_RETRIES=%r", mr)
+    # T-182: fixed maintenance intervals. rs refreshes on every start + once
+    # per day; rt refreshes every 6 days. Both TTLs are 7 days, so both stay
+    # comfortably ahead of expiry without any expiry math.
+    rs_iv = os.environ.get("RELAY_RS_REFRESH_INTERVAL")
+    if rs_iv is not None:
+        try:
+            cfg["rs_refresh_interval_seconds"] = int(rs_iv)
+        except ValueError:
+            log.warning("ignoring invalid RELAY_RS_REFRESH_INTERVAL=%r", rs_iv)
+    rt_iv = os.environ.get("RELAY_RT_REFRESH_INTERVAL")
+    if rt_iv is not None:
+        try:
+            cfg["rt_refresh_interval_seconds"] = int(rt_iv)
+        except ValueError:
+            log.warning("ignoring invalid RELAY_RT_REFRESH_INTERVAL=%r", rt_iv)
     return cfg
 
 
@@ -178,6 +194,13 @@ class RelayClient:
         # wiederholten 401/403-Fehlschlägen erhöht der Daemon den
         # Heartbeat/Claim-Abstand, statt in einem engen Loop zu hämmern.
         self._auth_fail_streak = 0
+        # T-182: fixed-interval credential maintenance. The daemons call
+        # maybe_refresh_token() every heartbeat tick; the client tracks
+        # per-credential timers here (None = due now / never done).
+        self._rs_last_refresh: float | None = None
+        self._rt_last_refresh: float | None = None
+        # rs refreshes on every daemon start (T-182), not on a timer.
+        self._rs_due_on_start = True
         if not self.token:
             print(
                 "no runtime token found, attempting recovery with registration secret",
@@ -284,6 +307,8 @@ class RelayClient:
                     save_token(new, expires_at=expires_at)
                     self.token = new
                     self.token_expires_at = expires_at
+                    # T-182: if the server rotates the rs alongside, keep it.
+                    self._persist_rotated_secret(data)
                     self._register_backoff_success()
                     return True
         except Exception as exc:
@@ -320,40 +345,98 @@ class RelayClient:
                 save_token(new, expires_at=expires_at)
                 self.token = new
                 self.token_expires_at = expires_at
+                # T-182 (Bug 4): the server rotates the rs on recovery and
+                # returns it. Persisting it is the whole point — a node that
+                # drops the rotated rs cannot recover the NEXT time.
+                self._persist_rotated_secret(data)
+                # The recovered token is brand-new: mark rt as freshly done.
+                self._rt_last_refresh = time.monotonic()
             return new
         except Exception as exc:
             log.error("registration-secret recovery failed: %s", exc)
             return None
 
-    # -- proactive refresh (T-118) ------------------------------------------
+    # -- proactive refresh (T-118) + credential maintenance (T-182) ----------
+
+    def _persist_rotated_secret(self, data: dict[str, Any]) -> None:
+        """Keep a rotated registration secret from any refresh response.
+
+        The 2026-09-13 death spiral happened because the server attached a
+        rotated rs to the recovery response but the client threw it away
+        (relay_client.py:316-323 pre-T-182). A node whose meta file holds a
+        stale rs cannot recover once its rt dies — persist whatever the
+        server hands us, in both response shapes.
+        """
+        new_secret = data.get("registration_secret")
+        if not new_secret or new_secret == self.meta.get("registration_secret"):
+            return
+        self.meta["registration_secret"] = new_secret
+        save_meta(self.meta)
+        log.info("persisted rotated registration secret from refresh response")
+
+    def _maybe_rotate_rs(self) -> None:
+        """Rotate the registration secret on start + every rs interval (T-182).
+
+        Uses the valid runtime token (server auth.py Case 3). A failed
+        rotation is non-fatal: keep the old secret and try again next tick.
+        """
+        interval = float(self.cfg.get("rs_refresh_interval_seconds", 86400))
+        due = (
+            self._rs_last_refresh is None
+            or (time.monotonic() - self._rs_last_refresh) >= interval
+        )
+        if not (due or self._rs_due_on_start):
+            return
+        if not self.token:
+            return
+        try:
+            r = httpx.post(
+                f"{self.base_url}/relay/v2/auth/refresh",
+                headers={"Authorization": f"Bearer {self.token}"},
+                json={"requested_credential": "registration_secret"},
+                timeout=self.cfg["request_timeout"],
+                verify=self._verify,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                new = data.get("token")
+                if new:
+                    self.meta["registration_secret"] = new
+                    save_meta(self.meta)
+                    self._rs_last_refresh = time.monotonic()
+                    log.info("registration secret rotated proactively")
+                else:
+                    log.warning("rs rotation response without token; retrying next tick")
+            else:
+                log.warning(
+                    "rs rotation failed (http %s); retrying next tick", r.status_code
+                )
+        except Exception as exc:  # noqa: BLE001 — maintenance must not kill the daemon
+            log.warning("rs rotation error: %s", exc)
+        finally:
+            self._rs_due_on_start = False
 
     def maybe_refresh_token(self) -> None:
-        """Proactively refresh the runtime token before it expires.
+        """Fixed-interval credential maintenance (T-182).
 
-        Centralized here so both daemons (node-cli and node-daemon) share one
-        implementation. Refreshes when the token expires within
-        ``rt_refresh_before_seconds`` (default 24h). When ``expires_at`` is
-        unknown (legacy plaintext token), refresh immediately — an unknown
-        expiry is treated as risky rather than trusted.
+        Replaces the T-118 expiry-margin logic. No expiry math anymore —
+        the node acts on its own schedule:
+          - rs: rotated on daemon start + every ``rs_refresh_interval_seconds``
+            (default 24h)
+          - rt: refreshed every ``rt_refresh_interval_seconds`` (default 6 days)
+        Both credentials carry a 7-day TTL server-side, so fixed intervals
+        keep them permanently fresh. A recovery that ran in ``__init__``
+        counts as a fresh rt refresh (the recovered token is brand-new).
         """
-        margin = float(self.cfg.get("rt_refresh_before_seconds", 86400))
-        if self.token_expires_at:
-            try:
-                exp = datetime.fromisoformat(self.token_expires_at)
-                if exp - datetime.now(timezone.utc) < timedelta(seconds=margin):
-                    log.info(
-                        "token expires soon (%s), refreshing proactively",
-                        self.token_expires_at,
-                    )
-                    self._refresh_token()
-            except (ValueError, TypeError):
-                # Malformed expires_at — fall through to the unknown-expiry
-                # path below so a bad value can't silently kill the node.
-                self._refresh_token()
-        else:
-            # No known expiry (legacy token): refresh to be safe.
-            log.info("token expiry unknown, refreshing proactively")
-            self._refresh_token()
+        now = time.monotonic()
+        rt_interval = float(self.cfg.get("rt_refresh_interval_seconds", 6 * 86400))
+        rt_due = self._rt_last_refresh is None or (
+            now - self._rt_last_refresh
+        ) >= rt_interval
+        if rt_due:
+            if self._refresh_token():
+                self._rt_last_refresh = now
+        self._maybe_rotate_rs()
 
     # -- public API ----------------------------------------------------------
 

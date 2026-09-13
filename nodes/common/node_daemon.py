@@ -237,10 +237,9 @@ class SseDaemon:
         while not self._stop_event.is_set():
             error: str | None = None
             try:
-                # T-118: proactively refresh the runtime token before it
-                # expires (centralized in RelayClient.maybe_refresh_token).
-                # Uses rt_refresh_before_seconds (24h) margin and also
-                # refreshes legacy tokens with unknown expiry.
+                # T-182: fixed-interval credential maintenance (centralized
+                # in RelayClient.maybe_refresh_token): rt every 6 days,
+                # rs on start + every 24h. No expiry math anymore.
                 self.client.maybe_refresh_token()
                 caps = load_active_profile()
                 with self._lock:
