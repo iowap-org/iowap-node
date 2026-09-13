@@ -321,9 +321,13 @@ class SseDaemon:
 
     async def _sse_loop_async(self) -> None:
         url = self._stream_url()
-        headers = {"Authorization": f"Bearer {self.client.token}"}
         async with httpx.AsyncClient() as http:
             while not self._stop_event.is_set():
+                # T-184: rebuild the auth header on EVERY attempt. A token
+                # rotation (credential maintenance) must not leave the SSE
+                # loop presenting a stale snapshot forever — that caused a
+                # permanent 401 reconnect cycle (2026-09-13).
+                headers = {"Authorization": f"Bearer {self.client.token}"}
                 try:
                     await self._consume_stream(http, url, headers)
                 except asyncio.CancelledError:
