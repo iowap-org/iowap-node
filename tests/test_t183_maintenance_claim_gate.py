@@ -222,3 +222,53 @@ def test_maybe_refresh_works_when_gate_open(isolated_relay_dir, monkeypatch):
     client.maybe_refresh_token()
     kinds = {c["kind"] for c in calls}
     assert kinds == {"runtime_token", "registration_secret"}
+
+
+# ---------------------------------------------------------------------------
+# T-184: the maintenance thread must not race, skip, or wait on its own gate
+# ---------------------------------------------------------------------------
+
+
+def test_run_credential_maintenance_performs_rotation(isolated_relay_dir, monkeypatch):
+    """Regression (T-184): run_credential_maintenance() must actually rotate
+    rt/rs. Since the T-183 gate, the maintenance thread skipped its own
+    refresh — the guard in maybe_refresh_token() saw the gate the thread
+    had just closed itself, and maintenance became a silent no-op."""
+    calls: list = []
+    monkeypatch.setattr(
+        relay_client.httpx, "post",
+        _fake_http({"registration_secret": [(200, {"token": RS_NEW})],
+                    "runtime_token": [(200, {"token": RT_NEW})],
+                    "recovery": []}, calls),
+    )
+    client = _make_client()
+    client.run_credential_maintenance()
+    kinds = {c["kind"] for c in calls}
+    assert kinds == {"runtime_token", "registration_secret"}
+    assert client.token == RT_NEW
+    assert client.meta["registration_secret"] == RS_NEW
+
+
+def test_maintenance_refresh_does_not_wait_on_its_own_gate(isolated_relay_dir, monkeypatch):
+    """The maintenance thread owns the gate: its rt refresh must proceed
+    immediately instead of blocking up to _MAINTENANCE_WAIT_TIMEOUT (120s)
+    in _refresh_token()'s gate wait — a self-deadlock."""
+    calls: list = []
+    monkeypatch.setattr(
+        relay_client.httpx, "post",
+        _fake_http({"registration_secret": [(200, {"token": RS_NEW})],
+                    "runtime_token": [(200, {"token": RT_NEW})],
+                    "recovery": []}, calls),
+    )
+    client = _make_client()
+    waited: list = []
+    original_wait = client._maintenance_gate.wait
+
+    def spy_wait(*a, **kw):
+        waited.append(True)
+        return original_wait(*a, **kw)
+
+    monkeypatch.setattr(client._maintenance_gate, "wait", spy_wait)
+    client.run_credential_maintenance()
+    assert waited == []  # owner must not block on its own gate
+    assert calls  # and the rotation ran

@@ -208,6 +208,11 @@ class RelayClient:
         # waits for the gate instead of refreshing against a token the
         # maintenance just invalidated (2026-09-13 restart race).
         self._maintenance_gate = threading.Event()
+        # T-184: which thread owns the gate right now. The maintenance
+        # thread itself must neither skip (maybe_refresh_token guard) nor
+        # wait ( _refresh_token gate wait) on the gate it just closed —
+        # both were silent no-ops/self-deadlocks before.
+        self._maintenance_owner: int | None = None
         self._maintenance_gate.set()
         if not self.token:
             print(
@@ -307,7 +312,7 @@ class RelayClient:
         # Refreshing against the old token would fail: the server already
         # invalidated it (2026-09-13 restart race).
         gate_was_closed = not self._maintenance_gate.is_set()
-        if gate_was_closed:
+        if gate_was_closed and self._maintenance_owner != threading.get_ident():
             if not self._maintenance_gate.wait(timeout=self._MAINTENANCE_WAIT_TIMEOUT):
                 log.warning(
                     "credential maintenance still running after %.0fs; refreshing anyway",
@@ -458,7 +463,11 @@ class RelayClient:
         claim loop for the duration. This method only guards against a
         direct call while another maintenance is in flight.
         """
-        if not self._maintenance_gate.is_set():
+        if self._maintenance_owner == threading.get_ident():
+            # This thread IS the maintenance (T-184): never skip your own
+            # rotation — the guard is only for other threads.
+            pass
+        elif not self._maintenance_gate.is_set():
             # Another thread is inside run_credential_maintenance().
             return
         now = time.monotonic()
@@ -480,9 +489,11 @@ class RelayClient:
         down), so a wedged claim loop can never outlive one bad tick.
         """
         self._maintenance_gate.clear()
+        self._maintenance_owner = threading.get_ident()
         try:
             self.maybe_refresh_token()
         finally:
+            self._maintenance_owner = None
             self._maintenance_gate.set()
 
     # -- public API ----------------------------------------------------------
