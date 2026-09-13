@@ -237,10 +237,10 @@ class SseDaemon:
         while not self._stop_event.is_set():
             error: str | None = None
             try:
-                # T-182: fixed-interval credential maintenance (centralized
-                # in RelayClient.maybe_refresh_token): rt every 6 days,
-                # rs on start + every 24h. No expiry math anymore.
-                self.client.maybe_refresh_token()
+                # T-182/T-183: fixed-interval credential maintenance with
+                # claims paused (sequence model: pause -> rotate rt/rs ->
+                # resume so claims inherit the fresh tokens; no 401 race).
+                self.client.run_credential_maintenance()
                 caps = load_active_profile()
                 with self._lock:
                     inflight = dict(self._in_flight)

@@ -16,15 +16,16 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
 from nodes.common.node_config import load_active_status
-from nodes.common.node_utils import load_config, load_meta, load_token, save_meta, save_token
+from nodes.common.node_utils import load_config, load_token, save_meta, save_token
 
 log = logging.getLogger("relay-client")
 
@@ -40,7 +41,7 @@ def _setup_logging(level: str | None = None) -> None:
 
 
 def _utcnow_str() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +117,7 @@ def _discover_relay_mdns(timeout: float = 2.0) -> str | None:
     with a ``path`` property (default ``/health``) and the port.
     """
     try:
-        from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf  # noqa: PLC0415
+        from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
     except ImportError:
         log.warning("mDNS discovery unavailable (zeroconf not installed)")
         return None
@@ -140,7 +141,7 @@ def _discover_relay_mdns(timeout: float = 2.0) -> str | None:
         listener = _Listener()
         browser = ServiceBrowser(zc, "_http._tcp.local.", listener)
         # Wait briefly for discovery.
-        import time  # noqa: PLC0415
+        import time
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and "info" not in found:
@@ -183,7 +184,7 @@ class RelayClient:
         # to a relay using a private/self-signed CA. When set, httpx verifies
         # against it instead of the system trust store. Default True = system
         # trust store (public CA / Let's Encrypt).
-        self._verify: "str | bool" = cfg.get("tls_ca_cert") or True
+        self._verify: str | bool = cfg.get("tls_ca_cert") or True
         data = load_token()
         self.token = data["token"] if data else None
         # T-088: track the token expiry so the daemon can refresh
@@ -201,6 +202,13 @@ class RelayClient:
         self._rt_last_refresh: float | None = None
         # rs refreshes on every daemon start (T-182), not on a timer.
         self._rs_due_on_start = True
+        # T-183: claim pause during credential maintenance. The gate is
+        # SET = claims allowed (open). During run_credential_maintenance()
+        # it is cleared: claim() skips without HTTP and the 401 fallback
+        # waits for the gate instead of refreshing against a token the
+        # maintenance just invalidated (2026-09-13 restart race).
+        self._maintenance_gate = threading.Event()
+        self._maintenance_gate.set()
         if not self.token:
             print(
                 "no runtime token found, attempting recovery with registration secret",
@@ -218,6 +226,9 @@ class RelayClient:
     _BACKOFF_BASE = 10
     # Hard cap (seconds) so the backoff never grows unbounded.
     _BACKOFF_MAX = 300
+    # T-183: max seconds a 401 fallback waits for the credential
+    # maintenance gate before proceeding with its own refresh.
+    _MAINTENANCE_WAIT_TIMEOUT = 120.0
 
     def _register_backoff_failure(self) -> None:
         """Record one consecutive auth failure (401/403)."""
@@ -291,6 +302,20 @@ class RelayClient:
     # -- token refresh -------------------------------------------------------
 
     def _refresh_token(self) -> bool:
+        # T-183: a 401 fallback that raced the maintenance start waits for
+        # the maintenance to finish, then adopts the token it persisted.
+        # Refreshing against the old token would fail: the server already
+        # invalidated it (2026-09-13 restart race).
+        gate_was_closed = not self._maintenance_gate.is_set()
+        if gate_was_closed:
+            if not self._maintenance_gate.wait(timeout=self._MAINTENANCE_WAIT_TIMEOUT):
+                log.warning(
+                    "credential maintenance still running after %.0fs; refreshing anyway",
+                    self._MAINTENANCE_WAIT_TIMEOUT,
+                )
+            else:
+                # Maintenance finished while we waited: adopt its fresh token.
+                self._reload_token_from_disk()
         try:
             r = httpx.post(
                 f"{self.base_url}/relay/v2/auth/refresh",
@@ -427,7 +452,15 @@ class RelayClient:
         Both credentials carry a 7-day TTL server-side, so fixed intervals
         keep them permanently fresh. A recovery that ran in ``__init__``
         counts as a fresh rt refresh (the recovered token is brand-new).
+
+        T-183: claims must not run concurrently with the rotation — the
+        daemons use :meth:`run_credential_maintenance`, which pauses the
+        claim loop for the duration. This method only guards against a
+        direct call while another maintenance is in flight.
         """
+        if not self._maintenance_gate.is_set():
+            # Another thread is inside run_credential_maintenance().
+            return
         now = time.monotonic()
         rt_interval = float(self.cfg.get("rt_refresh_interval_seconds", 6 * 86400))
         rt_due = self._rt_last_refresh is None or (
@@ -437,6 +470,20 @@ class RelayClient:
             if self._refresh_token():
                 self._rt_last_refresh = now
         self._maybe_rotate_rs()
+
+    def run_credential_maintenance(self) -> None:
+        """Run one maintenance tick with claims paused (T-183).
+
+        Sequence model instead of locking: pause claims, rotate rt/rs,
+        resume claims — which now inherit the fresh tokens. The ``finally``
+        guarantees the gate reopens even if the maintenance raises (server
+        down), so a wedged claim loop can never outlive one bad tick.
+        """
+        self._maintenance_gate.clear()
+        try:
+            self.maybe_refresh_token()
+        finally:
+            self._maintenance_gate.set()
 
     # -- public API ----------------------------------------------------------
 
@@ -540,6 +587,10 @@ class RelayClient:
         return r.json()
 
     def claim(self, capability: str) -> dict[str, Any] | None:
+        # T-183: during credential maintenance the claim thread pauses —
+        # decided locally, no HTTP against a token that is about to rotate.
+        if not self._maintenance_gate.is_set():
+            return None
         r = self._post_with_retry(
             "/relay/v2/scheduler/claim",
             {"capability": capability},
@@ -714,7 +765,7 @@ class RelayClient:
     def download_artifact(
         self,
         artifact_id: str,
-        output_path: Optional[Path] = None,
+        output_path: Path | None = None,
         *,
         chunk_size: int = 64 * 1024,
     ) -> Path:
@@ -766,9 +817,9 @@ class RelayClient:
         self,
         file_path: Path,
         *,
-        name: Optional[str] = None,
-        task_id: Optional[str] = None,
-        stage_id: Optional[str] = None,
+        name: str | None = None,
+        task_id: str | None = None,
+        stage_id: str | None = None,
     ) -> dict[str, Any]:
         """Upload a local file to the relay as an artifact.
 
@@ -906,8 +957,7 @@ def _parse_prometheus_gauges(text: str) -> dict[str, Any]:
                 if node_id:
                     node_load[node_id] = value
             continue
-        if name.startswith("relay_"):
-            name = name[len("relay_"):]
+        name = name.removeprefix("relay_")
         gauges[name] = value
     if node_load:
         gauges["node_load"] = node_load
