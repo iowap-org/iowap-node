@@ -1,0 +1,69 @@
+name: Build wheel
+
+# Builds the iowap-node wheel and publishes it as a GitHub release
+# (tag: wheel-v<version>, asset: iowap_node-<version>-py3-none-any.whl).
+#
+# Downstream automation keys off this release:
+#   - iowap-ha  vendor-wheel.yml  (polls releases, vendors + bumps app version)
+#   - iowap-docker refresh-node-base.yml (polls releases, rebuilds base+storage+server)
+#
+# Convention: a wheel release is only produced when the package version in
+# pyproject.toml changed (fixes land as version-bump commits, e.g. 2.3.4 →
+# 2.3.5). A fix without a bump is deliberately NOT released — same rule the
+# HAOS supervisor enforces by never re-pulling identical image tags.
+#
+# Idempotent: if the release already exists, the asset is re-uploaded with
+# --clobber (safe on workflow re-runs).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "nodes/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist/
+
+      - name: Read version
+        id: version
+        run: |
+          VER=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Wheel version: $VER"
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          TAG="wheel-v${VER}"
+          ASSET="iowap_node-${VER}-py3-none-any.whl"
+          if gh release view "$TAG" --json assets -q '.tag_name' >/dev/null 2>&1; then
+            echo "Release $TAG exists — re-uploading asset with --clobber"
+            gh release upload "$TAG" "dist/${ASSET}" --clobber
+          else
+            gh release create "$TAG" "dist/${ASSET}" \
+              --title "iowap-node wheel ${VER}" \
+              --notes "Automated wheel build of ${GITHUB_SHA::7}. Consumed by iowap-ha (vendor-wheel) and iowap-docker (refresh-node-base)."
+          fi
+          echo "--- release assets:"
+          gh release view "$TAG" --json assets --jq '.assets[].name'
