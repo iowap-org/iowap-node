@@ -12,6 +12,15 @@ to ``stage_claimed`` and ``task_created`` events:
   the daemon checks whether the capability matches one of its own and,
   if so, claims + executes it.
 
+Backfill (T-c51219ee): ``task_created`` is a one-shot event, so a task
+that became pending before the SSE connection existed — or that lost
+its initial claim race — would stay ``pending`` forever. After every
+successful SSE connect the daemon sweeps all claimable capabilities
+once, and a periodic ticker (``backfill_interval``, default 60s,
+``RELAY_BACKFILL_INTERVAL``) repeats the sweep as a safety net. The
+sweep reuses the ``max_parallel``/``_in_flight`` guard from the event
+handler; claims are idempotent (the server grants them atomically).
+
 ``node-cli daemon`` remains unchanged; this module is a separate entry
 point (``node-daemon``) that can run side-by-side without affecting the
 existing daemon.
@@ -21,6 +30,7 @@ Architecture (threads)::
     Thread 1: Heartbeat  — identical to node-cli daemon (every 30s)
     Thread 2: SSE client — event stream with automatic reconnect
     Thread 3: Claim/Execute/Complete — triggered from SSE events
+    Thread 4: Backfill ticker — periodic claim sweep (T-c51219ee)
 """
 
 from __future__ import annotations
@@ -122,6 +132,47 @@ def _handler_timeout(cap: dict[str, Any]) -> int:
 # Event types the daemon is interested in.
 _SUBSCRIBED_TYPES = "stage_claimed,task_created"
 
+# Backfill (T-c51219ee): the daemon is purely SSE-event-driven and
+# ``task_created`` is a one-shot event — a task that became pending
+# before the SSE connection existed (daemon start, reload, network
+# blip) or that lost its initial claim race never triggers another
+# event and stays ``pending`` forever. Two safety nets fix this:
+#
+# * a claim sweep over every claimable capability right after a
+#   successful SSE connect (``_consume_stream``), and
+# * a periodic ticker that repeats the sweep every
+#   ``backfill_interval`` seconds while connected.
+#
+# A claim attempt is idempotent and cheap (the server atomically
+# grants the claim to the first requester; a null claim is a 204), so
+# an extra sweep cannot hurt. Default: 60s (override via
+# RELAY_BACKFILL_INTERVAL env or ``backfill_interval`` in
+# relay_config.json; 0 disables the ticker).
+_DEFAULT_BACKFILL_INTERVAL = 60
+
+
+def _cfg_int(cfg: dict[str, Any], key: str, default: int) -> int:
+    """Read an integer from cfg, falling back to ``default`` on garbage."""
+    raw = cfg.get(key, default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        log.warning("ignoring invalid %s=%r — using %d", key, raw, default)
+        return default
+
+
+def _backfill_interval(cfg: dict[str, Any]) -> int:
+    """Effective backfill sweep interval in seconds (0 = ticker off)."""
+    env = os.environ.get("RELAY_BACKFILL_INTERVAL")
+    if env is not None:
+        try:
+            return int(env)
+        except ValueError:
+            log.warning(
+                "ignoring invalid RELAY_BACKFILL_INTERVAL=%r", env
+            )
+    return _cfg_int(cfg, "backfill_interval", _DEFAULT_BACKFILL_INTERVAL)
+
 # Reconnect delay after a broken SSE connection.
 _RECONNECT_DELAY = 5.0
 
@@ -196,6 +247,13 @@ class SseDaemon:
         # T-060 mirror: per-task failure counter so the daemon stops
         # reclaiming stages for a task whose handler keeps failing.
         self._failed_tasks: dict[str, int] = {}
+        # Backfill ticker (T-c51219ee): periodic claim sweep while the
+        # SSE stream is connected. Started once by the first successful
+        # SSE connect; the sweep itself must NOT fire while the ticker
+        # thread races a live stream on another thread — therefore the
+        # ticker is armed only from the SSE thread.
+        self._backfill_thread: threading.Thread | None = None
+        self._backfill_armed = threading.Event()
 
     # -- signal handling ---------------------------------------------------
 
@@ -445,6 +503,16 @@ class SseDaemon:
         ) as resp:
             resp.raise_for_status()
             log.info("SSE connected to %s", url)
+            # Backfill (T-c51219ee): every successful SSE connect first
+            # sweeps already-pending work — one-shot ``task_created``
+            # events that fired before this connection exist can never
+            # arrive anymore. Best-effort: a sweep error must not kill
+            # the stream. Also arms the periodic claim ticker exactly
+            # once (this runs in the SSE thread).
+            try:
+                self._on_sse_connected()
+            except Exception as exc:  # noqa: BLE001 — stream must survive
+                log.warning("SSE connect backfill failed: %s", exc)
             buffer: list[str] = []
             async for line in resp.aiter_lines():
                 if self._stop_event.is_set():
@@ -512,6 +580,37 @@ class SseDaemon:
     def _handle_task_created(self, payload: dict[str, Any]) -> None:
         """A new task was created. Try to claim a stage for each
         claimable capability this node advertises."""
+        self._backfill_sweep()
+
+    # -- backfill (T-c51219ee) ----------------------------------------------
+
+    def _on_sse_connected(self) -> None:
+        """First reaction after a successful SSE connect.
+
+        Runs in the SSE thread (called from ``_consume_stream`` before
+        any event is consumed). Two jobs:
+
+        1. Immediately sweep for already-pending work — a task created
+           before this connection will never re-emit its one-shot
+           ``task_created`` event.
+        2. Arm the periodic backfill ticker (exactly once per daemon
+           lifetime); the ticker repeats the sweep so tasks that became
+           pending mid-run without an event (claim-race loss, event
+           hole) are still picked up.
+        """
+        self._backfill_sweep()
+        self._arm_backfill_ticker()
+
+    def _backfill_sweep(self) -> None:
+        """One claim attempt per claimable capability.
+
+        Same contract as the ``task_created`` handler: respects
+        ``max_parallel`` via the ``_in_flight`` counters (stage
+        execution is sequential in the SSE thread — never claim more
+        than the capability can run) and lets the server decide
+        atomically whether a stage exists (a null claim is a cheap
+        204).
+        """
         caps = load_active_profile()
         for cap in caps:
             if not cap.get("claimable", False):
@@ -522,6 +621,49 @@ class SseDaemon:
             if inflight >= int(cap.get("max_parallel", 1)):
                 continue
             self._try_claim_and_run(name)
+
+    def _arm_backfill_ticker(self) -> None:
+        """Start the periodic backfill ticker thread (once)."""
+        if self._backfill_armed.is_set():
+            return
+        self._backfill_armed.set()
+        interval = _backfill_interval(self.cfg)
+        if interval <= 0:
+            log.info("backfill ticker disabled (backfill_interval=%d)", interval)
+            return
+        self._backfill_thread = threading.Thread(
+            target=self._backfill_ticker_loop,
+            daemon=True,
+            name="backfill-ticker",
+        )
+        self._backfill_thread.start()
+        log.info(
+            "backfill ticker armed (every %ds) — catches tasks that became "
+            "pending without a task_created event",
+            interval,
+        )
+
+    def _backfill_ticker_loop(self) -> None:
+        """Repeat the claim sweep every ``backfill_interval`` seconds.
+
+        Pure safety net for the live-connection case: while the SSE
+        stream is up, ``task_created`` events normally trigger claims;
+        the ticker only rescues tasks that were missed (claim race,
+        event hole, dropped event). Stops with the daemon.
+        """
+        interval = _backfill_interval(self.cfg)
+        while not self._stop_event.is_set():
+            # Sleep in small slices so shutdown stays responsive.
+            for _ in range(max(1, interval)):
+                if self._stop_event.is_set():
+                    return
+                time.sleep(1)
+            if self._stop_event.is_set():
+                return
+            try:
+                self._backfill_sweep()
+            except Exception as exc:  # noqa: BLE001 — ticker must survive
+                log.warning("backfill sweep failed: %s", exc)
 
     def _try_claim_and_run(self, capability: str) -> None:
         max_retries = int(self.cfg.get("max_retries", 2))
@@ -701,6 +843,10 @@ class SseDaemon:
                 self._sse_thread.join(timeout=5)
             if self._hb_thread and self._hb_thread.is_alive():
                 self._hb_thread.join(timeout=5)
+            # Backfill ticker (T-c51219ee): exits on _stop_event; join it
+            # so a mid-sweep claim does not outlive the shutdown log line.
+            if self._backfill_thread and self._backfill_thread.is_alive():
+                self._backfill_thread.join(timeout=5)
             self._write_status()
             log.info("node-daemon stopped")
 

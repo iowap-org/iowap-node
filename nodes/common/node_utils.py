@@ -33,6 +33,10 @@ DEFAULT_CONFIG = {
     "base_url": None,
     "heartbeat_interval": 8,
     "claim_interval": 5,
+    # T-c51219ee: periodic backfill claim sweep for the SSE daemon
+    # (rescues tasks whose one-shot task_created event was missed).
+    # 0 disables the ticker. Env override: RELAY_BACKFILL_INTERVAL.
+    "backfill_interval": 60,
     "status_interval": 7200,
     # T-182: fixed maintenance intervals instead of expiry-margin math.
     # rt (TTL 7d): refresh every 6 days. rs (TTL 7d): rotate on every
