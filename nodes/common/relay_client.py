@@ -585,7 +585,14 @@ class RelayClient:
 
     # -- public API ----------------------------------------------------------
 
-    def heartbeat(self, caps: list[dict[str, Any]], in_flight: dict[str, int]) -> dict[str, Any]:
+    def _build_heartbeat_payload(
+        self, caps: list[dict[str, Any]], in_flight: dict[str, int]
+    ) -> dict[str, Any]:
+        # T-209: load ist Prozent (0-100). loadavg kann die Core-Zahl
+        # uebersteigen (I/O-Wait, Spikes) — dann liegt load_pct ueber 100
+        # und der Server-Schema-Field (le=100) lehnt den Heartbeat mit
+        # 422 ab: die Node fiel 2026-09-20 20:30-20:53 am Relay aus,
+        # waehrend loadavg > cpu war. Clampen auf 100 statt auf load_cap.
         try:
             load_avg = os.getloadavg()[0]
             cpu_count = os.cpu_count() or 1
@@ -594,7 +601,7 @@ class RelayClient:
             cpu_count = 1
             load_pct = 0.0
         load_cap = float(self.cfg.get("load_cap", cpu_count * 100.0))
-        load = min(load_pct, load_cap)
+        load = min(load_pct, load_cap, 100.0)
 
         cap_status: list[dict[str, Any]] = []
         for cap in caps:
@@ -660,15 +667,10 @@ class RelayClient:
         if load_cap is not None:
             body["load_cap"] = float(load_cap)
 
-        # T-075: collect routes from all capabilities in the active profile.
-        routes: list[dict[str, Any]] = []
-        for cap in caps:
-            cap_routes = cap.get("routes")
-            if cap_routes and isinstance(cap_routes, list):
-                routes.extend(cap_routes)
-        if routes:
-            body["routes"] = routes
+        return body
 
+    def heartbeat(self, caps: list[dict[str, Any]], in_flight: dict[str, int]) -> dict[str, Any]:
+        body = self._build_heartbeat_payload(caps, in_flight)
         r = self._post_with_retry(
             # T-176: post to /worker-heartbeat (replace mode). The regular
             # /heartbeat endpoint merges capabilities union-only on the
