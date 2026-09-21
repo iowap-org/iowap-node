@@ -1,52 +1,48 @@
-"""CLI update subcommands — check / apply (T-117 split).
+"""CLI update subcommands — check / apply (wheel-based, successor of T-062).
 
-These handlers have no RelayClient; they call local git helpers in
-node_utils. ``REPO_DIR`` is referenced lazily via ``node_utils.REPO_DIR``
-so the ``node_utils.REPO_DIR`` monkeypatch (applied by the test fixture)
-takes effect — a ``cli.REPO_DIR`` patch becomes a harmless no-op.
+The git-based update path was removed: wheel-deployed nodes have no git
+checkout, and a pull would never touch the package running from
+site-packages. The source of truth is now the newest ``wheel-vX.Y.Z``
+release on GitHub (iowap-org/iowap-node); the installed distribution
+version (importlib.metadata) is compared against it.
 """
 
 from __future__ import annotations
 
 import json
 
-from nodes.common import node_utils as _nu
-from nodes.common.node_utils import apply_update, check_for_updates
+from nodes.common.node_utils import apply_wheel_update, check_wheel_updates
 from nodes.common.relay_client import _setup_logging
 
 
 def _cmd_update_check(args) -> int:
-    """node-cli update check — fetch origin and compare local vs. upstream."""
+    """node-cli update check — compare installed version vs. newest release."""
     _setup_logging("ERROR" if args.json else args.log_level)
-    info = check_for_updates()
+    info = check_wheel_updates()
     if args.json:
         print(json.dumps(info, default=str))
         return 0
-    print(f"Repo:           {_nu.REPO_DIR}")
-    print(f"Local commit:   {info.get('local_commit') or '-'}")
-    print(f"Local branch:   {info.get('local_branch') or '-'}")
-    print(f"Upstream:       {'yes' if info.get('has_upstream') else 'no (not configured)'}")
-    print(f"Remote commit:  {info.get('remote_commit') or '-'}")
-    behind = info.get("behind_count", 0)
-    if not info.get("has_upstream"):
-        print("Status:         no upstream configured — cannot determine updates")
+    print(f"Local version:  {info.get('local_version') or '-'}")
+    print(f"Latest release: {info.get('latest_version') or '-'} ({info.get('tag') or 'no wheel release'})")
+    if info.get("error"):
+        print(f"Error:          {info['error']}")
         return 1
-    if behind > 0:
-        print(f"Status:         {behind} commit{'s' if behind != 1 else ''} behind — update available")
+    if info.get("update_available"):
+        print("Status:         update available")
         return 0
     print("Status:         up to date")
     return 0
 
 
 def _cmd_update_apply(args) -> int:
-    """node-cli update apply — git pull + restart the systemd service."""
+    """node-cli update apply — download wheel, pip reinstall, restart unit."""
     _setup_logging("ERROR" if args.json else args.log_level)
-    result = apply_update(service_unit=args.service_unit)
+    result = apply_wheel_update(service_unit=args.service_unit)
     if args.json:
         print(json.dumps(result, default=str))
         return 0 if result.get("success") else 1
-    print(f"Before: {result.get('before_commit') or '-'}")
-    print(f"After:  {result.get('after_commit') or '-'}")
+    print(f"Before: {result.get('before_version') or '-'}")
+    print(f"After:  {result.get('after_version') or '-'}")
     print(f"Restarted: {'yes' if result.get('restarted') else 'no'}")
     print(f"Result:  {result.get('message')}")
     return 0 if result.get("success") else 1

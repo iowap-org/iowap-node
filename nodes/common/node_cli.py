@@ -65,8 +65,7 @@ from nodes.common.node_config import (
     load_active_profile,
 )
 from nodes.common.node_utils import (
-    REPO_DIR,  # noqa: F401 — re-exported for the test fixture's cli.REPO_DIR patch
-    SERVICE_UNIT,
+    SERVICE_UNIT,  # noqa: F401 — referenced by the update subparser's default
     STATUS_PATH,
     TOKEN_PATH,
     load_json,
@@ -1157,23 +1156,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_docs.set_defaults(func=with_client(cli_docs._cmd_docs))
 
-    # update (T-062)
+    # update (wheel-based self-update)
     p_update = sub.add_parser(
         "update",
-        help="Check for and apply git-based node-cli updates.",
+        help="Check for and apply wheel-based self-updates (GitHub releases).",
     )
     p_update_sub = p_update.add_subparsers(
         dest="update_command", required=True, metavar="<action>"
     )
     p_update_check = p_update_sub.add_parser(
         "check",
-        help="Fetch origin and report whether the local branch is behind.",
+        help="Compare the installed wheel version against the newest GitHub release.",
     )
     p_update_check.set_defaults(func=cli_update._cmd_update_check)
 
     p_update_apply = p_update_sub.add_parser(
         "apply",
-        help="Pull the latest commits and restart the node-cli service.",
+        help="Download the newest wheel release, reinstall it and restart the service.",
     )
     p_update_apply.add_argument(
         "--service-unit",

@@ -9,7 +9,10 @@ loading used by node_cli.py and its RelayClient.
 import json
 import logging
 import os
+import re
 import subprocess
+import sys
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -189,147 +192,169 @@ def pid_running(pid: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# T-062: git repo update helpers (update check / update apply)
+# Wheel-based self-update (successor of the T-062 git helpers)
 # ---------------------------------------------------------------------------
+# Source of truth for "is there a newer version" is the GitHub release with
+# tag ``wheel-v<X.Y.Z>`` on iowap-org/iowap-node — the Wheel-CI publishes its
+# built artifact as release asset ``iowap_node-<X.Y.Z>-py3-none-any.whl``.
+# The locally installed distribution version (importlib.metadata) is compared
+# against the newest release tag; apply = download the asset, pip
+# force-reinstall it into the running venv, restart the systemd unit.
 
-# Location of the deployed repository on a node. Overridable via env var
-# RELAY_REPO_DIR so tests (or non-standard installs) can point it elsewhere.
-REPO_DIR = Path(os.environ.get("RELAY_REPO_DIR", str(Path.home() / "projects" / "iowap-server")))
+UPDATE_REPO = os.environ.get("RELAY_UPDATE_REPO", "iowap-org/iowap-node")
+UPDATE_ASSET_RE = re.compile(r"^iowap_node-(\d+\.\d+\.\d+)-py3-none-any\.whl$")
 
 # systemd user unit name restarted by `update apply`. Overridable via env
 # RELAY_SERVICE_UNIT so tests can substitute a no-op service name.
 SERVICE_UNIT = os.environ.get("RELAY_SERVICE_UNIT", "iowap-node-daemon.service")
 
 
-def _git(args: list[str], *, cwd: Path, timeout: float = 30.0) -> subprocess.CompletedProcess:
-    """Run a git command inside ``cwd`` and return the completed process.
+def get_local_wheel_version() -> str | None:
+    """Return the installed ``iowap-node`` distribution version (or None)."""
+    try:
+        from importlib import metadata
 
-    Raises CalledProcessError on non-zero exit so callers can distinguish a
-    real failure from empty-but-valid output (e.g. ``git rev-list --count``
-    before any upstream exists).
+        return metadata.version("iowap-node")
+    except Exception:  # noqa: BLE001 — not installed / metadata unreadable
+        return None
+
+
+def get_latest_release_version(repo: str | None = None) -> dict:
+    """Query GitHub for the newest ``wheel-vX.Y.Z`` release.
+
+    Returns a dict with:
+      - ``latest_version``: parsed version str of the newest wheel release
+                            (None when no matching release exists)
+      - ``tag``:            full tag name (e.g. ``wheel-v2.3.8``)
+      - ``asset_name``:     release asset filename of the wheel
+      - ``asset_url``:      browser_download_url for the asset
+      - ``error``:          human-readable failure reason (when lookup failed)
     """
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=True,
-    )
+    repo = repo or UPDATE_REPO
+    url = f"https://api.github.com/repos/{repo}/releases"
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30.0) as resp:
+            releases = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 — network / HTTP / parse errors
+        return {"latest_version": None, "tag": None, "asset_name": None,
+                "asset_url": None, "error": f"release lookup failed: {exc}"}
+    for rel in releases:
+        tag = rel.get("tag_name") or ""
+        m = re.match(r"^wheel-v(\d+\.\d+\.\d+)$", tag)
+        if not m:
+            continue
+        for asset in rel.get("assets") or []:
+            name = asset.get("name") or ""
+            if UPDATE_ASSET_RE.match(name):
+                return {
+                    "latest_version": m.group(1),
+                    "tag": tag,
+                    "asset_name": name,
+                    "asset_url": asset.get("browser_download_url"),
+                    "error": None,
+                }
+    return {"latest_version": None, "tag": None, "asset_name": None,
+            "asset_url": None, "error": "no wheel-vX.Y.Z release found"}
 
 
-def get_repo_info(repo_dir: Path | None = None) -> dict:
-    """Return a snapshot of the local repo vs. its configured upstream.
+def check_wheel_updates(*, repo: str | None = None) -> dict:
+    """Compare the installed wheel version against the newest GitHub release.
 
-    The dict contains:
-      - ``local_commit``:    SHA of HEAD (or None if not a git repo)
-      - ``local_branch``:    current branch name (or "" for detached HEAD)
-      - ``remote_commit``:   SHA of the upstream tracking branch (or None)
-      - ``behind_count``:    number of commits local is behind upstream
-                             (0 when no upstream is configured)
-      - ``has_upstream``:    bool whether an upstream is configured
+    Returns get_latest_release_version() plus:
+      - ``local_version``: installed version (None if not installed)
+      - ``update_available``: bool (True only when both versions parse and
+        latest > local)
     """
-    repo = repo_dir or REPO_DIR
-    info: dict = {
-        "local_commit": None,
-        "local_branch": "",
-        "remote_commit": None,
-        "behind_count": 0,
-        "has_upstream": False,
-    }
-    if not (repo / ".git").exists() and not repo.exists():
-        return info
+    local = get_local_wheel_version()
+    info = get_latest_release_version(repo=repo)
+    info["local_version"] = local
+    latest = info.get("latest_version")
     try:
-        info["local_commit"] = _git(["rev-parse", "HEAD"], cwd=repo).stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return info
-    try:
-        info["local_branch"] = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo).stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        info["local_branch"] = ""
-    try:
-        info["remote_commit"] = _git(["rev-parse", "@{upstream}"], cwd=repo).stdout.strip()
-        info["has_upstream"] = bool(info["remote_commit"])
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        info["remote_commit"] = None
-        info["has_upstream"] = False
-    if info["has_upstream"]:
-        try:
-            count = _git(["rev-list", "--count", "HEAD..@{upstream}"], cwd=repo).stdout.strip()
-            info["behind_count"] = int(count) if count.isdigit() else 0
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
-            info["behind_count"] = 0
+        info["update_available"] = bool(
+            local and latest and tuple(int(x) for x in latest.split(".")) > tuple(int(x) for x in local.split("."))
+        )
+    except ValueError:
+        info["update_available"] = False
     return info
 
 
-def check_for_updates(repo_dir: Path | None = None) -> dict:
-    """Run ``git fetch origin`` and return ``get_repo_info()`` afterwards.
-
-    The fetch is best-effort: network failures are logged and the current
-    repo info is still returned so callers can display the last-known state.
-    """
-    repo = repo_dir or REPO_DIR
-    try:
-        _git(["fetch", "origin"], cwd=repo, timeout=60.0)
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        logger.warning("git fetch failed: %s", exc)
-    return get_repo_info(repo_dir=repo)
-
-
-def apply_update(repo_dir: Path | None = None, *, service_unit: str | None = None) -> dict:
-    """Pull the latest commits and restart the node-cli systemd service.
+def apply_wheel_update(
+    *,
+    repo: str | None = None,
+    service_unit: str | None = None,
+    wheel_dir: Path | None = None,
+) -> dict:
+    """Download the newest wheel release, reinstall it and restart the unit.
 
     Returns a dict with:
       - ``success``:        bool
       - ``message``:        human-readable summary
-      - ``before_commit``:  SHA before the pull (or None)
-      - ``after_commit``:   SHA after the pull (or None)
-      - ``behind_before``:  behind_count before the pull
-      - ``behind_after``:   behind_count after the pull
+      - ``before_version``: installed version before the update (or None)
+      - ``after_version``:  installed version after the update (or None)
       - ``restarted``:      bool whether the service restart was attempted
+      - ``wheel_path``:     local path of the downloaded wheel (or None)
     """
-    repo = repo_dir or REPO_DIR
     unit = service_unit or SERVICE_UNIT
-    before = get_repo_info(repo_dir=repo)
+    target_dir = wheel_dir or (Path.home() / ".relay" / "wheels")
+    before = get_local_wheel_version()
     result: dict = {
         "success": False,
         "message": "",
-        "before_commit": before.get("local_commit"),
-        "after_commit": None,
-        "behind_before": before.get("behind_count", 0),
-        "behind_after": 0,
+        "before_version": before,
+        "after_version": None,
         "restarted": False,
+        "wheel_path": None,
     }
-    try:
-        _git(["pull"], cwd=repo, timeout=120.0)
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        result["message"] = f"git pull failed: {exc}"
+    info = check_wheel_updates(repo=repo)
+    if not info.get("update_available"):
+        result["after_version"] = before
+        result["message"] = (
+            f"already up to date ({before}); no wheel release newer than the "
+            f"installed version"
+        )
         return result
-    after = get_repo_info(repo_dir=repo)
-    result["after_commit"] = after.get("local_commit")
-    result["behind_after"] = after.get("behind_count", 0)
-    # Restart the systemd user service so the new code is loaded.
+    url = info.get("asset_url")
+    name = info.get("asset_name")
+    if not url or not name:
+        result["message"] = info.get("error") or "no wheel asset in newest release"
+        return result
+    target_dir.mkdir(parents=True, exist_ok=True)
+    wheel_path = target_dir / name
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
+        with urllib.request.urlopen(req, timeout=120.0) as resp, open(wheel_path, "wb") as fh:
+            fh.write(resp.read())
+    except Exception as exc:  # noqa: BLE001 — network / HTTP errors
+        result["message"] = f"wheel download failed: {exc}"
+        return result
+    result["wheel_path"] = str(wheel_path)
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet",
+             "--force-reinstall", "--no-deps", str(wheel_path)],
+            capture_output=True, text=True, timeout=300.0, check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        tail = (getattr(exc, "stderr", "") or "").strip().splitlines()[-3:]
+        result["message"] = f"pip install failed: {exc}" + (f" | {tail}" if tail else "")
+        return result
+    after = get_local_wheel_version()
+    result["after_version"] = after
     try:
         subprocess.run(
             ["systemctl", "--user", "restart", unit],
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=True,
+            capture_output=True, text=True, timeout=60.0, check=True,
         )
         result["restarted"] = True
         result["success"] = True
-        if result["before_commit"] == result["after_commit"]:
-            result["message"] = f"already up to date ({result['after_commit']}); service restarted"
-        else:
-            result["message"] = (
-                f"updated {result['before_commit']} -> {result['after_commit']}; "
-                f"service restarted"
-            )
+        result["message"] = f"updated {before} -> {after}; service restarted"
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
         result["message"] = (
-            f"pull ok ({result['before_commit']} -> {result['after_commit']}) but "
-            f"service restart failed: {exc}"
+            f"pip ok ({before} -> {after}) but service restart failed: {exc}"
         )
-        result["success"] = False
     return result
