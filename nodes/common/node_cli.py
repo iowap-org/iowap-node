@@ -66,6 +66,7 @@ from nodes.common.node_config import (
 )
 from nodes.common.node_utils import (
     SERVICE_UNIT,  # noqa: F401 — referenced by the update subparser's default
+    RESTART_COMMAND,  # noqa: F401 — referenced by the update subparser's default
     STATUS_PATH,
     TOKEN_PATH,
     load_json,
@@ -1178,6 +1179,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--service-unit",
         default=SERVICE_UNIT,
         help=f"systemd user unit to restart (default: {SERVICE_UNIT}).",
+    )
+    p_update_apply.add_argument(
+        "--restart-command",
+        default=RESTART_COMMAND,
+        help=(
+            "Command to run instead of `systemctl --user restart` (for hosts "
+            "without systemd, e.g. macOS launchd). '{unit}' is replaced with "
+            "the service name. Default: RELAY_RESTART_COMMAND env or systemd."
+        ),
     )
     p_update_apply.set_defaults(func=cli_update._cmd_update_apply)
 

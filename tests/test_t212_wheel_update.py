@@ -293,7 +293,10 @@ def test_cli_apply_json(monkeypatch, capsys):
     _patch_lookup(monkeypatch, "2.3.8")
     monkeypatch.setattr(node_utils, "get_local_wheel_version", lambda: "2.3.8")
     rc = cli_update._cmd_update_apply(
-        argparse.Namespace(json=True, log_level="ERROR", service_unit="noop.service")
+        argparse.Namespace(
+            json=True, log_level="ERROR", service_unit="noop.service",
+            restart_command=None,
+        )
     )
     assert rc == 1  # already up to date -> not "success"
     out = json.loads(capsys.readouterr().out)
@@ -312,3 +315,146 @@ def test_parser_update_subcommands_exist():
     args = parser.parse_args(["update", "apply"])
     assert args.update_command == "apply"
     assert args.service_unit == node_cli.SERVICE_UNIT
+    assert args.restart_command == node_cli.RESTART_COMMAND
+
+
+# ---------------------------------------------------------------------------
+# restart_command hook — hosts without systemd (macOS / manual setups)
+# ---------------------------------------------------------------------------
+
+def test_apply_restart_command_replaces_systemctl(monkeypatch, tmp_path):
+    _patch_lookup(monkeypatch, "2.4.0")
+    versions = iter(["2.3.8", "2.3.8", "2.4.0"])
+    monkeypatch.setattr(node_utils, "get_local_wheel_version", lambda: next(versions))
+    monkeypatch.setattr(node_utils, "get_latest_release_version", lambda repo=None: {
+        "latest_version": "2.4.0", "tag": "wheel-v2.4.0",
+        "asset_name": "iowap_node-2.4.0-py3-none-any.whl",
+        "asset_url": "https://x/iowap_node-2.4.0-py3-none-any.whl", "error": None,
+    })
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        r = MagicMock()
+        r.stdout = ""
+        r.stderr = ""
+        return r
+
+    def fake_open(url, **kw):
+        ctx = MagicMock()
+        ctx.__enter__ = lambda s: MagicMock(read=lambda: b"wheel-bytes")
+        return ctx
+
+    monkeypatch.setattr(node_utils.subprocess, "run", fake_run)
+    monkeypatch.setattr(node_utils.urllib.request, "urlopen", fake_open)
+    result = apply_wheel_update(
+        service_unit="com.iowap.node",
+        wheel_dir=tmp_path,
+        restart_command="/bin/launchctl kickstart -k gui/501/{unit}",
+    )
+    assert result["success"] is True
+    assert result["restarted"] is True
+    assert calls[1] == ["/bin/launchctl", "kickstart", "-k", "gui/501/com.iowap.node"]
+
+
+def test_apply_restart_command_from_env(monkeypatch, tmp_path):
+    _patch_lookup(monkeypatch, "2.4.0")
+    versions = iter(["2.3.8", "2.3.8", "2.4.0"])
+    monkeypatch.setattr(node_utils, "get_local_wheel_version", lambda: next(versions))
+    monkeypatch.setattr(node_utils, "get_latest_release_version", lambda repo=None: {
+        "latest_version": "2.4.0", "tag": "wheel-v2.4.0",
+        "asset_name": "iowap_node-2.4.0-py3-none-any.whl",
+        "asset_url": "https://x/iowap_node-2.4.0-py3-none-any.whl", "error": None,
+    })
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        r = MagicMock()
+        r.stdout = ""
+        r.stderr = ""
+        return r
+
+    def fake_open(url, **kw):
+        ctx = MagicMock()
+        ctx.__enter__ = lambda s: MagicMock(read=lambda: b"wheel-bytes")
+        return ctx
+
+    monkeypatch.setattr(node_utils.subprocess, "run", fake_run)
+    monkeypatch.setattr(node_utils.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(node_utils, "RESTART_COMMAND", "/bin/true {unit}")
+    result = apply_wheel_update(service_unit="env.service", wheel_dir=tmp_path)
+    assert result["success"] is True
+    assert calls[1] == ["/bin/true", "env.service"]
+
+
+def test_apply_cli_restart_command_flag(monkeypatch, capsys, tmp_path):
+    from nodes.common.cli import cli_update
+    _patch_lookup(monkeypatch, "2.4.0")
+    versions = iter(["2.3.8", "2.3.8", "2.4.0"])
+    monkeypatch.setattr(node_utils, "get_local_wheel_version", lambda: next(versions))
+    monkeypatch.setattr(node_utils, "get_latest_release_version", lambda repo=None: {
+        "latest_version": "2.4.0", "tag": "wheel-v2.4.0",
+        "asset_name": "iowap_node-2.4.0-py3-none-any.whl",
+        "asset_url": "https://x/iowap_node-2.4.0-py3-none-any.whl", "error": None,
+    })
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        r = MagicMock()
+        r.stdout = ""
+        r.stderr = ""
+        return r
+
+    def fake_open(url, **kw):
+        ctx = MagicMock()
+        ctx.__enter__ = lambda s: MagicMock(read=lambda: b"wheel-bytes")
+        return ctx
+
+    monkeypatch.setattr(node_utils.subprocess, "run", fake_run)
+    monkeypatch.setattr(node_utils.urllib.request, "urlopen", fake_open)
+    rc = cli_update._cmd_update_apply(argparse.Namespace(
+        json=True, log_level="ERROR", service_unit="flag.service",
+        restart_command="/bin/true {unit}",
+    ))
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["restarted"] is True
+    assert calls[1] == ["/bin/true", "flag.service"]
+
+
+def test_apply_explicit_restart_command_overrides_env(monkeypatch, tmp_path):
+    _patch_lookup(monkeypatch, "2.4.0")
+    versions = iter(["2.3.8", "2.3.8", "2.4.0"])
+    monkeypatch.setattr(node_utils, "get_local_wheel_version", lambda: next(versions))
+    monkeypatch.setattr(node_utils, "get_latest_release_version", lambda repo=None: {
+        "latest_version": "2.4.0", "tag": "wheel-v2.4.0",
+        "asset_name": "iowap_node-2.4.0-py3-none-any.whl",
+        "asset_url": "https://x/iowap_node-2.4.0-py3-none-any.whl", "error": None,
+    })
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        r = MagicMock()
+        r.stdout = ""
+        r.stderr = ""
+        return r
+
+    def fake_open(url, **kw):
+        ctx = MagicMock()
+        ctx.__enter__ = lambda s: MagicMock(read=lambda: b"wheel-bytes")
+        return ctx
+
+    monkeypatch.setattr(node_utils.subprocess, "run", fake_run)
+    monkeypatch.setattr(node_utils.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(node_utils, "RESTART_COMMAND", "/bin/env-cmd {unit}")
+    result = apply_wheel_update(
+        service_unit="win.service", wheel_dir=tmp_path,
+        restart_command="/bin/cli-cmd {unit}",
+    )
+    assert result["success"] is True
+    assert calls[1] == ["/bin/cli-cmd", "win.service"]

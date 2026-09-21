@@ -208,6 +208,14 @@ UPDATE_ASSET_RE = re.compile(r"^iowap_node-(\d+\.\d+\.\d+)-py3-none-any\.whl$")
 # RELAY_SERVICE_UNIT so tests can substitute a no-op service name.
 SERVICE_UNIT = os.environ.get("RELAY_SERVICE_UNIT", "iowap-node-daemon.service")
 
+# Restart command used by `update apply` instead of the systemd default —
+# needed on hosts without systemd (macOS/launchd, manual setups). When set
+# (env RELAY_RESTART_COMMAND) the value is split with shlex and run in place
+# of `systemctl --user restart <unit>`; the string `{unit}` (if present) is
+# replaced with the unit/service name. Example for launchd:
+#   RELAY_RESTART_COMMAND='/usr/bin/launchctl kickstart -k gui/$UID/{unit}'
+RESTART_COMMAND = os.environ.get("RELAY_RESTART_COMMAND")
+
 
 def get_local_wheel_version() -> str | None:
     """Return the installed ``iowap-node`` distribution version (or None)."""
@@ -288,6 +296,7 @@ def apply_wheel_update(
     repo: str | None = None,
     service_unit: str | None = None,
     wheel_dir: Path | None = None,
+    restart_command: str | None = None,
 ) -> dict:
     """Download the newest wheel release, reinstall it and restart the unit.
 
@@ -345,9 +354,18 @@ def apply_wheel_update(
         return result
     after = get_local_wheel_version()
     result["after_version"] = after
+    restart_argv: list[str] | None = None
+    restart_cmd = restart_command or RESTART_COMMAND
+    if restart_cmd:
+        import shlex
+
+        argv = shlex.split(os.path.expanduser(restart_cmd))
+        restart_argv = [tok.replace("{unit}", unit) for tok in argv]
+    else:
+        restart_argv = ["systemctl", "--user", "restart", unit]
     try:
         subprocess.run(
-            ["systemctl", "--user", "restart", unit],
+            restart_argv,
             capture_output=True, text=True, timeout=60.0, check=True,
         )
         result["restarted"] = True

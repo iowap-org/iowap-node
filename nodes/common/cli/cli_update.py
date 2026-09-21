@@ -37,7 +37,7 @@ def _cmd_update_check(args) -> int:
 def _cmd_update_apply(args) -> int:
     """node-cli update apply — download wheel, pip reinstall, restart unit."""
     _setup_logging("ERROR" if args.json else args.log_level)
-    result = apply_wheel_update(service_unit=args.service_unit)
+    result = apply_wheel_update(service_unit=args.service_unit, restart_command=args.restart_command)
     if args.json:
         print(json.dumps(result, default=str))
         return 0 if result.get("success") else 1
