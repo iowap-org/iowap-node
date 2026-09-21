@@ -29,6 +29,76 @@ from nodes.common.node_utils import load_config, load_token, save_meta, save_tok
 
 log = logging.getLogger("relay-client")
 
+# ---------------------------------------------------------------------------
+# T-210: load measurement with environment-appropriate sources
+# ---------------------------------------------------------------------------
+
+# T-210: previous state of /sys/fs/cgroup/cpu.stat (cgroup v2) resp.
+# cpuacct.usage (v1). CPU consumption is a *rate*, so we diff against
+# the last sample; on the very first call there is no previous state
+# and the cgroup rung yields nothing (falls through to loadavg).
+_CGROUP_PREV: dict[str, tuple[float, float]] = {}  # path -> (monotonic, usage)
+
+
+def _read_cgroup_cpu_usage() -> tuple[str, float] | None:
+    """Return (rung, cpu-seconds-used) from the process's own cgroup.
+
+    cgroup v2 first (/sys/fs/cgroup/cpu.stat), then v1 (cpuacct.usage).
+    Both report CPU time consumed by the cgroup, which inside an LXC
+    container is exactly the CT's own usage (the container's cgroup
+    root). On bare metal it equals the host's usage — also correct.
+    Returns None when neither file is readable.
+    """
+    # cgroup v2
+    try:
+        with open("/sys/fs/cgroup/cpu.stat") as f:
+            for line in f:
+                if line.startswith("usage_usec"):
+                    return "cgroup2", int(line.split()[1]) / 1_000_000.0
+    except (OSError, ValueError):
+        pass
+    # cgroup v1 (cpuacct.usage is in NANOSECONDS, like v2's usage_usec*1000)
+    for path in ("/sys/fs/cgroup/cpuacct/cpuacct.usage", "/sys/fs/cgroup/cpu,cpuacct/cpuacct.usage"):
+        try:
+            with open(path) as f:
+                return "cgroup", int(f.read().strip()) / 1_000_000_000.0
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _measure_load_pct(cpu_count: int) -> tuple[float, str]:
+    """Load as percent (0-100) from the best available source.
+
+    Rungs:
+      1. cgroup CPU consumption (diffed against the previous heartbeat)
+         — container-scoped, correct inside LXC/Docker.
+      2. os.getloadavg() — host loadavg; correct on bare metal and
+         macOS, but inside LXC it reports the HOST's load (all CTs
+         share /proc/loadavg). Kept as fallback because it is the only
+         source on macOS (NovaForge).
+    """
+    now = time.monotonic()
+    sample = _read_cgroup_cpu_usage()
+    if sample is not None:
+        source, usage = sample
+        prev = _CGROUP_PREV.get("current")
+        _CGROUP_PREV["current"] = (now, usage)
+        if prev is not None and now > prev[0]:
+            dt = now - prev[0]
+            cpu_used = max(usage - prev[1], 0.0)
+            # utilization = used CPU-seconds / (elapsed * cores)
+            pct = (cpu_used / (dt * max(cpu_count, 1))) * 100.0
+            if 0.0 <= pct <= 1000.0:  # sanity: CPU can't exceed cores*100
+                return min(pct, 100.0), source
+    # rung 2: loadavg
+    try:
+        load_avg = os.getloadavg()[0]
+        return min((load_avg / max(cpu_count, 1)) * 100.0, 100.0), "loadavg"
+    except (OSError, AttributeError):
+        return 0.0, "loadavg"
+
+
 def _setup_logging(level: str | None = None) -> None:
     if level is None:
         level = os.environ.get("RELAY_LOG_LEVEL", "INFO")
@@ -588,18 +658,14 @@ class RelayClient:
     def _build_heartbeat_payload(
         self, caps: list[dict[str, Any]], in_flight: dict[str, int]
     ) -> dict[str, Any]:
-        # T-209: load ist Prozent (0-100). loadavg kann die Core-Zahl
-        # uebersteigen (I/O-Wait, Spikes) — dann liegt load_pct ueber 100
-        # und der Server-Schema-Field (le=100) lehnt den Heartbeat mit
-        # 422 ab: die Node fiel 2026-09-20 20:30-20:53 am Relay aus,
-        # waehrend loadavg > cpu war. Clampen auf 100 statt auf load_cap.
-        try:
-            load_avg = os.getloadavg()[0]
-            cpu_count = os.cpu_count() or 1
-            load_pct = (load_avg / cpu_count) * 100.0
-        except (OSError, AttributeError):
-            cpu_count = 1
-            load_pct = 0.0
+        # T-210: load_source chain. os.getloadavg() reports the HOST
+        # loadavg inside LXC containers (shared /proc/loadavg), so all
+        # CTs on one Proxmox host reported the same number. Prefer
+        # container-scoped sources, fall back to loadavg (correct on
+        # bare metal / macOS). Each rung sets load_source so the server
+        # (and dashboard) can tell which measurement it got.
+        cpu_count = os.cpu_count() or 1
+        load_pct, load_source = _measure_load_pct(cpu_count)
         load_cap = float(self.cfg.get("load_cap", cpu_count * 100.0))
         load = min(load_pct, load_cap, 100.0)
 
@@ -641,6 +707,10 @@ class RelayClient:
             "queue_depth": queue_depth,
             "capabilities": cap_status,
         }
+        # T-210: which rung of the load chain produced the value
+        # (cgroup2/cgroup/loadavg), so the dashboard can show it.
+        body["load_source"] = load_source
+
         # T-072: forward node-level node_name + description from the
         # meta file (iowap-agent.json) so the server can store and
         # surface them via `node list` / `node info`.

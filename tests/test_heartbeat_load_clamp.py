@@ -33,7 +33,8 @@ CFG = {"base_url": None, "request_timeout": 5, "heartbeat_interval": 8}
 def test_heartbeat_load_never_exceeds_100(loadavg, cpu, expected):
     client = RelayClient(dict(META), dict(CFG))
     with patch("nodes.common.relay_client.os.getloadavg", return_value=(loadavg, 0, 0)), \
-         patch("nodes.common.relay_client.os.cpu_count", return_value=cpu):
+         patch("nodes.common.relay_client.os.cpu_count", return_value=cpu), \
+         patch("nodes.common.relay_client._read_cgroup_cpu_usage", return_value=None):
         payload = client._build_heartbeat_payload(caps=[], in_flight={})
     assert payload["load"] == pytest.approx(expected)
     assert payload["load"] <= 100.0
