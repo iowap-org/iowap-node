@@ -259,6 +259,10 @@ class Capability:
     input_schema: Optional[CapabilityInputSchema] = None
     config: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # T-004 (iowap-flow): dot-paths into the task result this capability
+    # produces (e.g. ["result.answer"]). Pure metadata — consumers (flow
+    # planner) use it for template paths; routing ignores it.
+    result_path_hints: Optional[list[str]] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this capability to a dictionary."""
@@ -287,6 +291,7 @@ class Capability:
             input_schema=input_schema,
             config=data.get("config", {}) or {},
             metadata=data.get("metadata", {}) or {},
+            result_path_hints=data.get("result_path_hints"),
         )
 
     def merge(self, other: Capability) -> Capability:
@@ -310,6 +315,8 @@ class Capability:
             merged.input_schema = copy.deepcopy(other.input_schema)
         merged.config = {**merged.config, **(other.config or {})}
         merged.metadata = {**merged.metadata, **(other.metadata or {})}
+        if other.result_path_hints:
+            merged.result_path_hints = list(other.result_path_hints)
         return merged
 
     def patch_config(self, updates: dict[str, Any]) -> None:
@@ -381,7 +388,7 @@ class CapabilitySet:
         if cap is None:
             return None
         for key in ("description", "version", "available", "input_schema",
-                    "config", "metadata"):
+                    "config", "metadata", "result_path_hints"):
             if key in kwargs and kwargs[key] is not None:
                 setattr(cap, key, kwargs[key])
         return cap
