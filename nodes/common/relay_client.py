@@ -696,6 +696,10 @@ class RelayClient:
             # und file send/file get sie für die Modus-Wahl nutzen kann.
             if cap.get("upload_modes"):
                 entry["upload_modes"] = cap.get("upload_modes")
+            # T-004 (iowap-flow): result_path_hints an den Server durchreichen,
+            # damit der Flow-Planner valide ${ref.result.path}-Pfade kennt.
+            if cap.get("result_path_hints"):
+                entry["result_path_hints"] = cap.get("result_path_hints")
             cap_status.append(entry)
 
         queue_depth = sum(in_flight.values())
