@@ -260,8 +260,13 @@ class Capability:
     config: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     # T-004 (iowap-flow): dot-paths into the task result this capability
-    # produces (e.g. ["result.answer"]). Pure metadata — consumers (flow
-    # planner) use it for template paths; routing ignores it.
+    # produces. T-005c (Envelope-Contract, design.md T-005a section 4.2):
+    # paths are RELATIVE TO THE INNER result of the handler result envelope
+    # ({"status": "completed", "result": X}) — e.g. ["answer"], NOT
+    # ["result.answer"]: flow unwraps the envelope exactly once, so the
+    # template ${ref.result.<hint>} navigates the unwrapped object directly.
+    # Pure metadata — consumers (flow planner) use it for template paths;
+    # routing ignores it.
     result_path_hints: Optional[list[str]] = None
 
     def to_dict(self) -> dict[str, Any]:
