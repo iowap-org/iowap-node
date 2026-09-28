@@ -20,9 +20,9 @@ Contract (see NODE_CLI_SPEC.md §4 and docs/node/capabilities.md):
 
 * Stdin:  Request Envelope as a JSON string (T-005b Envelope-Contract):
   ``{"task_id": ..., "capability": ..., "input": {...payload...}}``.
-  During rollout the payload keys are additionally mirrored at the top
-  level (per-capability ``config.envelope_request_mirror``, default on)
-  so legacy handlers reading flat keys keep working unmodified.
+  Since T-005d (strict phase) the envelope is sent alone; a legacy
+  top-level mirror of the payload keys can be re-enabled per capability
+  via ``config.envelope_request_mirror: true`` (rollback lever).
 * Stdout: on exit 0 MUST be valid JSON — normalized to the Response
   Envelope (T-005b): a conforming ``{"status": "completed", "result":
   {...}, "error": null}`` passes through verbatim, ``status: "error"``
@@ -100,9 +100,11 @@ def _stdin_payload(stage: dict[str, Any]) -> bytes:
     """Serialize the stage payload for handler stdin.
 
     T-005b (design.md §3.2): delegates to _build_stdin_payload with the
-    per-capability rollout toggle (``config.envelope_request_mirror``,
-    default on). Signature kept for stability — daemon and tests call
-    this unchanged.
+    per-capability rollout toggle (``config.envelope_request_mirror``).
+    Signature kept for stability — daemon and tests call this unchanged.
+    T-005d strict phase: the toggle defaults to False (envelope-only
+    stdin); True re-enables the legacy top-level mirror as a rollback
+    lever for a single capability.
     """
     return _build_stdin_payload(
         stage, mirrored=_envelope_request_mirror(stage)
@@ -114,21 +116,30 @@ def _envelope_request_mirror(stage: dict[str, Any]) -> bool:
 
     Reads the active profile's capability ``config.envelope_request_mirror``
     (T-005b design.md §3.2, D5: per-capability flip beats a global flag).
-    Default True during rollout (tolerant phase). Any lookup problem
-    (profile unreadable, capability unknown, config not a mapping) fails
-    OPEN to mirrored=True — the rollout phase must never break legacy
-    handlers because of a config hiccup.
+
+    T-005d (strict phase): the default is now **False** — the fleet has
+    migrated to the envelope contract, so the strict envelope-only stdin
+    is the normal case. The config key survives as the per-capability
+    ROLLBACK lever: setting ``envelope_request_mirror: true`` re-enables
+    the legacy top-level mirror for a single capability whose handler
+    still reads flat keys.
+
+    Any lookup problem (profile unreadable, capability unknown, config
+    not a mapping) resolves to the default as well (strict) — a config
+    hiccup must not silently re-enable the rollout mirror; a legacy
+    handler reading flat keys then fails loudly instead of being kept
+    alive by a stale profile.
     """
     try:
         for cap in node_config.load_active_profile():
             if cap.get("name") == stage.get("capability"):
                 cfg = cap.get("config")
                 if isinstance(cfg, dict):
-                    return bool(cfg.get("envelope_request_mirror", True))
+                    return bool(cfg.get("envelope_request_mirror", False))
                 break
-    except Exception:  # noqa: BLE001 — fail open, mirror stays on
-        return True
-    return True
+    except Exception:  # noqa: BLE001 — resolve to strict default, no mirror
+        return False
+    return False
 
 
 def _build_stdin_payload(stage: dict[str, Any], *, mirrored: bool) -> bytes:

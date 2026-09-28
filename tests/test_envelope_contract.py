@@ -226,41 +226,61 @@ def test_stdin_payload_resolves_mirror_from_capability_config(
     assert set(data) == {"task_id", "capability", "input"}
 
 
-def test_stdin_payload_defaults_to_mirror(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No capability config at all → rollout default mirrored=True.
+def test_stdin_payload_defaults_to_strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    # T-005d strict phase: no capability config at all → envelope-only stdin.
     monkeypatch.setattr(node_config, "load_active_profile", lambda: [{"name": "chat.ai"}])
     data = json.loads(handler_runner._stdin_payload(_stage()))
-    assert data["prompt"] == "hi"
+    assert set(data) == {"task_id", "capability", "input"}
+    assert "prompt" not in data
 
 
-def test_envelope_request_mirror_fail_open(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_envelope_request_mirror_strict_default(monkeypatch: pytest.MonkeyPatch) -> None:
     stage = _stage()
 
     def _boom() -> list[dict[str, Any]]:
         raise RuntimeError("profile unreadable")
 
     monkeypatch.setattr(node_config, "load_active_profile", _boom)
-    assert handler_runner._envelope_request_mirror(stage) is True
+    assert handler_runner._envelope_request_mirror(stage) is False
 
-    # Unknown capability / no config / non-dict config → all fail open.
+    # Unknown capability / no config / non-dict config → all resolve to the
+    # strict default (T-005d: a config hiccup must not re-enable the mirror).
     monkeypatch.setattr(node_config, "load_active_profile", list)
-    assert handler_runner._envelope_request_mirror(stage) is True
+    assert handler_runner._envelope_request_mirror(stage) is False
     monkeypatch.setattr(
         node_config, "load_active_profile", lambda: [{"name": "chat.ai"}]
     )
-    assert handler_runner._envelope_request_mirror(stage) is True
+    assert handler_runner._envelope_request_mirror(stage) is False
     monkeypatch.setattr(
         node_config,
         "load_active_profile",
         lambda: [{"name": "chat.ai", "config": "not-a-dict"}],
     )
-    assert handler_runner._envelope_request_mirror(stage) is True
+    assert handler_runner._envelope_request_mirror(stage) is False
+    monkeypatch.setattr(
+        node_config,
+        "load_active_profile",
+        lambda: [{"name": "chat.ai", "config": {}}],
+    )
+    assert handler_runner._envelope_request_mirror(stage) is False
+
+
+def test_envelope_request_mirror_config_is_rollback_lever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # T-005d: config.envelope_request_mirror flips from rollout default
+    # (True) to the per-capability ROLLBACK lever — setting True re-enables
+    # the legacy top-level mirror for one capability; False/absent = strict.
+    stage = _stage()
     monkeypatch.setattr(
         node_config,
         "load_active_profile",
         lambda: [{"name": "chat.ai", "config": {"envelope_request_mirror": True}}],
     )
     assert handler_runner._envelope_request_mirror(stage) is True
+    data = json.loads(handler_runner._stdin_payload(stage))
+    assert data["prompt"] == "hi"
+    assert data["input"] == {"prompt": "hi"}
     monkeypatch.setattr(
         node_config,
         "load_active_profile",
@@ -304,7 +324,16 @@ def test_run_handler_end_to_end_legacy_wrapped(tmp_path: Any) -> None:
     assert result["_handler"]["exit_code"] == 0
 
 
-def test_run_handler_receives_envelope_and_mirror_on_stdin(tmp_path: Any) -> None:
+def test_run_handler_receives_mirror_only_with_config_optin(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # T-005d: the top-level mirror is now a per-capability rollback lever —
+    # present only when config.envelope_request_mirror=True.
+    monkeypatch.setattr(
+        node_config,
+        "load_active_profile",
+        lambda: [{"name": "chat.ai", "config": {"envelope_request_mirror": True}}],
+    )
     handler = _write_handler(
         tmp_path,
         "import json, sys\n"
@@ -315,10 +344,30 @@ def test_run_handler_receives_envelope_and_mirror_on_stdin(tmp_path: Any) -> Non
     )
     result = handler_runner.run_handler(handler, _stage(), context={}, timeout=30)
     inner = result["result"]
-    assert inner["flat_prompt"] == "hi"  # mirrored legacy read
+    assert inner["flat_prompt"] == "hi"  # mirrored legacy read (rollback lever)
     assert inner["input"] == {"prompt": "hi"}
     assert inner["task_id"] == "task_1"
     assert inner["capability"] == "chat.ai"
+
+
+def test_run_handler_receives_strict_envelope_by_default(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # T-005d strict default: no config → handler sees ONLY the envelope keys.
+    monkeypatch.setattr(
+        node_config, "load_active_profile", lambda: [{"name": "chat.ai"}]
+    )
+    handler = _write_handler(
+        tmp_path,
+        "import json, sys\n"
+        "d = json.load(sys.stdin)\n"
+        'print(json.dumps({"status": "completed", "result": {'
+        '"keys": sorted(d.keys()), "prompt": d.get("prompt")}}))\n',
+    )
+    result = handler_runner.run_handler(handler, _stage(), context={}, timeout=30)
+    inner = result["result"]
+    assert inner["keys"] == ["capability", "input", "task_id"]
+    assert inner["prompt"] is None  # no top-level mirror
 
 
 def test_run_handler_envelope_error_fails_stage(tmp_path: Any) -> None:
