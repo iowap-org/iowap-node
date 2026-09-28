@@ -18,10 +18,17 @@ Contract (see NODE_CLI_SPEC.md §4 and docs/node/capabilities.md):
       RELAY_BASE_URL      Relay server URL
       RELAY_TOKEN_FILE    Path to runtime token file
 
-* Stdin:  stage ``payload`` as a JSON string.
-* Stdout: on exit 0 MUST be valid JSON — parsed and returned as the
-  result dict. Writing anything else to stdout on exit 0 is a contract
-  violation and is recorded as an ``error`` result on the stage.
+* Stdin:  Request Envelope as a JSON string (T-005b Envelope-Contract):
+  ``{"task_id": ..., "capability": ..., "input": {...payload...}}``.
+  During rollout the payload keys are additionally mirrored at the top
+  level (per-capability ``config.envelope_request_mirror``, default on)
+  so legacy handlers reading flat keys keep working unmodified.
+* Stdout: on exit 0 MUST be valid JSON — normalized to the Response
+  Envelope (T-005b): a conforming ``{"status": "completed", "result":
+  {...}, "error": null}`` passes through verbatim, ``status: "error"``
+  fails the stage fail-fast via its ``error`` message, and bare result
+  dicts are wrapped into the envelope (without an ``error`` key — the
+  daemon counts failures via ``"error" in result`` key presence).
 * Stderr: captured and included in the error result on non-zero exit.
   On exit 0 it is attached to the result under ``_handler.stderr`` for
   debugging but is never interpreted as the result.
@@ -48,6 +55,8 @@ import json
 import os
 import subprocess
 from typing import Any
+
+from nodes.common import node_config
 
 # Environment variables passed to every handler.
 HANDLER_ENV_KEYS = (
@@ -88,16 +97,141 @@ def _build_env(stage: dict[str, Any], context: dict[str, Any]) -> dict[str, str]
 
 
 def _stdin_payload(stage: dict[str, Any]) -> bytes:
-    """Serialize the stage payload to JSON bytes for stdin.
+    """Serialize the stage payload for handler stdin.
 
-    The spec mandates that handlers receive *only* the payload on
-    stdin (not the full stage). An absent payload is serialized as the
-    empty object so handlers always see valid JSON.
+    T-005b (design.md §3.2): delegates to _build_stdin_payload with the
+    per-capability rollout toggle (``config.envelope_request_mirror``,
+    default on). Signature kept for stability — daemon and tests call
+    this unchanged.
+    """
+    return _build_stdin_payload(
+        stage, mirrored=_envelope_request_mirror(stage)
+    )
+
+
+def _envelope_request_mirror(stage: dict[str, Any]) -> bool:
+    """Resolve the per-capability request-mirror toggle for ``stage``.
+
+    Reads the active profile's capability ``config.envelope_request_mirror``
+    (T-005b design.md §3.2, D5: per-capability flip beats a global flag).
+    Default True during rollout (tolerant phase). Any lookup problem
+    (profile unreadable, capability unknown, config not a mapping) fails
+    OPEN to mirrored=True — the rollout phase must never break legacy
+    handlers because of a config hiccup.
+    """
+    try:
+        for cap in node_config.load_active_profile():
+            if cap.get("name") == stage.get("capability"):
+                cfg = cap.get("config")
+                if isinstance(cfg, dict):
+                    return bool(cfg.get("envelope_request_mirror", True))
+                break
+    except Exception:  # noqa: BLE001 — fail open, mirror stays on
+        return True
+    return True
+
+
+def _build_stdin_payload(stage: dict[str, Any], *, mirrored: bool) -> bytes:
+    """Build the Request Envelope for handler stdin (T-005b, design.md §3.2).
+
+    FROZEN contract: ``{"task_id": str, "capability": str, "input": dict}``
+    — the capability-specific payload moves under ``input``.
+
+    mirrored=True (rollout phase): payload keys are additionally placed at
+    the top level so legacy handlers reading flat keys keep working.
+    Payload keys are written FIRST and the contract keys LAST, so
+    ``task_id``/``capability``/``input`` always win on collision.
+    mirrored=False (strict phase, post-migration): envelope only.
     """
     payload = stage.get("payload")
     if payload is None:
         payload = {}
-    return json.dumps(payload).encode("utf-8")
+    if not isinstance(payload, dict):
+        payload = {"payload": payload}
+    envelope: dict[str, Any] = {}
+    if mirrored:
+        envelope.update(payload)
+    envelope["task_id"] = str(stage.get("task_id") or "")
+    envelope["capability"] = str(stage.get("capability") or "")
+    envelope["input"] = payload
+    return json.dumps(envelope).encode("utf-8")
+
+
+def _normalize_result(stdout_text: str) -> dict[str, Any]:
+    """Normalize handler stdout to the Response Envelope (T-005b §3.1).
+
+    Contract (FROZEN, T-005a design.md §3.1 + ## Deviations):
+
+    - Parsed dict WITH ``status == "completed"``: requires a ``result``
+      object; ``error`` must be None if the key exists. Passed through
+      verbatim (conforming handlers are never rewritten). Note the
+      verified live shape omits ``error`` entirely on success — the
+      normalize layer does NOT inject ``error: None`` because the daemon
+      counts failures via ``"error" in result`` (key presence).
+    - ``status == "error"``: pass through verbatim — the daemon's
+      ``"error" in result`` check then fails the stage (fail-fast,
+      retry budget applies, no exit-code guessing).
+    - Any other ``status`` value: error result.
+    - Bare dict (no ``status``) WITH ``error`` key: pass through
+      unchanged (legacy error convention, D3).
+    - Bare dict otherwise: wrapped as ``{"status": "completed",
+      "result": <d>}`` — deliberately WITHOUT an ``error`` key (daemon
+      failure counting is key-presence-based; D4/D10 with the verified
+      daemon read).
+    - Non-object JSON: error result (bare scalars were always ambiguous;
+      the contract requires an object).
+
+    Raises nothing; returns an error-result dict on normalize failures.
+    Idempotent by construction: envelopes are detected by the ``status``
+    key and passed through verbatim, so double-wrapping is impossible.
+    """
+    try:
+        parsed = json.loads(stdout_text)
+    except json.JSONDecodeError as exc:
+        return {"error": f"handler stdout is not valid JSON: {exc.msg}"}
+    if not isinstance(parsed, dict):
+        kind = type(parsed).__name__
+        return {
+            "error": (
+                "handler stdout must be a JSON object (envelope or bare "
+                f"result), got {kind}"
+            )
+        }
+    if "status" not in parsed:
+        # Bare result (legacy). Error-keyed bare dicts pass through
+        # unchanged; everything else is wrapped into the envelope.
+        if "error" in parsed:
+            return parsed
+        return {"status": "completed", "result": parsed}
+    status = parsed.get("status")
+    if status == "completed":
+        if not isinstance(parsed.get("result"), dict):
+            return {
+                "error": (
+                    "handler envelope status 'completed' missing 'result' "
+                    "object"
+                )
+            }
+        if "error" in parsed and parsed.get("error") is not None:
+            return {
+                "error": (
+                    "handler envelope status 'completed' carries non-null "
+                    "'error'"
+                )
+            }
+        return parsed
+    if status == "error":
+        if not isinstance(parsed.get("error"), str) or not parsed.get("error"):
+            return {
+                "error": "handler envelope status 'error' missing 'error' message"
+            }
+        return parsed
+    return {
+        "error": (
+            f"handler envelope has invalid status {status!r} "
+            "(expected 'completed' or 'error')"
+        )
+    }
 
 
 def run_handler(
@@ -168,7 +302,9 @@ def run_handler(
         return {"error": "handler produced no stdout output", "stderr": stderr}
 
     try:
-        parsed = json.loads(stdout)
+        # Guard kept separate from normalize so the non-JSON error keeps
+        # its pre-existing shape (stdout/stderr attached) byte-identical.
+        json.loads(stdout)
     except json.JSONDecodeError as exc:
         return {
             "error": f"handler stdout is not valid JSON: {exc.msg}",
@@ -176,9 +312,12 @@ def run_handler(
             "stderr": stderr,
         }
 
-    if not isinstance(parsed, dict):
-        # Wrap non-dict JSON (e.g. a bare string/number) into a result.
-        parsed = {"result": parsed}
+    # T-005b Envelope-Contract: normalize handler stdout at this single
+    # choke-point — conforming envelopes pass through verbatim, bare
+    # results are wrapped, error shapes fail the stage fail-fast. All
+    # normalize failures return an error-result dict (daemon failure
+    # accounting untouched).
+    parsed = _normalize_result(stdout)
 
     # Always attach handler diagnostics so callers can debug empty
     # responses without having to download artifacts. The CLI surfaces

@@ -116,10 +116,14 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
             if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
                 errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
             # Check for unknown keys
-            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes", "long_run", "upload_modes", "result_path_hints"}
+            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes", "long_run", "upload_modes", "result_path_hints", "config"}
             extra = set(entry.keys()) - allowed
             if extra:
                 errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
+            # T-005b: per-capability config mapping (carrier of
+            # envelope_request_mirror). Must be a mapping when present.
+            if "config" in entry and not isinstance(entry.get("config"), dict):
+                errors.append(f"{prefix}: 'config' must be a mapping")
             # Type checks for optional fields
             for key, expected_type in [
                 ("version", str),
@@ -407,6 +411,11 @@ def _normalize_capability(
     # valid ${ref.result.path} template paths.
     if raw.get("result_path_hints") is not None:
         cap["result_path_hints"] = raw["result_path_hints"]
+    # T-005b: per-capability config mapping (carrier of the
+    # envelope_request_mirror rollout toggle; design.md §3.2). The
+    # daemon's complete_by_script gate already reads cap["config"].
+    if raw.get("config") is not None:
+        cap["config"] = raw["config"]
     # Apply env-var overrides (may raise CapabilityValidationError).
     _apply_env_overrides(cap)
     # Re-validate handler after overrides: an override could clear it.
