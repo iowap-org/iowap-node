@@ -6,7 +6,9 @@ Constants ``ACTIVE_PATH`` and ``PROFILES_DIR`` are referenced lazily via
 fixture take effect. ``PID_PATH`` (CLI-specific, lives in the facade) is
 referenced lazily via ``node_cli.PID_PATH`` at call time — this is the
 one tolerated circular access because it only resolves inside a handler
-body, after ``node_cli`` is fully initialised.
+body, after ``node_cli`` is fully initialised. ``node_daemon.PID_PATH``
+(SSE daemon) is resolved the same lazy way inside the publish handler
+(t_c214ca25: the SSE daemon's pid file must be probed for hot-reload).
 
 The ``with_client``-decorated handlers (server/info) keep the plain
 ``(client, args) -> int`` signature; the decorator is applied at
@@ -16,13 +18,12 @@ parser-registration time in the facade.
 from __future__ import annotations
 
 import json
-import os
-import signal
 import sys
 from typing import Any
 
 import nodes.common.node_cli as _cli
 from nodes.common import node_config as _nc
+from nodes.common import node_utils as _nu
 from nodes.common.node_config import (
     CapabilityValidationError,
     current_profile_name,
@@ -33,7 +34,6 @@ from nodes.common.node_config import (
     publish_profile,
     validate_profile,
 )
-from nodes.common.node_utils import pid_running, read_pid
 from nodes.common.relay_client import RelayClient, _setup_logging
 
 
@@ -80,14 +80,16 @@ def _cmd_capabilities_publish(args) -> int:
     except CapabilityValidationError as exc:
         print(f"publish FAILED: {exc}", file=sys.stderr)
         return 1
-    # Best-effort SIGHUP to running daemon.
-    pid = read_pid(_cli.PID_PATH)
-    if pid is not None and pid_running(pid):
-        try:
-            os.kill(pid, signal.SIGHUP)
-            print(f"published '{args.profile}' -> {active} (sent SIGHUP to pid {pid})")
-        except OSError as exc:
-            print(f"published '{args.profile}' -> {active} (SIGHUP failed: {exc})", file=sys.stderr)
+    # Best-effort SIGHUP to any running daemon. The SSE daemon writes
+    # node-daemon.pid; the legacy polling daemon writes node-cli.pid —
+    # both install SIGHUP handlers, so notify every live pid file
+    # (t_c214ca25: the old code only probed node-cli.pid and always took
+    # the "daemon not running" branch on SSE-only nodes).
+    from nodes.common.node_daemon import PID_PATH as _DAEMON_PID_PATH
+
+    pids = _nu.sighup_pid_files([_DAEMON_PID_PATH, _cli.PID_PATH])
+    if pids:
+        print(f"published '{args.profile}' -> {active} (sent SIGHUP to pid {', '.join(str(p) for p in pids)})")
     else:
         print(f"published '{args.profile}' -> {active} (daemon not running)")
     return 0

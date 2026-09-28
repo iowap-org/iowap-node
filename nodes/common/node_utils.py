@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import urllib.request
@@ -189,6 +190,32 @@ def pid_running(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def sighup_pid_files(pid_paths: list[Path]) -> list[int]:
+    """Send SIGHUP to every pid file whose process is alive (t_c214ca25).
+
+    The node ships two daemons — the SSE daemon (``node-daemon.pid``) and
+    the legacy polling daemon (``node-cli.pid``). Both install SIGHUP
+    handlers that invalidate the capability cache, so profile publishers
+    notify every known pid file instead of guessing which daemon runs.
+    Missing, unparsable and stale pid files are skipped silently; OSError
+    on the actual kill is swallowed (best-effort notification).
+
+    Returns the list of pids that received the signal, in the order the
+    paths were given (first entry wins as "the" daemon in messages).
+    """
+    notified: list[int] = []
+    for pid_path in pid_paths:
+        pid = read_pid(pid_path)
+        if pid is None or not pid_running(pid):
+            continue
+        try:
+            os.kill(pid, signal.SIGHUP)
+        except OSError:
+            continue
+        notified.append(pid)
+    return notified
 
 
 # ---------------------------------------------------------------------------

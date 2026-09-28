@@ -73,6 +73,7 @@ from nodes.common.node_utils import (
     load_meta,
     write_json_atomic,
 )
+from nodes.common import node_utils as _nu
 from nodes.common.node_utils import (
     pid_running as _nu_pid_running,
 )
@@ -727,16 +728,17 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
 
 
 def _cmd_reload(args: argparse.Namespace) -> int:  # noqa: ARG001
-    pid = _read_pid()
-    if pid is None or not _pid_running(pid):
+    # t_c214ca25: notify every live daemon pid file (SSE node-daemon.pid
+    # first, legacy polling node-cli.pid fallback). The SSE daemon installs
+    # a SIGHUP handler (capability-cache invalidation) — probing only the
+    # polling pid file left SSE-only nodes without hot-reload.
+    from nodes.common import node_daemon as _nd
+
+    pids = _nu.sighup_pid_files([_nd.PID_PATH, PID_PATH])
+    if not pids:
         print("daemon not running", file=sys.stderr)
         return 1
-    try:
-        os.kill(pid, signal.SIGHUP)
-    except OSError as exc:
-        print(f"failed to send SIGHUP: {exc}", file=sys.stderr)
-        return 1
-    print(f"SIGHUP sent to daemon (pid {pid})")
+    print(f"SIGHUP sent to daemon (pid {', '.join(str(p) for p in pids)})")
     return 0
 
 
