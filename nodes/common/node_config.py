@@ -402,6 +402,11 @@ def _normalize_capability(
     # which transfer modes (inline/artifact/bridge) this capability supports.
     if raw.get("upload_modes") is not None:
         cap["upload_modes"] = raw["upload_modes"]
+    # T-004 (iowap-flow): forward result_path_hints so the heartbeat can
+    # publish them via node_capabilities and the flow planner can use
+    # valid ${ref.result.path} template paths.
+    if raw.get("result_path_hints") is not None:
+        cap["result_path_hints"] = raw["result_path_hints"]
     # Apply env-var overrides (may raise CapabilityValidationError).
     _apply_env_overrides(cap)
     # Re-validate handler after overrides: an override could clear it.
