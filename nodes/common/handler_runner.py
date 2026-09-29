@@ -39,8 +39,11 @@ Contract (see NODE_CLI_SPEC.md §4 and docs/node/capabilities.md):
   result. Exit 0 with non-JSON or an ``error``-keyed payload completes
   the stage silently and skips the scheduler's retry budget, losing the
   failed work.
-* Timeout: terminates the subprocess and returns
+* Timeout: kills the whole handler process tree (T-188) and returns
   ``{"error": "handler timeout after Ns"}``.
+* Output cap (T-191): stdout/stderr are buffered up to
+  ``MAX_HANDLER_STDOUT_BYTES``/``MAX_HANDLER_STDERR_BYTES``; exceeding the
+  cap fails the stage instead of letting a runaway handler OOM the daemon.
 
 Retry behaviour (T-060): non-zero exit, timeout, invalid-JSON-on-exit-0
 and complete-endpoint failures all increment the daemon-side per-task
@@ -53,7 +56,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import threading
+import time
 from typing import Any
 
 from nodes.common import node_config
@@ -67,6 +73,61 @@ HANDLER_ENV_KEYS = (
     "RELAY_BASE_URL",
     "RELAY_TOKEN_FILE",
 )
+
+# T-191 (F4): the handler shares the daemon process, so an unbounded stdout
+# buffer is an OOM vector — a handler that accidentally dumps a huge file to
+# stdout would take down the process holding the agent, file-serve and
+# heartbeat threads. Cap what we buffer and fail the stage loudly instead.
+MAX_HANDLER_STDOUT_BYTES = 10 * 1024 * 1024
+MAX_HANDLER_STDERR_BYTES = 1 * 1024 * 1024
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill the handler and every process it spawned (T-188, F1).
+
+    The handler runs through ``shell=True`` in its own session
+    (``start_new_session=True`` at spawn), so the child is a process-group
+    leader and ``os.killpg`` reaches the whole tree. ``proc.kill()`` alone
+    only reaps the direct shell — the actual handler (a grandchild) would
+    survive a timeout and keep burning CPU on the host.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError):
+        pgid = None
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.kill()
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _read_stream_bounded(stream: Any, limit: int) -> tuple[bytes, bool]:
+    """Read a pipe up to ``limit`` bytes; return ``(data, overflowed)``.
+
+    Stops reading as soon as the cap is hit — the caller kills the process
+    tree on overflow, so the truncated remainder never matters. Returns
+    ``overflowed=True`` exactly when more than ``limit`` bytes were offered.
+    """
+    buf = bytearray()
+    while True:
+        try:
+            chunk = stream.read(65536)
+        except (ValueError, OSError):
+            break
+        if not chunk:
+            break
+        remaining = limit - len(buf)
+        if len(chunk) > remaining:
+            buf += chunk[: max(0, remaining)]
+            return bytes(buf), True
+        buf += chunk
+    return bytes(buf), False
+
 
 
 def _build_env(stage: dict[str, Any], context: dict[str, Any]) -> dict[str, str]:
@@ -286,20 +347,103 @@ def run_handler(
     stdin_bytes = _stdin_payload(stage)
 
     try:
-        proc = subprocess.run(  # noqa: S602 — shell=True by design
+        proc = subprocess.Popen(  # noqa: S602 — shell=True by design
             handler,
             shell=True,
-            input=stdin_bytes,
-            capture_output=True,
-            timeout=timeout,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=env,
-            check=False,
+            start_new_session=True,  # T-188: own process group → killpg reaches the tree
         )
-    except subprocess.TimeoutExpired as exc:
-        return {"error": f"handler timeout after {timeout}s", "stderr": _safe_decode(exc.stderr)}
+    except OSError as exc:
+        return {"error": f"handler failed to start: {exc}", "stderr": ""}
 
-    stdout = _safe_decode(proc.stdout)
-    stderr = _safe_decode(proc.stderr)
+    out_holder: list[tuple[bytes, bool]] = []
+    err_holder: list[tuple[bytes, bool]] = []
+    overflow_evt = threading.Event()
+
+    def _drain(stream: Any, limit: int, holder: list[tuple[bytes, bool]]) -> None:
+        data, overflowed = _read_stream_bounded(stream, limit)
+        holder.append((data, overflowed))
+        if overflowed:
+            # Stop waiting for the handler to exit — it is blocked writing
+            # into the now-unread pipe. The main loop kills the tree.
+            overflow_evt.set()
+
+    def _feed_stdin() -> None:
+        stdin_pipe = proc.stdin
+        if stdin_pipe is None:  # pragma: no cover — PIPE guarantees a handle
+            return
+        try:
+            stdin_pipe.write(stdin_bytes)
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        finally:
+            try:
+                stdin_pipe.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+
+    # Drain stdout/stderr on separate threads: a single-threaded read would
+    # deadlock the moment one pipe fills while we block on the other.
+    t_out = threading.Thread(
+        target=_drain,
+        args=(proc.stdout, MAX_HANDLER_STDOUT_BYTES, out_holder),
+        daemon=True,
+    )
+    t_err = threading.Thread(
+        target=_drain,
+        args=(proc.stderr, MAX_HANDLER_STDERR_BYTES, err_holder),
+        daemon=True,
+    )
+    t_in = threading.Thread(target=_feed_stdin, daemon=True)
+    t_out.start()
+    t_err.start()
+    t_in.start()
+
+    timed_out = False
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None:
+        if overflow_evt.is_set():
+            # T-191 (F4): kill now, the handler cannot finish (blocked write).
+            _kill_process_tree(proc)
+            break
+        if time.monotonic() >= deadline:
+            # T-188 (F1): kill the whole tree, not just the direct shell.
+            timed_out = True
+            _kill_process_tree(proc)
+            break
+        time.sleep(0.05)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:  # pragma: no cover — SIGKILL is final
+        pass
+
+    t_out.join(timeout=5)
+    t_err.join(timeout=5)
+    t_in.join(timeout=5)
+
+    stdout_bytes, stdout_overflowed = out_holder[0] if out_holder else (b"", False)
+    stderr_bytes, stderr_overflowed = err_holder[0] if err_holder else (b"", False)
+
+    stdout = _safe_decode(stdout_bytes)
+    stderr = _safe_decode(stderr_bytes)
+
+    if timed_out:
+        return {"error": f"handler timeout after {timeout}s", "stderr": stderr}
+
+    # T-191 (F4): a handler must not be able to OOM the daemon through stdout.
+    if stdout_overflowed or stderr_overflowed:
+        return {
+            "error": (
+                "handler output exceeded the size limit "
+                f"(stdout>{MAX_HANDLER_STDOUT_BYTES}B / "
+                f"stderr>{MAX_HANDLER_STDERR_BYTES}B)"
+            ),
+            "stdout": stdout,
+            "stderr": stderr,
+        }
 
     if proc.returncode != 0:
         return {
@@ -333,7 +477,11 @@ def run_handler(
     # Always attach handler diagnostics so callers can debug empty
     # responses without having to download artifacts. The CLI surfaces
     # these in `node-cli task result` (see _print_task_result).
-    parsed.setdefault("_handler", {})
+    # T-193 (F6): a handler may ship a non-dict ``_handler`` in its own
+    # envelope — normalize it instead of raising a TypeError that would
+    # abort the stage before ``client.complete()``.
+    if not isinstance(parsed.get("_handler"), dict):
+        parsed["_handler"] = {}
     parsed["_handler"]["stderr"] = stderr
     parsed["_handler"]["stdout_length"] = len(stdout)
     parsed["_handler"]["exit_code"] = proc.returncode
