@@ -622,6 +622,14 @@ class ActiveProfileCache:
     The daemon calls :meth:`get` before every heartbeat / claim-loop
     iteration. A changed mtime triggers a re-read and re-validation. A
     SIGHUP handler calls :meth:`invalidate` to force the next read.
+
+    T-189 (F2): ``invalidate`` is called from a signal handler, which runs
+    on the main thread — the same thread the polling daemon runs its claim
+    loop on. It must therefore NEVER take the load lock: ``get`` holds it
+    across the whole YAML parse, so a signal handler blocking on it would
+    self-deadlock the daemon (only SIGKILL). Invalidation is a lock-free
+    generation bump; a load that started before the bump refuses to store
+    its (now stale) result.
     """
 
     def __init__(self, path: Path | None = None) -> None:
@@ -629,11 +637,18 @@ class ActiveProfileCache:
         self._lock = threading.Lock()
         self._cached_mtime: float | None = None
         self._cached_caps: list[dict[str, Any]] | None = None
+        self._cached_generation = -1
+        # Monotonic invalidation counter. Bumped (atomically under the GIL)
+        # by invalidate() WITHOUT the lock; a loader captures it before the
+        # read and only commits if the generation is unchanged afterwards.
+        self._generation = 0
 
     def invalidate(self) -> None:
-        with self._lock:
-            self._cached_mtime = None
-            self._cached_caps = None
+        """Drop the cache and force the next :meth:`get` to re-read disk.
+
+        Lock-free by contract (T-189): safe to call from a signal handler.
+        """
+        self._generation += 1
 
     def get(self) -> list[dict[str, Any]]:
         """Return the active profile, reloading if mtime changed.
@@ -650,10 +665,18 @@ class ActiveProfileCache:
                 mtime = self.path.stat().st_mtime
             except OSError:
                 return self._cached_caps or []
-            if self._cached_caps is None or mtime != self._cached_mtime:
+            # A load that raced with an invalidate() must not commit its
+            # stale result — re-read whenever the generation moved.
+            generation = self._generation
+            if (
+                self._cached_caps is None
+                or mtime != self._cached_mtime
+                or generation != self._cached_generation
+            ):
                 caps = validate_profile(self.path)
                 self._cached_caps = caps
                 self._cached_mtime = mtime
+                self._cached_generation = generation
             return self._cached_caps
 
 
