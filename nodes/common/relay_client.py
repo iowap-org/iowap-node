@@ -958,6 +958,7 @@ class RelayClient:
             headers={"Authorization": f"Bearer {self.token}"},
             follow_redirects=True,
             timeout=timeout,
+            verify=self._verify,  # T-190 (F3): verify like every other call
         )
         resp = cm.__enter__()
         try:
@@ -971,6 +972,7 @@ class RelayClient:
                     headers={"Authorization": f"Bearer {self.token}"},
                     follow_redirects=True,
                     timeout=timeout,
+                    verify=self._verify,  # T-190 (F3)
                 )
                 resp = cm.__enter__()
                 if not refreshed:

@@ -31,7 +31,6 @@ Test-Stubs, die hier bereits vorbereitet sind).
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -431,7 +430,9 @@ def cmd_get(
     # sha256-Verifikation, wenn der Umschlag einen trägt (inline immer).
     expected = (envelope.get(ENVELOPE_KEY) or {}).get("sha256")
     if expected:
-        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        # T-192 (F5): chunkwise hashen (64 KiB) — kein RAM-Peak auf dem
+        # großen Bridge-/Artifact-Pfad, den der Rest bewusst streamt.
+        digest = file_serve._sha256_file(target)
         if digest != expected:
             print(
                 f"hp get: sha256 mismatch ({digest} != {expected})",
