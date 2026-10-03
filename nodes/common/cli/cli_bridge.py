@@ -37,10 +37,29 @@ _CHUNK = 64 * 1024
 
 
 def _find_result(data: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the first completed stage's result from a task fetch."""
+    """Return the first completed stage's result from a task fetch.
+
+    T-005b Response Envelope (iowap-node >= 2.3.12): handler_runner
+    normalizes conforming handler stdout to the Response Envelope and
+    passes it through VERBATIM, so ``stages[].result`` can BE the whole
+    envelope ``{"status": ..., "result": {...}, "error": ...}`` (plus the
+    ``_handler`` debug dict) instead of the flat inner result the
+    pre-T-005b CLI consumers expect. Unwrap exactly one envelope layer;
+    legacy flat results pass through unchanged. An envelope with
+    ``status: "error"`` or a set ``error`` yields None (failed work).
+    """
     for s in data.get("stages", []):
         if s.get("status") == "completed" and s.get("result"):
-            return s["result"]
+            res = s["result"]
+            is_envelope = isinstance(res, dict) and (
+                "_handler" in res or {"status", "result", "error"} <= set(res)
+            )
+            if is_envelope:
+                if res.get("status") == "error" or res.get("error"):
+                    return None
+                inner = res.get("result")
+                return inner if isinstance(inner, dict) else {}
+            return res
     return None
 
 
