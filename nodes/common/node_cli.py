@@ -126,6 +126,8 @@ from nodes.common.cli import (
 from nodes.common.relay_client import (  # noqa: F401
     RelayClient,
     _base_url,
+    _cmd_relay_discover,
+    _cmd_relay_set,
     _effective_config,
     _filename_from_response,
     _setup_logging,
@@ -952,6 +954,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Relay server: IP/host, IP:port, or full URL (default port 8788).",
     )
     p_server_metrics.set_defaults(func=cli_server._cmd_server_metrics)
+
+    # T-187: relay set/discover — pin base_url or targeted mDNS discovery
+    p_relay = sub.add_parser(
+        "relay",
+        help="Relay connection management (pin URL or discover via mDNS).",
+    )
+    p_relay_sub = p_relay.add_subparsers(
+        dest="relay_command", required=True, metavar="<action>"
+    )
+    p_relay_set = p_relay_sub.add_parser(
+        "set", help="Pin the relay base_url, or remove the pin (--discover)."
+    )
+    p_relay_set.add_argument(
+        "--server-url", default=None,
+        help="Pin this relay URL (discovery disabled).",
+    )
+    p_relay_set.add_argument(
+        "--discover", action="store_true",
+        help="Remove the pinned URL and re-enable mDNS discovery.",
+    )
+    p_relay_set.set_defaults(func=_cmd_relay_set)
+
+    p_relay_discover = p_relay_sub.add_parser(
+        "discover", help="Targeted mDNS lookup for the relay service name."
+    )
+    p_relay_discover.add_argument(
+        "--name", default=None,
+        help="Expected service name (default: mdns_service_name from "
+        "relay_config.json, then 'IOWAP Relay Service').",
+    )
+    p_relay_discover.add_argument(
+        "--timeout", type=float, default=2.0,
+        help="Seconds to watch the network (default 2.0).",
+    )
+    p_relay_discover.set_defaults(func=_cmd_relay_discover)
 
     # T-136: route register/unregister/list — temp bridge route management
     p_route = sub.add_parser("route", help="Manage temporary bridge routes (T-136).")

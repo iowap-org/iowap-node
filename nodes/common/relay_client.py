@@ -163,42 +163,68 @@ def _effective_config() -> dict[str, Any]:
 def _base_url(meta: dict[str, Any], cfg: dict[str, Any]) -> str:
     url = cfg.get("base_url") or meta.get("base_url")
     if not url:
-        # T-152: mDNS fallback — discover the relay on the local network
-        # when no base_url is configured. The relay advertises itself as
-        # `AI Relay Service._http._tcp.local.` (see core/zeroconf.py).
-        discovered = _discover_relay_mdns()
+        # T-187: filtered mDNS fallback — accept ONLY the relay service
+        # name (configurable, default "IOWAP Relay Service"); never the
+        # first-best _http._tcp hit (QNAP/Brother false positives).
+        service_name = _mdns_service_name(cfg)
+        discovered = discover_relay(service_name=service_name)
         if discovered:
             log.info("mDNS: discovered relay at %s", discovered)
             url = discovered
     if not url:
         raise SystemExit(
             "no base_url configured (set base_url in relay_config.json, RELAY_BASE_URL, "
-            "or let the node discover the relay via mDNS)"
+            "run `node-cli relay discover`, or let the node discover the relay via mDNS)"
         )
     return url.rstrip("/")
 
 
-def _discover_relay_mdns(timeout: float = 2.0) -> str | None:
-    """Discover the relay via mDNS on the local network.
+# ---------------------------------------------------------------------------
+# T-187: filtered mDNS discovery
+# ---------------------------------------------------------------------------
 
-    Returns the relay base URL (e.g. ``http://192.168.1.50:8788``) or ``None``
-    when no relay is found. Uses the ``zeroconf`` package (already a project
-    dependency). The relay advertises ``AI Relay Service._http._tcp.local.``
-    with a ``path`` property (default ``/health``) and the port.
+DEFAULT_SERVICE_NAME = "IOWAP Relay Service"
+
+
+def _mdns_service_name(cfg: dict[str, Any]) -> str:
+    """Resolve the expected mDNS service name: env > config > default."""
+    env = os.environ.get("RELAY_MDNS_SERVICE_NAME")
+    if env:
+        return env
+    from_cfg = cfg.get("mdns_service_name")
+    if from_cfg:
+        return str(from_cfg)
+    return DEFAULT_SERVICE_NAME
+
+
+def _probe_mdns_services(timeout: float = 2.0) -> dict[str, str]:
+    """Browse ``_http._tcp`` and return ``{base_url: service_name}``.
+
+    Returns ALL neighbours (QNAP, printer, relay, ...); the name filter
+    lives in :func:`discover_relay`. Kept as a separate seam so tests can
+    stub the browse without any network.
     """
     try:
-        from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
+        from zeroconf import ServiceBrowser, Zeroconf
     except ImportError:
         log.warning("mDNS discovery unavailable (zeroconf not installed)")
-        return None
+        return {}
 
-    found: dict[str, Any] = {}
+    found: dict[str, str] = {}
 
     class _Listener:
         def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
             info = zc.get_service_info(type_, name)
-            if info:
-                found["info"] = info
+            if info is None:
+                return
+            try:
+                addr = info.parsed_addresses()[0] if info.parsed_addresses() else None
+            except Exception:  # noqa: BLE001
+                addr = None
+            if not addr:
+                return
+            port = info.port or 8788
+            found[f"http://{addr}:{port}"] = name
 
         def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
             pass
@@ -208,30 +234,89 @@ def _discover_relay_mdns(timeout: float = 2.0) -> str | None:
 
     zc = Zeroconf()
     try:
-        listener = _Listener()
-        browser = ServiceBrowser(zc, "_http._tcp.local.", listener)
-        # Wait briefly for discovery.
+        browser = ServiceBrowser(zc, "_http._tcp.local.", _Listener())
         import time
 
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and "info" not in found:
+        while time.monotonic() < deadline:
             time.sleep(0.1)
         browser.cancel()
     finally:
         zc.close()
+    return found
 
-    info = found.get("info")
-    if not info:
-        return None
-    # Build the base URL from the discovered address + port.
-    try:
-        addr = info.parsed_addresses()[0] if info.parsed_addresses() else None
-    except Exception:  # noqa: BLE001
-        addr = None
-    if not addr:
-        return None
-    port = info.port or 8788
-    return f"http://{addr}:{port}"
+
+def discover_relay(
+    service_name: str | None = None, timeout: float = 2.0
+) -> str | None:
+    """Discover the relay via mDNS, accepting ONLY the relay service name.
+
+    ``service_name`` defaults to env ``RELAY_MDNS_SERVICE_NAME``, then
+    ``mdns_service_name`` from relay_config.json, then
+    ``DEFAULT_SERVICE_NAME`` ("IOWAP Relay Service"). Other ``_http._tcp``
+    neighbours are ignored — the connection partner is never chosen by
+    first-best-win.
+    """
+    if not service_name:
+        from nodes.common.node_utils import load_config
+
+        service_name = _mdns_service_name(load_config())
+    candidates = _probe_mdns_services(timeout=timeout)
+    for url, name in candidates.items():
+        # Instance names may arrive escaped (avahi-style \032 for spaces).
+        label = name.removesuffix("._http._tcp.local.")
+        if label.replace("\\032", " ") == service_name:
+            return url
+    return None
+
+
+def _discover_relay_mdns(timeout: float = 2.0) -> str | None:
+    """Backward-compatible alias for the filtered discovery."""
+    return discover_relay(timeout=timeout)
+
+
+def _cmd_relay_set(args: Any) -> int:
+    """node-cli relay set — pin the relay URL or re-enable discovery."""
+    from nodes.common import node_utils
+
+    server_url = getattr(args, "server_url", None)
+    discover = getattr(args, "discover", False)
+    if server_url and discover:
+        print("--server-url and --discover are mutually exclusive")
+        raise SystemExit(2)
+    if not server_url and not discover:
+        print("nothing to do: pass --server-url <url> or --discover")
+        raise SystemExit(2)
+    cfg = load_config()
+    if server_url:
+        cfg["base_url"] = server_url
+        node_utils.write_json_atomic(node_utils.CONFIG_PATH, cfg)
+        print(f"pinned relay base_url: {server_url}")
+        print(f"  written to {node_utils.CONFIG_PATH} (discovery disabled)")
+    else:
+        cfg.pop("base_url", None)
+        node_utils.write_json_atomic(node_utils.CONFIG_PATH, cfg)
+        print("base_url pin removed — discovery enabled (targeted mDNS by service name)")
+        print(f"  written to {node_utils.CONFIG_PATH}")
+    return 0
+
+
+def _cmd_relay_discover(args: Any) -> int:
+    """node-cli relay discover — targeted mDNS lookup, prints the URL."""
+    service_name = getattr(args, "name", None)
+    timeout = float(getattr(args, "timeout", 2.0) or 2.0)
+    url = discover_relay(service_name=service_name, timeout=timeout)
+    if url is None:
+        expected = service_name or _mdns_service_name(load_config())
+        print(
+            f"relay not found: no mDNS service named {expected!r} "
+            f"(_http._tcp, watched {timeout}s)"
+        )
+        return 1
+    print(url)
+    if not service_name:
+        print(f"  service: {_mdns_service_name(load_config())} (_http._tcp)")
+    return 0
 
 
 # ---------------------------------------------------------------------------
