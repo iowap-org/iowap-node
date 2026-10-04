@@ -110,8 +110,9 @@ def _utcnow_str() -> str:
 
 # Long-Run lease budget on the relay (T-154): an accepted stage stays
 # alive for this long as long as progress notes keep resetting the TTL.
-# A long_run handler process gets the same budget so it is not killed by
-# the short per-stage timeout (T-163).
+# A long_run handler process gets this budget AS A FLOOR (T-213): a
+# capability profile may extend the budget via its ``timeout`` field —
+# never shorten it below the lease budget.
 _LONGRUN_HANDLER_TIMEOUT = 2 * 3600  # 2h
 
 
@@ -120,11 +121,22 @@ def _handler_timeout(cap: dict[str, Any]) -> int:
 
     A ``long_run`` capability (archive/extract) must not be killed by the
     short per-stage timeout (default 300s) — the relay's Long-Run lease
-    keeps the stage ``accepted`` for up to 2h as long as progress notes
-    keep arriving, so the handler gets the same 2h budget. Non-long-run
-    capabilities keep their configured timeout.
+    keeps the stage ``accepted`` for as long as progress notes keep
+    arriving, so the handler gets at least the 2h lease budget (T-163).
+
+    T-213: the capability profile's own ``timeout`` field RAISES that
+    floor when it is larger (e.g. ``video.gen.ltx`` declares 10800s for
+    multi-hour renders). The configured value can extend, never shorten,
+    the lease budget — a too-short profile value cannot revive the
+    per-stage kill the lease mechanism was built to prevent.
     """
     if cap.get("long_run"):
+        try:
+            cap_timeout = int(cap.get("timeout") or 0)
+        except (TypeError, ValueError):
+            cap_timeout = 0
+        if cap_timeout > _LONGRUN_HANDLER_TIMEOUT:
+            return cap_timeout
         return _LONGRUN_HANDLER_TIMEOUT
     return int(cap.get("timeout", 300))
 
