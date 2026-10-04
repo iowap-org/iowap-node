@@ -246,6 +246,91 @@ def test_relay_discover_prints_not_found(
 
 # ------------------------------------------------------------ parser wiring
 
+# T-198: relay set --discover must ALSO remove the base_url pin from the
+# node state file (iowap-agent.json) — node register persist base_url there
+# (cli_server.py), so --discover touching only relay_config.json left the
+# meta pin silently winning resolution (cfg.base_url or meta.base_url) and
+# discovery never engaged. End-to-end: after --discover, _base_url() must
+# resolve via discovery, not via the surviving meta pin.
+
+def test_relay_set_discover_clears_meta_pin_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from nodes.common.relay_client import _cmd_relay_set
+    import nodes.common.node_utils as nu
+
+    conf = _patch_config(
+        monkeypatch, tmp_path, {"base_url": "http://192.168.2.60:8788"}
+    )
+    monkeypatch.setattr(nu, "META_PATH", tmp_path / "iowap-agent.json")
+    meta_path = nu.META_PATH
+    meta_path.write_text(
+        json.dumps({"node_id": "PROBE", "base_url": "http://10.99.0.1:8788"})
+    )
+    ns = __import__("types").SimpleNamespace(
+        server_url=None, discover=True, name=None
+    )
+    assert _cmd_relay_set(ns) == 0
+    data = json.loads(conf.read_text())
+    meta = json.loads(meta_path.read_text())
+    assert "base_url" not in data  # existing behavior (2.3.16)
+    assert "base_url" not in meta  # T-198: the state-file pin dies too
+
+
+def test_relay_set_discover_tolerates_missing_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """--discover works without any node registration (no meta file yet)."""
+    from nodes.common.relay_client import _cmd_relay_set
+    import nodes.common.node_utils as nu
+
+    conf = _patch_config(
+        monkeypatch, tmp_path, {"base_url": "http://192.168.2.60:8788"}
+    )
+    monkeypatch.setattr(nu, "META_PATH", tmp_path / "does-not-exist.json")
+    ns = __import__("types").SimpleNamespace(
+        server_url=None, discover=True, name=None
+    )
+    assert _cmd_relay_set(ns) == 0
+    assert "base_url" not in json.loads(conf.read_text())
+
+
+def test_relay_set_discover_falls_through_to_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """End-to-end: after --discover, resolution reaches the mDNS fallback.
+
+    Simulates a registered node: cfg pin AND meta pin, then --discover.
+    Before T-198 the surviving meta pin won and discovery never engaged;
+    the fix resolves via discovery (mocked here).
+    """
+    from nodes.common.relay_client import _cmd_relay_set
+    import nodes.common.node_utils as nu
+
+    _patch_config(
+        monkeypatch, tmp_path, {"base_url": "http://192.168.2.60:8788"}
+    )
+    meta_path = tmp_path / "iowap-agent.json"
+    monkeypatch.setattr(nu, "META_PATH", meta_path)
+    meta_path.write_text(
+        json.dumps({"node_id": "PROBE", "base_url": "http://10.99.0.1:8788"})
+    )
+    ns = __import__("types").SimpleNamespace(
+        server_url=None, discover=True, name=None
+    )
+    with patch(
+        "nodes.common.relay_client._probe_mdns_services",
+        return_value={"http://192.168.2.60:8788": "IOWAP Relay Service._http._tcp.local."},
+    ):
+        assert _cmd_relay_set(ns) == 0
+        # meta pin (10.99.0.1) and the discovered URL (192.168.2.60) differ
+        # on purpose: pre-fix resolution returned the surviving meta pin,
+        # post-fix it must come from discovery.
+        assert _base_url(json.loads(meta_path.read_text()), json.loads(_conf_path(tmp_path).read_text())) == (
+            "http://192.168.2.60:8788"
+        )
+
+
 def test_parser_relay_subcommand_wired() -> None:
     from nodes.common.node_cli import build_parser
 
