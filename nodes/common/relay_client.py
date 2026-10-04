@@ -296,6 +296,19 @@ def _cmd_relay_set(args: Any) -> int:
     else:
         cfg.pop("base_url", None)
         node_utils.write_json_atomic(node_utils.CONFIG_PATH, cfg)
+        # T-194: `node register` persists base_url in the node state file
+        # and _base_url() resolves cfg.base_url or meta.base_url BEFORE the
+        # mDNS fallback — leaving the state-file pin in place would silently
+        # keep the pin alive and discovery would never engage. Unpin the
+        # state file too (a node without meta — never registered — is fine).
+        try:
+            meta = node_utils.load_meta()
+        except FileNotFoundError:
+            meta = None
+        if meta is not None and "base_url" in meta:
+            del meta["base_url"]
+            node_utils.save_meta(meta)
+            print(f"  removed state-file pin from {node_utils.META_PATH}")
         print("base_url pin removed — discovery enabled (targeted mDNS by service name)")
         print(f"  written to {node_utils.CONFIG_PATH}")
     return 0
