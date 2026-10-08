@@ -25,7 +25,7 @@ DEFAULT_PORT = 8788
 def normalize_base_url(server: str) -> str:
     """Normalize a server argument to a usable base URL.
 
-    ``192.168.2.60`` → ``http://192.168.2.60:8788``; a ``host:port`` keeps
+    ``192.0.2.60`` → ``http://192.0.2.60:8788``; a ``host:port`` keeps
     its port; a full URL is kept as-is (trailing slash stripped).
     """
     server = server.strip().rstrip("/")

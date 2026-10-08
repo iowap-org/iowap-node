@@ -55,7 +55,7 @@ def test_default_service_name_is_iowap() -> None:
 
 def test_discover_skips_foreign_services() -> None:
     """QNAP/Brother-style _http._tcp hits are never accepted."""
-    fake = {"http://192.168.2.200:8080": "QNAP-nas._http._tcp.local."}
+    fake = {"http://192.0.2.200:8080": "QNAP-nas._http._tcp.local."}
     with patch(
         "nodes.common.relay_client._probe_mdns_services", return_value=fake
     ):
@@ -64,13 +64,13 @@ def test_discover_skips_foreign_services() -> None:
 
 def test_discover_accepts_iowap_service() -> None:
     fake = {
-        "http://192.168.2.200:8080": "QNAP-nas._http._tcp.local.",
-        "http://192.168.2.60:8788": "IOWAP Relay Service._http._tcp.local.",
+        "http://192.0.2.200:8080": "QNAP-nas._http._tcp.local.",
+        "http://192.0.2.60:8788": "IOWAP Relay Service._http._tcp.local.",
     }
     with patch(
         "nodes.common.relay_client._probe_mdns_services", return_value=fake
     ):
-        assert discover_relay() == "http://192.168.2.60:8788"
+        assert discover_relay() == "http://192.0.2.60:8788"
 
 
 def test_discover_respects_explicit_service_name() -> None:
@@ -123,22 +123,22 @@ def test_base_url_prefers_pin_over_discovery(
     with patch(
         "nodes.common.relay_client._probe_mdns_services", return_value=fake
     ):
-        assert _base_url({"base_url": "http://192.168.2.60:8788"}, {}) == (
-            "http://192.168.2.60:8788"
+        assert _base_url({"base_url": "http://192.0.2.60:8788"}, {}) == (
+            "http://192.0.2.60:8788"
         )
 
 
 def test_base_url_falls_back_to_filtered_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake = {"http://192.168.2.60:8788": "IOWAP Relay Service._http._tcp.local."}
+    fake = {"http://192.0.2.60:8788": "IOWAP Relay Service._http._tcp.local."}
     monkeypatch.setattr(
         "nodes.common.node_utils.CONFIG_PATH", _conf_path(tmp_path)
     )
     with patch(
         "nodes.common.relay_client._probe_mdns_services", return_value=fake
     ):
-        assert _base_url({}, {}) == "http://192.168.2.60:8788"
+        assert _base_url({}, {}) == "http://192.0.2.60:8788"
 
 
 def test_base_url_finds_custom_named_server(
@@ -168,11 +168,11 @@ def test_relay_set_pins_url(
 
     conf = _patch_config(monkeypatch, tmp_path, {"heartbeat_interval": 8})
     ns = __import__("types").SimpleNamespace(
-        server_url="http://192.168.2.60:8788", discover=False, name=None
+        server_url="http://192.0.2.60:8788", discover=False, name=None
     )
     assert _cmd_relay_set(ns) == 0
     data = json.loads(conf.read_text())
-    assert data["base_url"] == "http://192.168.2.60:8788"
+    assert data["base_url"] == "http://192.0.2.60:8788"
     assert data["heartbeat_interval"] == 8  # existing keys preserved
 
 
@@ -182,7 +182,7 @@ def test_relay_set_discover_clears_pin(
     from nodes.common.relay_client import _cmd_relay_set
 
     conf = _patch_config(
-        monkeypatch, tmp_path, {"base_url": "http://192.168.2.60:8788"}
+        monkeypatch, tmp_path, {"base_url": "http://192.0.2.60:8788"}
     )
     ns = __import__("types").SimpleNamespace(
         server_url=None, discover=True, name=None
@@ -218,14 +218,14 @@ def test_relay_discover_prints_url(
     from nodes.common.relay_client import _cmd_relay_discover
 
     _patch_config(monkeypatch, tmp_path, {})
-    fake = {"http://192.168.2.60:8788": "IOWAP Relay Service._http._tcp.local."}
+    fake = {"http://192.0.2.60:8788": "IOWAP Relay Service._http._tcp.local."}
     ns = __import__("types").SimpleNamespace(name=None, timeout=2.0)
     with patch(
         "nodes.common.relay_client._probe_mdns_services", return_value=fake
     ):
         assert _cmd_relay_discover(ns) == 0
     out = capsys.readouterr().out
-    assert "http://192.168.2.60:8788" in out
+    assert "http://192.0.2.60:8788" in out
     assert "IOWAP Relay Service" in out
 
 
@@ -260,7 +260,7 @@ def test_relay_set_discover_clears_meta_pin_too(
     import nodes.common.node_utils as nu
 
     conf = _patch_config(
-        monkeypatch, tmp_path, {"base_url": "http://192.168.2.60:8788"}
+        monkeypatch, tmp_path, {"base_url": "http://192.0.2.60:8788"}
     )
     monkeypatch.setattr(nu, "META_PATH", tmp_path / "iowap-agent.json")
     meta_path = nu.META_PATH
@@ -285,7 +285,7 @@ def test_relay_set_discover_tolerates_missing_meta(
     import nodes.common.node_utils as nu
 
     conf = _patch_config(
-        monkeypatch, tmp_path, {"base_url": "http://192.168.2.60:8788"}
+        monkeypatch, tmp_path, {"base_url": "http://192.0.2.60:8788"}
     )
     monkeypatch.setattr(nu, "META_PATH", tmp_path / "does-not-exist.json")
     ns = __import__("types").SimpleNamespace(
@@ -308,7 +308,7 @@ def test_relay_set_discover_falls_through_to_discovery(
     import nodes.common.node_utils as nu
 
     _patch_config(
-        monkeypatch, tmp_path, {"base_url": "http://192.168.2.60:8788"}
+        monkeypatch, tmp_path, {"base_url": "http://192.0.2.60:8788"}
     )
     meta_path = tmp_path / "iowap-agent.json"
     monkeypatch.setattr(nu, "META_PATH", meta_path)
@@ -320,14 +320,14 @@ def test_relay_set_discover_falls_through_to_discovery(
     )
     with patch(
         "nodes.common.relay_client._probe_mdns_services",
-        return_value={"http://192.168.2.60:8788": "IOWAP Relay Service._http._tcp.local."},
+        return_value={"http://192.0.2.60:8788": "IOWAP Relay Service._http._tcp.local."},
     ):
         assert _cmd_relay_set(ns) == 0
-        # meta pin (10.99.0.1) and the discovered URL (192.168.2.60) differ
+        # meta pin (10.99.0.1) and the discovered URL (192.0.2.60) differ
         # on purpose: pre-fix resolution returned the surviving meta pin,
         # post-fix it must come from discovery.
         assert _base_url(json.loads(meta_path.read_text()), json.loads(_conf_path(tmp_path).read_text())) == (
-            "http://192.168.2.60:8788"
+            "http://192.0.2.60:8788"
         )
 
 

@@ -344,8 +344,8 @@ def test_serve_host_default_without_env(monkeypatch):
 
 def test_serve_host_env_override(monkeypatch):
     # Live-Fall: Relay (LXC 903) dialt die LAN-IP des Nodes.
-    monkeypatch.setenv("IOWAP_SERVE_HOST", "192.168.2.168")
-    assert file_serve.serve_host() == "192.168.2.168"
+    monkeypatch.setenv("IOWAP_SERVE_HOST", "192.0.2.168")
+    assert file_serve.serve_host() == "192.0.2.168"
 
 
 def test_serve_host_invalid_env_falls_back(monkeypatch):
@@ -373,10 +373,10 @@ def test_manifest_roundtrip(manifest_path: Path):
 
 def test_manifest_roundtrip_with_host(manifest_path: Path):
     # D8: advertise-Host im Manifest — Daemon schreibt serve_host().
-    file_serve.write_manifest(8792, host="192.168.2.168")
+    file_serve.write_manifest(8792, host="192.0.2.168")
     assert file_serve.read_manifest() == {
         "port": 8792,
-        "host": "192.168.2.168",
+        "host": "192.0.2.168",
     }
 
 

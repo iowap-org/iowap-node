@@ -98,9 +98,9 @@ def _post_transfer(port: int, transfer_id: str, host: str = "127.0.0.1") -> int:
 
 
 def test_allow_env_override_takes_precedence(monkeypatch):
-    monkeypatch.setenv("IOWAP_SERVE_ALLOW", "192.168.2.90")
+    monkeypatch.setenv("IOWAP_SERVE_ALLOW", "192.0.2.90")
     monkeypatch.setenv("RELAY_BASE_URL", "http://10.9.9.9:8788")
-    assert file_serve.serve_allow_ip() == "192.168.2.90"
+    assert file_serve.serve_allow_ip() == "192.0.2.90"
 
 
 def test_allow_resolves_relay_hostname_from_config(monkeypatch):
@@ -164,7 +164,7 @@ def test_transfer_from_denied_ip_gets_403(serve_globals, monkeypatch):
     if node_ip is None:
         pytest.skip("keine non-loopback Outbound-IP (CI ohne LAN)")
     port = _free_port()
-    monkeypatch.setenv("IOWAP_SERVE_ALLOW", "192.168.2.90")
+    monkeypatch.setenv("IOWAP_SERVE_ALLOW", "192.0.2.90")
     server = _start_server(monkeypatch, port)
     try:
         assert _get_health(port, host=node_ip) == 403
@@ -181,17 +181,17 @@ def test_peer_allowed_unit_no_socket():
         file_serve.EphemeralServeHandler
     )
     handler.server = types.SimpleNamespace(
-        _allow_ip=frozenset({"192.168.2.90", "127.0.0.1", "::1"})
+        _allow_ip=frozenset({"192.0.2.90", "127.0.0.1", "::1"})
     )
     handler.client_address = ("10.0.0.5", 55555)
     assert handler._peer_allowed() is False  # Fremd-IP → 403-Pfad
-    handler.client_address = ("192.168.2.90", 55555)
+    handler.client_address = ("192.0.2.90", 55555)
     assert handler._peer_allowed() is True  # Relay-IP
     handler.client_address = ("127.0.0.1", 55555)
     assert handler._peer_allowed() is True  # loopback immer legitim
 
     handler.server = types.SimpleNamespace(_allow_ip=None)  # fail-closed-Cache
-    handler.client_address = ("192.168.2.90", 55555)
+    handler.client_address = ("192.0.2.90", 55555)
     assert handler._peer_allowed() is False
 
 

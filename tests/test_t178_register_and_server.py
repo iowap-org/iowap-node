@@ -44,8 +44,8 @@ def isolated_relay_dir(tmp_path, monkeypatch):
 
 
 def test_normalize_base_url_shapes():
-    assert normalize_base_url("192.168.2.60") == "http://192.168.2.60:8788"
-    assert normalize_base_url("192.168.2.60:9000") == "http://192.168.2.60:9000"
+    assert normalize_base_url("192.0.2.60") == "http://192.0.2.60:8788"
+    assert normalize_base_url("192.0.2.60:9000") == "http://192.0.2.60:9000"
     assert normalize_base_url("https://relay.example.com") == "https://relay.example.com"
     assert normalize_base_url("http://host:8788/") == "http://host:8788"
 
@@ -64,9 +64,9 @@ def test_register_persists_state_and_token(isolated_relay_dir, monkeypatch, caps
         return httpx.Response(200, json=REG_RESPONSE, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(cli_server.httpx, "post", fake_post)
-    rc = node_cli.main(["--json", "node", "register", "192.168.2.60", "--name", "test-node"])
+    rc = node_cli.main(["--json", "node", "register", "192.0.2.60", "--name", "test-node"])
     assert rc == 0
-    assert calls["url"] == "http://192.168.2.60:8788/relay/v2/auth/register"
+    assert calls["url"] == "http://192.0.2.60:8788/relay/v2/auth/register"
     assert calls["body"]["node_name"] == "test-node"
     assert calls["body"]["endpoint"] is None
     assert calls["body"]["capabilities"] == []
@@ -74,7 +74,7 @@ def test_register_persists_state_and_token(isolated_relay_dir, monkeypatch, caps
     meta = json.loads(node_utils.META_PATH.read_text())
     assert meta["node_id"] == "ABCD1234"
     assert meta["registration_secret"] == "rs_xyz"
-    assert meta["base_url"] == "http://192.168.2.60:8788"
+    assert meta["base_url"] == "http://192.0.2.60:8788"
 
     tok = json.loads(node_utils.TOKEN_PATH.read_text())
     assert tok["token"] == "tp_abc123"
@@ -166,7 +166,7 @@ PROBE_OK = {
 
 def test_server_health_json(isolated_relay_dir, monkeypatch, capsys):
     monkeypatch.setattr(cli_server, "probe_server_endpoint", lambda base, **kw: dict(PROBE_OK))
-    rc = node_cli.main(["--json", "server", "health", "http://192.168.2.60:8788"])
+    rc = node_cli.main(["--json", "server", "health", "http://192.0.2.60:8788"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is True
