@@ -99,11 +99,11 @@ See `docker/nodes/base/` for the Dockerfile.
 
 Full documentation in [iowap-org/iowap-docs](https://github.com/iowap-org/iowap-docs):
 
-- `docs/getting-started.md` — first steps
-- `docs/node/setup.md` — node setup
-- `docs/node/cli-reference.md` — full CLI reference
-- `docs/node/capabilities.md` — capability definitions
-- `docs/node/federation.md` — peer-to-peer federation
+- [getting-started.md](https://github.com/iowap-org/iowap-docs/blob/main/getting-started.md) — first steps
+- [node/setup.md](https://github.com/iowap-org/iowap-docs/blob/main/node/setup.md) — node setup
+- [node/cli.md](https://github.com/iowap-org/iowap-docs/blob/main/node/cli.md) — full CLI reference
+- [node/capabilities.md](https://github.com/iowap-org/iowap-docs/blob/main/node/capabilities.md) — capability definitions
+- [federation/concept.md](https://github.com/iowap-org/iowap-docs/blob/main/federation/concept.md) — cross-relay federation
 
 ## License
 
