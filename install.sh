@@ -143,10 +143,8 @@ PY
     "$INSTALL_DIR/.venv/bin/node-cli" relay discover || true
   fi
 
-  if [ -n "$RELAY_URL" ]; then
-    log "Registering with relay..."
-    "$INSTALL_DIR/.venv/bin/node-cli" node register || log "Registration failed — run manually after approving on server"
-  fi
+  log "Registering with relay..."
+  "$INSTALL_DIR/.venv/bin/node-cli" node register || log "Registration failed - run manually after approving on server"
 fi
 
 UNIT_DIR="$HOME/.config/systemd/user"
