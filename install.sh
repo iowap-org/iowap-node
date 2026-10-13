@@ -107,8 +107,11 @@ if [ ! -d .venv ]; then
   python3 -m venv .venv
 fi
 . .venv/bin/activate
+log "Upgrading pip..."
 pip install --upgrade pip >/dev/null
+log "Installing Python dependencies (pip install -e .)..."
 pip install -e . >/dev/null
+log "✓ Python dependencies installed"
 
 if [ "$MODE" != "update" ]; then
   mkdir -p "$HOME/.relay"
