@@ -126,26 +126,36 @@ if [ "$MODE" != "update" ]; then
   if [ ! -f "$HOME/.relay/relay_config.json" ] || [ "$MODE" = "override" ]; then
     cp relay_config.json.example "$HOME/.relay/relay_config.json" 2>/dev/null || true
   fi
-  if [ -n "$RELAY_URL" ]; then
-    python3 - "$HOME/.relay/relay_config.json" "$RELAY_URL" <<'PY'
-import json,sys
-p,u=sys.argv[1],sys.argv[2]
-try:
-    d=json.load(open(p))
-except FileNotFoundError:
-    d={}
-d.setdefault("relay_url", u)
-d["relay_url"]=u
-json.dump(d, open(p,"w"), indent=2)
-PY
-  fi
 
+  # Resolve the relay URL: discovery prints it on stdout, `relay set` pins base_url.
   if [ "${RELAY_DISCOVER:-0}" = "1" ]; then
-    "$INSTALL_DIR/.venv/bin/node-cli" relay discover || true
+    DISCOVERED_URL="$("$INSTALL_DIR/.venv/bin/node-cli" relay discover 2>/dev/null | head -n1 || true)"
+    RELAY_URL="${DISCOVERED_URL:-}"
   fi
 
-  log "Registering with relay..."
-  "$INSTALL_DIR/.venv/bin/node-cli" node register || log "Registration failed - run manually after approving on server"
+  if [ -n "$RELAY_URL" ]; then
+    "$INSTALL_DIR/.venv/bin/node-cli" relay set --server-url "$RELAY_URL" >/dev/null || true
+    log "Relay pinned: $RELAY_URL"
+  else
+    # No URL (discover found nothing): unpin so daemon-side mDNS discovery works.
+    "$INSTALL_DIR/.venv/bin/node-cli" relay set --discover >/dev/null 2>&1 || true
+    log "No relay URL set - discovery enabled (mDNS)"
+  fi
+
+  if [ -n "$RELAY_URL" ]; then
+    if [ -f "$HOME/.relay/iowap-agent.json" ]; then
+      ask REREG "Node identity already exists. Re-register fresh (new node on server)? (y/n)" "n"
+      if [[ "$REREG" =~ ^[Yy] ]]; then
+        log "Registering with relay ($RELAY_URL)..."
+        "$INSTALL_DIR/.venv/bin/node-cli" node register "$RELAY_URL" --force || log "Registration failed - run manually: node-cli node register $RELAY_URL --force"
+      else
+        log "Keeping existing node identity - registration skipped"
+      fi
+    else
+      log "Registering with relay ($RELAY_URL)..."
+      "$INSTALL_DIR/.venv/bin/node-cli" node register "$RELAY_URL" || log "Registration failed - run manually: node-cli node register $RELAY_URL"
+    fi
+  fi
 fi
 
 UNIT_DIR="$HOME/.config/systemd/user"
