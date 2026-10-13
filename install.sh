@@ -53,6 +53,7 @@ ensure_deps() {
     fi
   fi
   python3 -c "import venv" >/dev/null 2>&1 || die "python venv module missing"
+  log "✓ Dependencies verified (python >= ${PYTHON_MIN}, git, venv)"
 }
 
 installed=0
