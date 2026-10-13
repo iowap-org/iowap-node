@@ -78,7 +78,8 @@ case "$MODE" in
     systemctl --user disable --now iowap-node-daemon 2>/dev/null || true
     rm -f "$HOME/.config/systemd/user/iowap-node-daemon.service"
     rm -rf "$INSTALL_DIR"
-    rm -rf "$HOME/.relay"
+    ask DELRELAY "Remove $HOME/.relay entirely? (y/n)" "n"
+    if [[ "$DELRELAY" =~ ^[Yy] ]]; then rm -rf "$HOME/.relay"; fi
     log "Uninstalled."
     exit 0
     ;;
