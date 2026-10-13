@@ -81,8 +81,8 @@ case "$MODE" in
     ask DELRELAY "Remove $HOME/.relay entirely? (y/n)" "n"
     if [[ "$DELRELAY" =~ ^[Yy] ]]; then rm -rf "$HOME/.relay"; fi
     log "Uninstalled."
-    log "Hinweis: Registrierung auf dem Relay wird NICHT automatisch entfernt — manuell im Relay/Admin löschen."
-    log "Lokale Git-Quellen entfernt: $INSTALL_DIR"
+    log "Note: registration on the relay is NOT removed automatically - delete it manually in Relay/Admin."
+    log "Local git sources removed: $INSTALL_DIR"
     exit 0
     ;;
 esac
