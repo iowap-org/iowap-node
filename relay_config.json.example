@@ -7,6 +7,5 @@
   "rs_refresh_before_seconds": 3600,
   "request_timeout": 10,
   "task_timeout": 600,
-  "load_cap": 1.0,
   "log_level": "INFO"
 }
