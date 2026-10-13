@@ -1,9 +1,9 @@
-"""T-179: Envelope-Format v1 — bauen, validieren, auflösen.
+"""T-179: envelope format v1 — build, validate, resolve.
 
-Der Envelope ist der FROZEN Contract zwischen zwei node-clis (Phase 1):
-Der Sender ersetzt ein Payload-Feld durch ``{"__iowap_ref__": {...}}``,
-der Empfänger erkennt den Key und löst auf. Scripts sehen nur
-Pfad rein / Pfad raus.
+The envelope is the FROZEN contract between two node-clis (phase 1):
+the sender replaces a payload field with ``{"__iowap_ref__": {...}}``,
+the receiver recognizes the key and resolves it. Scripts see only
+path in / path out.
 """
 import base64
 import json
@@ -35,7 +35,7 @@ def test_parse_envelope_artifact_requires_id():
                         artifact_id="art_1")
     src, data = parse_envelope(env)
     assert src == "artifact"
-    assert data == "art_1"          # artifact: id statt Bytes
+    assert data == "art_1"          # artifact: id instead of bytes
 
 
 def test_parse_envelope_rejects_unknown_version():
@@ -53,18 +53,18 @@ def test_parse_envelope_rejects_non_envelope():
         parse_envelope({"something": "else"})
 
 
-# --- vertragliche Präzisierungen (Phase 1, FROZEN) ---------------------------
+# --- contract-level clarifications (phase 1, FROZEN) -------------------------
 
 
 def test_make_envelope_rejects_unknown_src():
-    # Sender-Seite validiert genauso hart wie parse (fail-fast am Erzeuger).
+    # the sender side validates just as strictly as parse (fail-fast at the producer).
     with pytest.raises(EnvelopeError):
         make_envelope(src="carrier-pigeon", filename="a.txt", data=b"x")
 
 
 def test_make_envelope_artifact_without_data_has_size_zero():
-    # Nicht-inline-Umschläge kennen size_bytes erst nach Auflösung → 0 als
-    # Platzhalter. Sender-Duplikat-Check: data nur bei inline erlaubt.
+    # non-inline envelopes only learn size_bytes after resolution → 0 as
+    # the placeholder. sender duplicate check: data allowed only for inline.
     env = make_envelope(src="artifact", filename="a.bin", artifact_id="art_1")
     assert env["__iowap_ref__"]["size_bytes"] == 0
     assert "data_base64" not in env["__iowap_ref__"]
@@ -72,8 +72,8 @@ def test_make_envelope_artifact_without_data_has_size_zero():
 
 
 def test_make_envelope_inline_rejects_data_with_artifact_id():
-    # Widersprüchlicher Umschlag: inline-Bytes + artifact_id ist ein
-    # Protokollfehler, kein Datenfehler.
+    # contradictory envelope: inline bytes + artifact_id is a
+    # protocol error, not a data error.
     with pytest.raises(EnvelopeError):
         make_envelope(src="inline", filename="a.txt", data=b"x",
                       artifact_id="art_1")
@@ -86,7 +86,7 @@ def test_make_envelope_bridge_stores_storage_ref():
     assert ref["src"] == "bridge"
     assert ref["storage_ref"] == {"type": "channel", "id": "ch_1"}
     assert "data_base64" not in ref and "artifact_id" not in ref
-    # Und parse liefert das storage_ref-Dict zurück:
+    # and parse returns the storage_ref dict:
     src, val = parse_envelope(env)
     assert src == "bridge"
     assert val == {"type": "channel", "id": "ch_1"}
@@ -96,7 +96,7 @@ def test_make_envelope_inline_computes_sha256():
     import hashlib
     env = make_envelope(src="inline", filename="a.txt", data=b"hi")
     assert env["__iowap_ref__"]["sha256"] == hashlib.sha256(b"hi").hexdigest()
-    # Known-answer check gegen den dokumentierten Wert für b"hi":
+    # known-answer check against the documented value for b"hi":
     assert env["__iowap_ref__"]["sha256"] == \
         "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4"
 
@@ -129,15 +129,15 @@ def test_is_envelope_and_dump_roundtrip():
     env = make_envelope(src="inline", filename="a.txt", data=b"hi")
     assert is_envelope(env) is True
     assert is_envelope({"something": "else"}) is False
-    assert is_envelope([env]) is False                    # keine Liste
-    assert is_envelope(None) is False                      # kein None
-    # dump → compact JSON → parse → identische Bytes
+    assert is_envelope([env]) is False                    # not a list
+    assert is_envelope(None) is False                      # not None
+    # dump → compact JSON → parse → identical bytes
     round = json.loads(dump(env))
     assert round == env
     assert parse_envelope(round) == ("inline", b"hi")
 
 
-# --- T-166-Bugfix: size_bytes für artifact/bridge (war immer 0) ----------
+# --- T-166 bugfix: size_bytes for artifact/bridge (used to be 0) ----------
 
 
 def test_make_envelope_bridge_size_bytes():
@@ -153,7 +153,7 @@ def test_make_envelope_artifact_size_bytes():
 
 
 def test_make_envelope_inline_ignores_wrong_size():
-    # inline leitet aus data her; explizite size tritt nicht dazwischen
+    # inline derives it from data; an explicit size does not take effect
     env = make_envelope(src="inline", filename="a.txt", data=b"hi",
                         size_bytes=99)
     assert env["__iowap_ref__"]["size_bytes"] == 2

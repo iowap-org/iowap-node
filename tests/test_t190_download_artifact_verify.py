@@ -1,9 +1,9 @@
-"""T-190 (F3, MED): ``download_artifact`` muss TLS verifizieren wie alle anderen Calls.
+"""T-190 (F3, MED): ``download_artifact`` must verify TLS like all other calls.
 
-Beleg aus dem Senior-Review 2026-09-30: ``download_artifact`` war der
-EINZIGE HTTP-Call ohne ``verify=self._verify`` (13/13 andere setzen es). Ein
-Node mit ``tls_ca_cert`` (private CA) verliert genau auf diesem Pfad die
-Verifikation gegen die gepinnte CA.
+Evidence from the senior review 2026-09-30: ``download_artifact`` was the
+ONLY HTTP call without ``verify=self._verify`` (13/13 others set it). A
+node with ``tls_ca_cert`` (private CA) loses exactly on this path the
+verification against the pinned CA.
 """
 from __future__ import annotations
 

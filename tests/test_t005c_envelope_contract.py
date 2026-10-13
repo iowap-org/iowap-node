@@ -1,11 +1,11 @@
-"""T-005c: Envelope-Contract, Node-Seite (design.md T-005a section 4.2).
+"""T-005c: envelope contract, node side (design.md T-005a section 4.2).
 
-result_path_hints sind Pfade RELATIV ZUM INNERNEN result des Handler-Result-
-Envelopes ({"status": "completed", "result": X}): flow unwrapt die Huelle
-genau einmal, also navigiert ${ref.result.<hint>} direkt im enthuellten
-Objekt. Der Validator durchreicht die Pfade unverändert (kein Präfix-Rewrite,
-kein "result."-Pseudo-Segment), der Heartbeat veröffentlicht sie wie bisher
-(T-004 pass-through, unverändert).
+result_path_hints are paths RELATIVE TO THE INNER result of the
+handler-result envelope ({"status": "completed", "result": X}): flow
+unwraps the envelope exactly once, so ${ref.result.<hint>} navigates
+directly inside the unveiled object. The validator passes the paths
+through unchanged (no prefix rewrite, no "result." pseudo-segment);
+the heartbeat publishes them as before (T-004 pass-through, unchanged).
 """
 from __future__ import annotations
 
@@ -37,16 +37,16 @@ def _profile(hints):
 
 
 def test_validator_passes_relative_hints_through_unchanged():
-    """Validator akzeptiert result-relative Pfade und schreibt sie UNVERÄNDERT
-    in die normalisierte Capability — kein Rewrite, kein Präfix-Zwang (D6)."""
+    """Validator accepts result-relative paths and writes them UNCHANGED
+    into the normalized capability — no rewrite, no prefix mandate (D6)."""
     caps = validate_profile(_profile(["answer", "artifact_id", "meta.w"]))
     assert caps[0]["result_path_hints"] == ["answer", "artifact_id", "meta.w"]
 
 
 def test_capability_dataclass_roundtrip_keeps_relative_hints():
-    """Capability.from_dict/to_dict (T-004) erhalten die relativen Pfade —
-    Contract gilt über alle drei Definitionstellen (dataclass, Validator,
-    Heartbeat) hinweg."""
+    """Capability.from_dict/to_dict (T-004) preserve the relative paths —
+    the contract holds across all three definition sites (dataclass,
+    validator, heartbeat)."""
     cap = Capability.from_dict(
         {"name": "chat.ai", "type": "ai", "result_path_hints": ["answer"]}
     )
@@ -56,9 +56,9 @@ def test_capability_dataclass_roundtrip_keeps_relative_hints():
 
 
 def test_hints_reach_heartbeat_payload_relative():
-    """End-to-end Node-Seite: Profil → normalisierte Caps → Heartbeat-Payload —
-    die Hints erscheinen result-relativ im cap_status-Eintrag (T-004
-    pass-through, unverändert; nur die SEMANTIK der Pfade ändert sich)."""
+    """End-to-end node side: profile → normalized caps → heartbeat payload —
+    the hints appear result-relative in the cap_status entry (T-004
+    pass-through, unchanged; only the SEMANTICS of the paths change)."""
     caps = validate_profile(_profile(["answer"]))
     client = RelayClient(dict(META), dict(CFG))
     with patch("nodes.common.relay_client.os.getloadavg", return_value=(0.5, 0, 0)), \
@@ -70,12 +70,12 @@ def test_hints_reach_heartbeat_payload_relative():
 
 
 def test_hint_only_profile_edit_is_diff_silent_accepted_deviation():
-    """PINNED (akzeptierte Abweichung, design.md T-005a section 4.2): Ein
-    reiner Hint-Edit zeigt in diff_profiles als 'unchanged', weil
-    _NORMALIZED_KEYS result_path_hints nicht vergleicht. Akzeptiert, weil
-    Hint-Änderungen reine Metadaten-Edits sind; falls das je auffällt,
-    ist der Fix eine Zeile in _NORMALIZED_KEYS — bewusst NICHT Teil von
-    T-005c (Verhaltensänderung an node-cli wäre Out-of-Scope)."""
+    """PINNED (accepted deviation, design.md T-005a section 4.2): A
+    pure hint edit shows up in diff_profiles as 'unchanged' because
+    _NORMALIZED_KEYS does not compare result_path_hints. Accepted
+    because hint changes are pure metadata edits; if this ever shows
+    up, the fix is one line in _NORMALIZED_KEYS — deliberately NOT
+    part of T-005c (changing node-cli behavior would be out of scope)."""
     old = validate_profile(_profile(None))
     new = validate_profile(_profile(["answer"]))
     diff = diff_profiles(old, new)

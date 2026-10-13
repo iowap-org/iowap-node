@@ -1,14 +1,14 @@
-"""T-188 (F1, HIGH): Handler-Timeout muss den ganzen Prozessbaum beenden.
+"""T-188 (F1, HIGH): a handler timeout must kill the whole process tree.
 
-Beleg aus dem Senior-Review 2026-09-30: ``subprocess.run(handler,
-shell=True, timeout=…)`` beendet bei Timeout nur die direkte Shell — der
-eigentliche Handler (Enkelprozess) läuft weiter. Bei ``long_run`` +
-Claim-Retry bedeutet das überlappende Handler und Ressourcen-Leaks auf
-fremden Hosts.
+Evidence from the senior review 2026-09-30: ``subprocess.run(handler,
+shell=True, timeout=…)`` on timeout kills only the direct shell — the
+actual handler (grandchild process) keeps running. With ``long_run`` +
+claim retries this means overlapping handlers and resource leaks on
+foreign hosts.
 
-Der bestehende Test ``test_envelope_contract.py::test_run_handler_timeout_fails``
-prüft nur den Fehlerstring, nie den Prozessbaum — dieser Test schließt
-genau die Lücke.
+The existing test ``test_envelope_contract.py::test_run_handler_timeout_fails``
+only checks the error string, never the process tree — this test closes
+exactly that gap.
 """
 from __future__ import annotations
 

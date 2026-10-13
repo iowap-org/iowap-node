@@ -1,24 +1,25 @@
-"""T-166: hp put/get bridge-Zweige — Verträge (Phase 3 integrate).
+"""T-166: hp put/get bridge branches — contracts (phase 3 integrate).
 
-Gefüllte Körper der Phase-2-Stubs; Test-Namen und -Intents unverändert
-(Plan Tasks 4–6, FROZEN-Entscheidungen aus Plan „Phase 1"):
+Filled bodies of the phase-2 stubs; test names and intents unchanged
+(plan tasks 4–6, FROZEN decisions from plan "Phase 1"):
 
-* F5:  CLI→Daemon-Handoff (serve.json-Discovery, Staging) — ohne
-       erreichbaren Serve: ``hp put`` exit 1 mit FROZEN-Meldung.
-* F6:  Ephemeralität (max_downloads=1, Daemon räumt ab + unregistriert).
-* F7:  Empfänger pullt über Proxy-URL (``file_serve.proxy_url``), Bearer,
-       64-KB-Stream — und ruft NIE ``unregister_temp_route`` auf. Pull mit
-       POST + leerem Body (Proxy matcht registrierte Methode exakt).
-* F8:  sha256 am Sender in Manifest UND Envelope.
-* F9:  cmd_put/cmd_get-Signaturen, stdout-Formate, Exit-Codes (0/1/2)
-       bleiben FROZEN (T-179) — nur die bridge-Zweige bekommen Leben.
+* F5:  CLI→daemon hand-off (serve.json discovery, staging) — without
+       a reachable serve: ``hp put`` exit 1 with the FROZEN message.
+* F6:  ephemerality (max_downloads=1, the daemon cleans up + unregisters).
+* F7:  the receiver pulls via the proxy URL (``file_serve.proxy_url``),
+       Bearer, 64-KB stream — and NEVER calls ``unregister_temp_route``.
+       Pull with POST + empty body (the proxy matches the registered
+       method exactly).
+* F8:  sha256 on the sender side in manifest AND envelope.
+* F9:  cmd_put/cmd_get signatures, stdout formats, exit codes (0/1/2)
+       stay FROZEN (T-179) — only the bridge branches get life.
 
-Technik: FakeClient/MagicMock wie tests/test_t179_cli_hp.py (nur
-sys.path-Bootstrap via conftest); Isolation über Module-Konstanten
-(D7): SERVE_DIR/MANIFEST_PATH zur Call-Zeit → monkeypatch auf tmp_path,
-ohne echtes ~/.relay. Happy-Pfade mocken ``file_serve.probe_serve``
-(kein echter Daemon); get nutzt einen ``httpx.MockTransport``, der über
-einen cli_hp-lokalen httpx-Proxy injiziert wird (Spy auf den Request).
+Technique: FakeClient/MagicMock like tests/test_t179_cli_hp.py (only
+sys.path bootstrap via conftest); isolation via module constants (D7):
+SERVE_DIR/MANIFEST_PATH at call time → monkeypatch to tmp_path, without
+a real ~/.relay. Happy paths mock ``file_serve.probe_serve`` (no real
+daemon); get uses an ``httpx.MockTransport`` injected via a cli_hp-local
+httpx proxy (spy on the request).
 """
 from __future__ import annotations
 
@@ -74,11 +75,11 @@ def _modes(monkeypatch, modes: list[str]) -> None:
 
 
 def _install_transport(monkeypatch, handler) -> list[httpx.Request]:
-    """httpx.stream im cli_hp-Pfad auf MockTransport umbiegen.
+    """Repoint httpx.stream in the cli_hp path to a MockTransport.
 
-    Liefert die gebauten Requests zurück (Spy für POST/URL/Header-Vertrag).
-    Der Proxy wird nur für cli_hp gesetzt (``cli_hp.httpx``) — der Rest des
-    Prozesses nutzt weiterhin das echte httpx.
+    Returns the built requests (spy for the POST/URL/header contract).
+    The proxy is set only for cli_hp (``cli_hp.httpx``) — the rest of the
+    process keeps using the real httpx.
     """
     seen: list[httpx.Request] = []
     transport = httpx.MockTransport(handler)
@@ -111,7 +112,7 @@ def _install_transport(monkeypatch, handler) -> list[httpx.Request]:
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> bool:
-    """Sync mit Serve-Request-Thread: Zählen passiert NACH dem Senden."""
+    """Sync with the serve request thread: counting happens AFTER the send."""
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -132,7 +133,7 @@ def test_put_bridge_happy_path_via_fake_client(
     payload = b"bridge-payload" * 10
     f = tmp_path / "big.bin"
     f.write_bytes(payload)
-    file_serve.write_manifest(9123)  # F5: Daemon hat serve.json geschrieben
+    file_serve.write_manifest(9123)  # F5: the daemon wrote serve.json
     monkeypatch.setattr(
         file_serve, "probe_serve", lambda port, timeout=2.0, host=None: True
     )
@@ -142,7 +143,7 @@ def test_put_bridge_happy_path_via_fake_client(
     rc = cli_hp.cmd_put(client, cap="cap.x", path=f)
 
     assert rc == 0
-    # register_temp_route: Pfad (Allowlist), POST, Upstream auf den Serve.
+    # register_temp_route: path (allowlist), POST, upstream points at the serve.
     client.register_temp_route.assert_called_once()
     args = client.register_temp_route.call_args.args
     kwargs = client.register_temp_route.call_args.kwargs
@@ -150,7 +151,7 @@ def test_put_bridge_happy_path_via_fake_client(
     assert route_path.startswith("/download/")
     transfer_id = route_path.removeprefix("/download/")
     assert len(transfer_id) == 22  # F2 — url-safe transfer id
-    assert args[1] == "POST"  # Serve-Kanal ist POST-only
+    assert args[1] == "POST"  # the serve channel is POST-only
     assert args[2] == f"http://127.0.0.1:9123/transfer/{transfer_id}"  # upstream
     assert kwargs["ttl_seconds"] == 3600
     assert kwargs["channel_id"] == transfer_id
@@ -166,7 +167,7 @@ def test_put_bridge_happy_path_via_fake_client(
         "sha256": hashlib.sha256(payload).hexdigest(),
         "max_downloads": 1,
     }
-    # stdout GENAU EINE Zeile: Envelope src="bridge" mit F4-Ref + F8-sha256.
+    # stdout EXACTLY ONE line: envelope src="bridge" with F4 ref + F8 sha256.
     out = capsys.readouterr().out
     assert out.count("\n") == 1
     envelope = json.loads(out)
@@ -187,8 +188,8 @@ def test_put_bridge_happy_path_via_fake_client(
 def test_put_bridge_serve_json_missing_returns_exit_1(
     tmp_path, client, serve_dir, manifest_path, monkeypatch, capsys
 ):
-    # F5 — serve.json fehlt (Normalfall ohne Daemon): exit 1, FROZEN-Wortlaut,
-    # nichts gestaged, kein Register, kein Envelope.
+    # F5 — serve.json missing (normal case without a daemon): exit 1, FROZEN wording,
+    # nothing staged, no register, no envelope.
     f = tmp_path / "blob.bin"
     f.write_bytes(b"0123456789")
     _modes(monkeypatch, ["bridge"])
@@ -202,9 +203,9 @@ def test_put_bridge_serve_json_missing_returns_exit_1(
         "running?) — use artifact fallback"
     )
     assert ro.out == ""
-    assert not serve_dir.exists()  # NICHTS gestaged
+    assert not serve_dir.exists()  # NOTHING staged
     client.register_temp_route.assert_not_called()
-    assert f.exists()  # Quelle unangetastet
+    assert f.exists()  # source untouched
 
 
 def test_put_bridge_register_http_error_returns_exit_1_and_deletes_staged(
@@ -226,8 +227,8 @@ def test_put_bridge_register_http_error_returns_exit_1_and_deletes_staged(
     assert rc == 1
     ro = capsys.readouterr()
     assert ro.err.startswith("hp put: route registration failed:")
-    assert ro.out == ""  # kein Envelope bei gescheiterter Registrierung
-    # Kein stale Rest ohne Route: staged Datei + F6-Manifest gelöscht (F6).
+    assert ro.out == ""  # no envelope on a failed registration
+    # no stale leftovers without the route: staged file + F6 manifest deleted (F6).
     assert list(serve_dir.iterdir()) == []
 
 
@@ -237,7 +238,7 @@ def test_put_bridge_register_http_error_returns_exit_1_and_deletes_staged(
 
 
 def _bridge_envelope(filename: str, sha256: str | None = None) -> dict:
-    """node_serve-Envelope (F4/F8) für Empfänger-Tests."""
+    """node_serve envelope (F4/F8) for receiver tests."""
     ref = file_serve.build_storage_ref(
         "E4W3CBWQ", "/download/abcDEF-_123", "2026-09-06T18:00:00+00:00"
     )
@@ -266,8 +267,8 @@ def test_get_bridge_happy_path_via_mock_transport(
     rc = cli_hp.cmd_get(client, envelope=env, out_dir=out_dir)
 
     assert rc == 0
-    # Request-Vertrag (F7/F3): POST (Proxy matcht Methode exakt), leerer
-    # Body, Proxy-URL (F7-Shape), Bearer-Token.
+    # request contract (F7/F3): POST (the proxy matches the method exactly), empty
+    # body, proxy URL (F7 shape), Bearer token.
     assert len(seen) == 1
     req = seen[0]
     assert req.method == "POST"
@@ -276,7 +277,7 @@ def test_get_bridge_happy_path_via_mock_transport(
         "http://relay.test", "E4W3CBWQ", "/download/abcDEF-_123"
     )
     assert req.headers["Authorization"] == f"Bearer {client.token}"
-    # Datei byte-identisch, sha256-Verify gelaufen (F8), stdout FROZEN-Keys.
+    # file byte-identical, the sha256 verify ran (F8), stdout FROZEN keys.
     target = out_dir / "recv.bin"
     assert target.read_bytes() == payload
     out = json.loads(capsys.readouterr().out)
@@ -290,7 +291,7 @@ def test_get_bridge_happy_path_via_mock_transport(
 def test_get_bridge_incomplete_storage_ref_returns_exit_1(
     tmp_path, client, manifest_path, capsys
 ):
-    # Guard VOR jedem HTTP (kein Pull-Versuch) + kein unregister (F7).
+    # guard BEFORE any HTTP (no pull attempt) + no unregister (F7).
     spy = MagicMock()
     client.unregister_temp_route = spy
     bad_refs = [
@@ -328,8 +329,8 @@ def test_get_bridge_http_error_returns_exit_1_and_deletes_partial_file(
 
     assert rc == 1
     assert capsys.readouterr().err.startswith("hp get: bridge pull failed:")
-    assert not (out_dir / "recv.bin").exists()  # keine Halbfabrikate
-    client.unregister_temp_route.assert_not_called()  # Empfänger nie Owner
+    assert not (out_dir / "recv.bin").exists()  # no half-written files
+    client.unregister_temp_route.assert_not_called()  # the receiver is never the owner
 
 
 def test_get_bridge_receiver_does_not_unregister(
@@ -353,7 +354,7 @@ def test_get_bridge_receiver_does_not_unregister(
     rc = cli_hp.cmd_get(client, envelope=env, out_dir=tmp_path / "out")
 
     assert rc == 0
-    spy.assert_not_called()  # F7: Route gehört dem Sender-Daemon
+    spy.assert_not_called()  # F7: the route belongs to the sender daemon
 
 
 # ---------------------------------------------------------------------------
@@ -373,23 +374,24 @@ def serve_globals(monkeypatch):
 def test_bridge_roundtrip_end_to_end(
     tmp_path, client, serve_dir, manifest_path, monkeypatch, capsys, serve_globals
 ):
-    """Sender staged+registriert → Proxy-Pull → Ephemeralität bewiesen.
+    """Sender stages + registers → proxy pull → ephemerality proven.
 
-    In-process e2e mit ECHTEM ``EphemeralServeHandler`` (ThreadingHTTPServer
-    auf Port 0 statt Daemon): cmd_put registriert die Route (Capture), der
-    MockTransport-Simulant des Relay-Proxys leitet den Empfänger-Pull an
-    den echten Serve-Server weiter (POST, leerer Body — wie der echte
-    Proxy), und der on_exhausted-Hook-Spy belegt die F6-Kette (Datei weg +
-    Route unregistered — im Daemon ``unregister_after_transfer``).
+    In-process e2e with the REAL ``EphemeralServeHandler`` (a
+    ThreadingHTTPServer on port 0 instead of the daemon): cmd_put
+    registers the route (capture), the MockTransport stand-in of the
+    relay proxy forwards the receiver pull to the real serve server
+    (POST, empty body — like the real proxy), and the on_exhausted hook
+    spy proves the F6 chain (file gone + route unregistered — in the
+    daemon ``unregister_after_transfer``).
     """
     payload = b"roundtrip-payload-" + bytes(range(64))
     f = tmp_path / "orig.bin"
     f.write_bytes(payload)
     _modes(monkeypatch, ["bridge"])  # bridge-Modus erzwingen (ladder-frei)
 
-    # Echter Serve-Server (Phase-3-Handler) statt Daemon.
+    # real serve server (the phase-3 handler) instead of the daemon.
     server = ThreadingHTTPServer(("127.0.0.1", 0), file_serve.EphemeralServeHandler)
-    # D9-Cache wie im Daemon: loopback legitim (Peer ist hier loopback).
+    # D9 cache like in the daemon: loopback legitimate (the peer is loopback here).
     server._allow_ip = frozenset({"127.0.0.1", "::1"})  # type: ignore[attr-defined]
     serve_port = server.server_address[1]
     threading.Thread(
@@ -398,7 +400,7 @@ def test_bridge_roundtrip_end_to_end(
     hook_calls: list[str] = []
     file_serve.set_on_exhausted(hook_calls.append)
 
-    # Sender-Seite: serve.json zeigt auf den echten Serve-Server.
+    # sender side: serve.json points at the real serve server.
     file_serve.write_manifest(serve_port)
     try:
         captured: dict = {}
@@ -422,8 +424,8 @@ def test_bridge_roundtrip_end_to_end(
             f"{captured['route_path'].removeprefix('/download/')}"
         )
 
-        # Empfänger-Seite: Pull via MockTransport, der wie der Relay-Proxy
-        # den POST an den registrierten Upstream weiterleitet.
+        # receiver side: pull via a MockTransport that, like the relay proxy,
+        # forwards the POST to the registered upstream.
         def _proxy(request: httpx.Request) -> httpx.Response:
             with httpx.Client() as upstream:
                 resp = upstream.post(captured["upstream"])
@@ -448,13 +450,13 @@ def test_bridge_roundtrip_end_to_end(
         assert get_out["src"] == "bridge"
         assert get_out["size_bytes"] == len(payload)
 
-        # F6-Kette: genau 1 Download → staged Datei + Manifest weg und der
-        # Hook (= Daemon-Unregister) feuerte mit der Route.
+        # F6 chain: exactly 1 download → staged file + manifest gone and the
+        # hook (= daemon unregister) fired with the route.
         tid = captured["route_path"].removeprefix("/download/")
         assert _wait_until(lambda: not (serve_dir / tid).exists())
         assert _wait_until(lambda: hook_calls == [captured["route_path"]])
         assert not (serve_dir / f"{tid}.json").exists()
-        # Ephemeral: zweiter Pull über denselben Proxy wäre 404.
+        # ephemeral: a second pull through the same proxy would be 404.
         probe = httpx.post(captured["upstream"])
         assert probe.status_code == 404
     finally:

@@ -1,13 +1,13 @@
-"""T-005b: handler_runner Normalize-Choke-Point (Envelope-Contract, T-005a design.md §3).
+"""T-005b: handler_runner normalize choke-point (envelope contract, T-005a design.md §3).
 
-Jeder Test-Contract kommt aus design.md §3.1–§3.4:
-- Response-Normalize: conforming pass-through, bare-wrap, bare-error
-  pass-through, fail-fast bei status:error, Fehlerfälle.
-- Request-Hülle: {task_id, capability, input:{...}} + tolerante Spiegelung
+Every test contract comes from design.md §3.1–§3.4:
+- Response normalize: conforming pass-through, bare-wrap, bare-error
+  pass-through, fail-fast on status:error, error cases.
+- Request envelope: {task_id, capability, input:{...}} + tolerant mirroring
   (config.envelope_request_mirror).
-- Kein Verhalten-Change für konforme Handler (hermes-handler.py Form).
+- No behavior change for conforming handlers (hermes-handler.py form).
 
-Deviation-Tests (dokumentiert in design.md ## Deviations):
+Deviation tests (documented in design.md ## Deviations):
 - Wrap omits the "error" key (daemon counts failures by key presence).
 - node_config forwards a per-capability "config" mapping (validator +
   normalizer), the carrier of config.envelope_request_mirror.
@@ -160,7 +160,7 @@ def test_normalize_idempotent() -> None:
         assert twice == once
 
 
-# --- §3.2 Request-Hülle ------------------------------------------------------
+# --- §3.2 request envelope ------------------------------------------------------
 
 def _stage(**overrides: Any) -> dict[str, Any]:
     stage: dict[str, Any] = {

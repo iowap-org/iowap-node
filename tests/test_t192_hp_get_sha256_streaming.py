@@ -1,13 +1,13 @@
-"""T-192 (F5, MED): ``hp get``-sha256 muss chunkwise prüfen, nicht in RAM.
+"""T-192 (F5, MED): ``hp get`` sha256 must verify in chunks, not in RAM.
 
-Beleg aus dem Senior-Review 2026-09-30 (``cli_hp.py:434``): die
-sha256-Verifikation las die gesamte Datei mit ``read_bytes()`` in den RAM —
-genau auf dem Bridge-/Artifact-Pfad, für den der Rest der Datei bewusst in
-64-KiB-Chunks streamt. Ein großer Transfer erzeugte so denselben
-RAM-Peak, den der Chunk-Stream gerade vermeiden soll.
+Evidence from the senior review 2026-09-30 (``cli_hp.py:434``): the
+sha256 verification read the whole file into RAM with ``read_bytes()`` —
+exactly on the bridge/artifact path, for which the rest of the file
+deliberately streams in 64-KiB chunks. A large transfer thus produced
+the very RAM peak the chunk stream is meant to avoid.
 
-Fix: ``file_serve._sha256_file`` wiederverwenden (existiert, chunkweise).
-Der Test spioniert ``read_bytes`` auf der Zieldatei aus.
+Fix: reuse ``file_serve._sha256_file`` (exists, streams in chunks).
+The test spies on ``read_bytes`` of the target file.
 """
 from __future__ import annotations
 

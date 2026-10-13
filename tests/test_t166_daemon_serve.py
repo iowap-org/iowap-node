@@ -1,20 +1,20 @@
-"""T-166 Task 3: Daemon startet Ephemeral-Serve (F1) — Lifecycle-Tests.
+"""T-166 Task 3: daemon starts the ephemeral serve (F1) — lifecycle tests.
 
-Verträge:
+Contracts:
 
-* start()/run() verdrahtet den on_exhausted-Hook (F6: nach erschöpftem
-  Transfer ruft der Daemon ``unregister_after_transfer(client, route_path)``
-  — Best-Effort, HTTP-Fehler werden geloggt, nie geworfen) und startet den
-  Serve-Thread; serve.json wird mit dem tatsächlich gebundenen Port
-  geschrieben (F5-Discovery für ``hp put``).
-* Bind-Fehl (Port belegt, F1): WARNING + kein Crash — SseDaemon.run()
-  läuft regulär weiter, ``hp put bridge`` meldet später den F5-Fehler
-  statt dass der Daemon stirbt.
-* Idempotenz: zweiter start_serve_thread()-Aufruf → derselbe Thread.
+* start()/run() wires the on_exhausted hook (F6: after a transfer is
+  exhausted the daemon calls ``unregister_after_transfer(client, route_path)``
+  — best effort, HTTP errors are logged, never raised) and starts the
+  serve thread; serve.json is written with the actually bound port
+  (F5 discovery for ``hp put``).
+* Bind failure (port taken, F1): WARNING + no crash — SseDaemon.run()
+  keeps running normally, ``hp put bridge`` reports the F5 error later
+  instead of the daemon dying.
+* Idempotency: a second start_serve_thread() call → same thread.
 
-run() blockiert im 0.5-s-Poll-Loop; der Test beendet es via ``stop()``
-aus einem Timer-Thread. Signal-Handler werden durch monkeypatch der
-Methode neutralisiert (kein Hauptthread-Zwang im Test).
+run() blocks in the 0.5-s poll loop; the test stops it via ``stop()``
+from a timer thread. Signal handlers are neutralized by monkeypatching
+the method (no main-thread restriction in the test).
 """
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def test_daemon_start_starts_serve_and_writes_manifest(
         timer = _stop_later(daemon, 0.4)
         daemon.run()
 
-        # Serve-Thread läuft, Manifest mit gebundenem Port (F5-Discovery).
+        # Serve thread running, manifest with the bound port (F5 discovery).
         assert file_serve._serve_thread is not None
         assert file_serve._serve_thread.is_alive()
         assert file_serve.read_manifest() == {"port": port, "host": "127.0.0.1"}
@@ -115,19 +115,19 @@ def test_daemon_bind_failure_does_not_crash(
             file_serve, "MANIFEST_PATH", tmp_path / "serve.json"
         )
         _stop_later(daemon, 0.4)
-        daemon.run()  # darf nicht raisen
-    assert file_serve._serve_thread is None  # Serve nie gestartet
-    assert not (tmp_path / "serve.json").exists()  # kein Manifest bei Bind-Fehl
+        daemon.run()  # must not raise
+    assert file_serve._serve_thread is None  # serve never started
+    assert not (tmp_path / "serve.json").exists()  # no manifest on bind failure
 
 
 def test_daemon_hook_unregisters_after_exhausted_transfer(
     daemon, tmp_path, monkeypatch, serve_globals
 ):
-    """F6-Kette: erschöpfter Transfer → Daemon unregistriert (Best-Effort).
+    """F6 chain: exhausted transfer → daemon unregisters (best effort).
 
-    Startet den Daemon (echter Hook-Verdrahtung + Serve-Thread), staged per
-    HTTP-POST einen Download bis ``max_downloads`` erreicht ist und prüft,
-    dass der verdrahtete Hook ``unregister_after_transfer`` → Client aufruft.
+    Starts the daemon (real hook wiring + serve thread), stages downloads
+    via HTTP POST until ``max_downloads`` is reached, and checks that the
+    wired hook calls ``unregister_after_transfer`` → client.
     """
     serve_dir = tmp_path / "serve"
     serve_dir.mkdir()
@@ -156,7 +156,7 @@ def test_daemon_hook_unregisters_after_exhausted_transfer(
 
         r = httpx.post(f"http://127.0.0.1:{port}/transfer/{'b' * 22}")
         assert r.status_code == 200
-        # Zählen/Unregister passiert nach dem Senden → poll-sync.
+        # counting/unregister happens after the send → poll-sync.
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             if not staged.exists() and not manifest_file.exists():
@@ -188,7 +188,7 @@ def test_daemon_hook_survives_unregister_error(
 
     hook = file_serve._ON_EXHAUSTED
     assert hook is not None
-    hook("/download/whatever")  # darf nicht raisen
+    hook("/download/whatever")  # must not raise
     assert hook_calls == ["/download/whatever"]
 
 

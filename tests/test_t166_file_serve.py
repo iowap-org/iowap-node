@@ -1,17 +1,16 @@
-"""T-166: file_serve — Manifest/Staging/ID-Kontrakte (Phase 1, TDD-RED-first).
+"""T-166: file_serve — manifest/staging/ID contracts (phase 1, TDD-RED-first).
 
-Phase 1 (architect) liefert Task 1 komplett UND pinnt alle FROZEN
-Signaturen aus dem Plan via ``inspect.signature`` — Phase 2 (scaffold)
-verifiziert gegen diese Pins, Phase 3 (integrate) füllt nur noch.
+Phase 1 (architect) delivers task 1 completely AND pins all FROZEN
+signatures from the plan via ``inspect.signature`` — phase 2 (scaffold)
+verifies against these pins, phase 3 (integrate) only fills bodies.
 
-Test-Isolation: ``SERVE_DIR``/``MANIFEST_PATH`` sind Module-Konstanten,
-die Funktionen lesen sie zur CALL-Zeit → per monkeypatch austauschbar,
-ohne echtes ``~/.relay`` anzufassen.
+Test isolation: ``SERVE_DIR``/``MANIFEST_PATH`` are module constants,
+the functions read them at CALL time → swappable via monkeypatch,
+without touching a real ``~/.relay``.
 
-Task-2/3-Skeletons (``EphemeralServeHandler``, ``start_serve_thread``)
-werden nur auf Existenz + Signatur + NotImplementedError gepinnt —
-echte HTTP-Tests kommen mit Phase 3 (Plan Task 2 modifiziert dieses
-File).
+Task-2/3 skeletons (``EphemeralServeHandler``, ``start_serve_thread``)
+are pinned only for existence + signature + NotImplementedError —
+real HTTP tests arrive with phase 3 (plan task 2 modifies this file).
 """
 from __future__ import annotations
 
@@ -50,7 +49,7 @@ def manifest_path(tmp_path: Path, monkeypatch) -> Path:
     return p
 
 
-# --- FROZEN pins (Phase 2/3-Gate verifiziert gegen diese) ----------------------
+# --- FROZEN pins (the phase 2/3 gate verifies against these) -------------------
 
 
 def test_frozen_constants():
@@ -62,15 +61,15 @@ def test_frozen_constants():
 
 
 def test_frozen_signatures():
-    # Annotationen zeigen gequotet (from __future__ import annotations) —
-    # Haus-Konvention wie test_t179_cli_hp.py::test_cli_hp_signatures_unchanged.
+    # annotations appear quoted (from __future__ import annotations) —
+    # house convention like test_t179_cli_hp.py::test_cli_hp_signatures_unchanged.
     pins = {
         "serve_port": "() -> 'int'",
         "read_manifest": "() -> 'dict | None'",
         "write_manifest": "(port: 'int', host: 'str | None' = None) -> 'None'",
         "new_transfer_id": "() -> 'str'",
-        # Phase-1-Präzisierung D5: max_downloads keyword-only, Default 1 —
-        # call-kompatibel zum Plan-Snippet stage_file(path), s. Plan Phase 1.
+        # phase-1 clarification D5: max_downloads keyword-only, default 1 —
+        # call-compatible with the plan snippet stage_file(path), see plan phase 1.
         "stage_file": (
             "(src: 'Path', *, max_downloads: 'int' = 1) -> 'tuple[str, Path, str]'"
         ),
@@ -93,8 +92,8 @@ def test_frozen_signatures():
 
 # --- Serve-Handler + start_serve_thread (Task 2/3, Phase 3) ---------------------
 #
-# Der Skeleton-Pin-Test (Phase 1) ist hier ersetzt: Phase 3 füllt die Körper,
-# die Verträge stehen im Handler-/start_serve_thread-Docstring.
+# the skeleton pin test (phase 1) is replaced here: phase 3 fills the bodies,
+# the contracts live in the handler-/start_serve_thread docstring.
 
 
 import time
@@ -116,7 +115,7 @@ def _stage(serve_dir: Path, payload: bytes, max_downloads: int = 1):
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> bool:
-    """Sync mit dem Request-Thread: Zählen/aufräumen passiert NACH dem Senden."""
+    """Sync with the request thread: counting/cleanup happens AFTER the send."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -167,12 +166,12 @@ def test_serve_max_downloads_exhausts_and_fires_hook(serve_dir, serve_globals):
         r = httpx.post(url, content=b"")
         assert r.status_code == 200
         assert r.content == payload
-        # F6: Datei + Manifest weg, Hook mit route_path gefeuert — Zählen
-        # passiert nach dem Senden → poll-sync mit dem Request-Thread.
+        # F6: file + manifest gone, hook fired with route_path — counting
+        # happens after the send → poll-sync with the request thread.
         assert _wait_until(lambda: not staged.exists())
         assert _wait_until(lambda: hook_calls == [f"/download/{tid}"])
         assert not (serve_dir / f"{tid}.json").exists()
-        # Ephemeral bewiesen: zweiter Pull ist 404.
+        # ephemerality proven: the second pull is 404.
         r2 = httpx.post(url, content=b"")
         assert r2.status_code == 404
     finally:
@@ -187,7 +186,7 @@ def test_serve_health_and_post_only_channel(serve_globals):
         assert r.status_code == 200
         assert r.json() == {"ok": True}
         assert httpx.get(f"http://127.0.0.1:{port}/other").status_code == 404
-        # GET auf /transfer → 404 (POST-only; Proxy matcht Methode exakt).
+        # GET on /transfer → 404 (POST-only; the proxy matches the method exactly).
         assert (
             httpx.get(f"http://127.0.0.1:{port}/transfer/{'a' * 22}").status_code
             == 404
@@ -220,7 +219,7 @@ def test_serve_count_persists_between_downloads(serve_dir, serve_globals):
     try:
         r1 = httpx.post(url, content=b"")
         assert r1.status_code == 200
-        # Download-Zählen passiert nach dem Senden (Request-Thread) → poll-sync.
+        # download counting happens after the send (request thread) → poll-sync.
         manifest_file = serve_dir / f"{tid}.json"
         assert _wait_until(
             lambda: manifest_file.exists()
@@ -259,7 +258,7 @@ def test_sweep_removes_stale_files(serve_dir, serve_globals):
 
 def test_sweep_rate_limited(serve_dir, serve_globals):
     serve_dir.mkdir(parents=True, exist_ok=True)
-    file_serve._last_sweep = time.time()  # gerade gesweept
+    file_serve._last_sweep = time.time()  # just swept
     stale_file = serve_dir / "stale.bin"
     stale_file.write_bytes(b"x")
     old_ts = time.time() - 7200
@@ -267,7 +266,7 @@ def test_sweep_rate_limited(serve_dir, serve_globals):
 
     file_serve._sweep_stale_transfers()
 
-    assert stale_file.exists()  # Intervall nicht erreicht → nichts getan
+    assert stale_file.exists()  # interval not reached → nothing done
 
 
 def _free_port() -> int:
@@ -287,7 +286,7 @@ def test_start_serve_thread_binds_writes_manifest_idempotent(
         assert file_serve.read_manifest() == {"port": port, "host": "127.0.0.1"}
         assert file_serve.probe_serve(port) is True
         t2 = file_serve.start_serve_thread()
-        assert t2 is t1  # Idempotenz — kein Doppel-Bind
+        assert t2 is t1  # idempotency — no double bind
     finally:
         if file_serve._serve_server is not None:
             file_serve._serve_server.shutdown()
@@ -304,7 +303,7 @@ def test_start_serve_thread_bind_fail_raises_no_manifest(
         monkeypatch.setenv("IOWAP_SERVE_PORT", str(port))
         with pytest.raises(RuntimeError, match="bind failed"):
             file_serve.start_serve_thread()
-    assert not manifest_path.exists()  # kein Manifest bei Bind-Fehl
+    assert not manifest_path.exists()  # no manifest on bind failure
 
 
 # --- serve_port ---------------------------------------------------------------
@@ -321,8 +320,8 @@ def test_serve_port_env_override(monkeypatch):
 
 
 def test_serve_port_invalid_env_falls_back(monkeypatch):
-    # Haus-Pattern wie relay_client._effective_config: WARNING + Default,
-    # kein harter Absturz wegen eines Env-Tippfehlers.
+    # house pattern like relay_client._effective_config: WARNING + default,
+    # no hard crash for an env typo.
     monkeypatch.setenv("IOWAP_SERVE_PORT", "not-a-port")
     assert file_serve.serve_port() == 8792
 
@@ -343,13 +342,13 @@ def test_serve_host_default_without_env(monkeypatch):
 
 
 def test_serve_host_env_override(monkeypatch):
-    # Live-Fall: Relay (LXC 903) dialt die LAN-IP des Nodes.
+    # live case: relay (LXC 903) dials the node's LAN IP.
     monkeypatch.setenv("IOWAP_SERVE_HOST", "192.0.2.168")
     assert file_serve.serve_host() == "192.0.2.168"
 
 
 def test_serve_host_invalid_env_falls_back(monkeypatch):
-    # Haus-Pattern wie serve_port(): WARNING + Default, kein Absturz.
+    # house pattern like serve_port(): WARNING + default, no crash.
     monkeypatch.setenv("IOWAP_SERVE_HOST", "   ")
     assert file_serve.serve_host() == "127.0.0.1"
     monkeypatch.setenv("IOWAP_SERVE_HOST", "x" * 256)
@@ -357,7 +356,7 @@ def test_serve_host_invalid_env_falls_back(monkeypatch):
 
 
 def test_read_manifest_invalid_host_falls_back_to_default(manifest_path: Path):
-    # Kaputter host-Wert im Manifest: Port bleibt verwertbar, host → Default.
+    # broken host value in the manifest: port stays usable, host → default.
     manifest_path.write_text('{"port": 8792, "host": 42}')
     assert file_serve.read_manifest() == {"port": 8792, "host": "127.0.0.1"}
 
@@ -372,7 +371,7 @@ def test_manifest_roundtrip(manifest_path: Path):
 
 
 def test_manifest_roundtrip_with_host(manifest_path: Path):
-    # D8: advertise-Host im Manifest — Daemon schreibt serve_host().
+    # D8: advertise host in the manifest — the daemon writes serve_host().
     file_serve.write_manifest(8792, host="192.0.2.168")
     assert file_serve.read_manifest() == {
         "port": 8792,
@@ -381,20 +380,20 @@ def test_manifest_roundtrip_with_host(manifest_path: Path):
 
 
 def test_write_manifest_leaves_no_tmp(manifest_path: Path):
-    # Atomar via tmp + os.replace: kein .tmp-Rest, kein torn read.
+    # atomic via tmp + os.replace: no .tmp leftover, no torn read.
     file_serve.write_manifest(9123)
     assert not (manifest_path.parent / (manifest_path.name + ".tmp")).exists()
     assert file_serve.read_manifest() == {"port": 9123, "host": "127.0.0.1"}
 
 
 def test_read_manifest_without_host_key_falls_back(manifest_path: Path):
-    # Vor-D8-Manifeste ohne host-Key bleiben lesbar → Default.
+    # pre-D8 manifests without a host key stay readable → default.
     manifest_path.write_text('{"port": 8792}')
     assert file_serve.read_manifest() == {"port": 8792, "host": "127.0.0.1"}
 
 
 def test_read_manifest_missing_returns_none(manifest_path: Path):
-    # Der NORMALFALL ohne Daemon: serve.json fehlt → None (kein Raise).
+    # the NORMAL case without a daemon: serve.json missing → None (no raise).
     assert file_serve.read_manifest() is None
 
 
@@ -404,14 +403,14 @@ def test_read_manifest_invalid_json_returns_none(manifest_path: Path):
 
 
 def test_read_manifest_invalid_shape_returns_none(manifest_path: Path):
-    # Getypte Garantie für cmd_put (Task 4): port muss int 1–65535 sein.
+    # typed guarantee for cmd_put (Task 4): port must be int 1–65535.
     for bad in (
-        "[1, 2]",                  # kein dict
-        '{"other": 1}',            # port fehlt
-        '{"port": "8792"}',        # kein int
+        "[1, 2]",                  # not a dict
+        '{"other": 1}',            # port missing
+        '{"port": "8792"}',        # not an int
         '{"port": 0}',             # out of range
         '{"port": 70000}',         # out of range
-        '{"port": true}',          # bool ist kein port (isinstance-Falle)
+        '{"port": true}',          # bool is not a port (isinstance trap)
     ):
         manifest_path.write_text(bad)
         assert file_serve.read_manifest() is None, bad
@@ -422,9 +421,9 @@ def test_read_manifest_invalid_shape_returns_none(manifest_path: Path):
 
 def test_new_transfer_id_shape_and_uniqueness():
     ids = {file_serve.new_transfer_id() for _ in range(50)}
-    assert len(ids) == 50  # kollisionsfrei über 50 Züge (Plan: min. 2×)
+    assert len(ids) == 50  # collision-free across 50 draws (plan: min. 2×)
     for tid in ids:
-        assert len(tid) == 22  # token_urlsafe(16) → 22 Zeichen (≤64-Registry-Limit)
+        assert len(tid) == 22  # token_urlsafe(16) → 22 chars (≤64-registry limit)
         assert re.fullmatch(r"[A-Za-z0-9_-]{22}", tid)  # URL-safe
 
 
@@ -441,9 +440,9 @@ def test_stage_file_moves_hashes_and_manifest(serve_dir: Path, tmp_path: Path):
     assert len(transfer_id) == 22
     assert staged == serve_dir / transfer_id
     assert staged.read_bytes() == payload
-    assert not src.exists()  # Move-Semantik (F5) — Quelle ist weg
+    assert not src.exists()  # move semantics (F5) — the source is gone
     assert sha_hex == hashlib.sha256(payload).hexdigest()
-    # F6-Manifest, exakter Key-Set:
+    # F6 manifest, exact key set:
     manifest = json.loads((serve_dir / f"{transfer_id}.json").read_text())
     assert manifest == {
         "file": transfer_id,
@@ -454,9 +453,9 @@ def test_stage_file_moves_hashes_and_manifest(serve_dir: Path, tmp_path: Path):
 
 
 def test_stage_file_copy_fallback_cross_fs(serve_dir: Path, tmp_path: Path, monkeypatch):
-    # os.replace → OSError(EXDEV) NUR für den Quelldatei-Move (Quelle auf
-    # fremdem FS); das atomare Manifest-Rename im SERVE_DIR bleibt echt.
-    # shutil.copy + unlink-Fallback muss liefern — inkl. Move-Semantik.
+    # os.replace → OSError(EXDEV) ONLY for the source-file move (the source on
+    # a foreign FS); the atomic manifest rename in SERVE_DIR stays real.
+    # the shutil.copy + unlink fallback must deliver — incl. move semantics.
     payload = b"cross-fs-payload" * 100
     src = tmp_path / "src.bin"
     src.write_bytes(payload)
@@ -479,7 +478,7 @@ def test_stage_file_copy_fallback_cross_fs(serve_dir: Path, tmp_path: Path, monk
 
 
 def test_stage_file_max_downloads_param(serve_dir: Path, tmp_path: Path):
-    # F6 --serve-count: Manifest trägt N (CLI validiert 1–10, Task 4).
+    # F6 --serve-count: the manifest carries N (CLI validates 1–10, Task 4).
     src = tmp_path / "n.bin"
     src.write_bytes(b"n")
     transfer_id, _, _ = file_serve.stage_file(src, max_downloads=5)
@@ -488,7 +487,7 @@ def test_stage_file_max_downloads_param(serve_dir: Path, tmp_path: Path):
 
 
 def test_stage_file_rejects_max_downloads_below_one(serve_dir: Path, tmp_path: Path):
-    # Ein 0-Download-Transfer wäre eine tote Route — fail-fast.
+    # a 0-download transfer would be a dead route — fail-fast.
     src = tmp_path / "n.bin"
     src.write_bytes(b"n")
     with pytest.raises(ValueError):
@@ -499,7 +498,7 @@ def test_stage_file_rejects_max_downloads_below_one(serve_dir: Path, tmp_path: P
 
 
 def test_build_storage_ref_shape():
-    # F4 FROZEN — Envelope v1 unverändert; parse_envelope gibt das dict roh zurück.
+    # F4 FROZEN — envelope v1 unchanged; parse_envelope returns the dict raw.
     ref = file_serve.build_storage_ref(
         "E4W3CBWQ", "/download/abcDEF-_123", "2026-09-06T18:00:00+00:00"
     )
@@ -561,8 +560,8 @@ class _Always404Handler(BaseHTTPRequestHandler):
 
 def _spawn(handler_cls) -> tuple[ThreadingHTTPServer, int]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
-    # D9-Cache wie im Daemon (Contract: Handler liest server._allow_ip);
-    # Test-Peer ist loopback → loopback-Allowlist genügt.
+    # D9 cache like in the daemon (contract: the handler reads server._allow_ip);
+    # the test peer is loopback → the loopback allowlist suffices.
     if hasattr(handler_cls, "_peer_allowed"):
         server._allow_ip = frozenset({"127.0.0.1", "::1"})  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -579,7 +578,7 @@ def test_probe_serve_true_on_health_ok():
 
 
 def test_probe_serve_false_on_non_200():
-    # Contract: True gdw. HTTP 200 — alles andere ist „nicht erreichbar“.
+    # contract: True iff HTTP 200 — anything else is "unreachable".
     server, port = _spawn(_Always404Handler)
     try:
         assert file_serve.probe_serve(port) is False
@@ -589,7 +588,7 @@ def test_probe_serve_false_on_non_200():
 
 
 def test_probe_serve_false_on_refused():
-    # Freien Port besorgen und schließen → Connection refused → False, kein Raise.
+    # grab a free port and close it → connection refused → False, no raise.
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -612,8 +611,8 @@ def test_unregister_after_transfer_method_override():
 
 
 def test_unregister_after_transfer_swallows_http_error():
-    # Best-Effort (Plan F6/TTL-Backstop): HTTP-Fehler nur loggen, kein Raise —
-    # ein gescheiterter Unregister darf den Download-Erfolg nicht brechen.
+    # best effort (plan F6/TTL backstop): log HTTP errors only, no raise —
+    # a failed unregister must not break the download success.
     client = MagicMock()
     client.unregister_temp_route.side_effect = httpx.ConnectError("boom")
     file_serve.unregister_after_transfer(client, "/download/abc")

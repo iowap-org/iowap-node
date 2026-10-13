@@ -1,16 +1,16 @@
-"""T-179 Task 5: complete-by-script (opt-in) im Daemon (Phase 2 Stubs).
+"""T-179 Task 5: complete-by-script (opt-in) in the daemon (phase 2 stubs).
 
-Jeder Test beginnt mit ``assert False  # TODO`` — Phase 3 (integrate)
-füllt die Körper. Der Contract kommt aus dem Plan (Task 5):
+Every test starts with ``assert False  # TODO`` — phase 3 (integrate)
+fills the bodies. The contract comes from the plan (Task 5):
 
-Capability-Flag ``config.complete_by_script: true`` → der Daemon versucht
-complete trotzdem (Fallback), ignoriert aber 404 mit dem Server-Muster
-``"not claimed by this node, or not in claimed status"`` sauber als
-success (tasks_completed + 1). Ohne Flag: failure wie bisher
-(Regressionsschutz für den stdout-Contract).
+Capability flag ``config.complete_by_script: true`` → the daemon attempts
+complete anyway (fallback), but cleanly treats a 404 carrying the server
+pattern ``"not claimed by this node, or not in claimed status"`` as
+success (tasks_completed + 1). Without the flag: failure as before
+(regression protection for the stdout contract).
 
-Realer Contract von ``SseDaemon._run_stage``: ``(cap, stage)`` — das Flag
-liegt in ``cap["config"]["complete_by_script"]``.
+Real contract of ``SseDaemon._run_stage``: ``(cap, stage)`` — the flag
+lives in ``cap["config"]["complete_by_script"]``.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from nodes.common import node_daemon
 
 
 class FakeExc(Exception):
-    """Exception mit httpx.HTTPStatusError-Fläche für _is_already_completed."""
+    """Exception with an httpx.HTTPStatusError surface for _is_already_completed."""
 
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(f"{status}: {detail}")
@@ -58,7 +58,7 @@ def _stage() -> dict:
 
 
 def test_is_already_completed_matches_404_claim_pattern():
-    # Server-Text (iowap-server/api/v2/scheduler.py:115): 404 + Detail-Muster
+    # server text (iowap-server/api/v2/scheduler.py:115): 404 + detail pattern
     # "not claimed by this node, or not in claimed status".
     assert node_daemon._is_already_completed(
         FakeExc(404, "stage s1 not claimed by this node, or not in claimed status")
@@ -66,20 +66,20 @@ def test_is_already_completed_matches_404_claim_pattern():
 
 
 def test_is_already_completed_rejects_other_status_or_detail():
-    # 404 ohne das Muster → NEIN (echter 404 bleibt ein Fehler).
+    # 404 without the pattern → NO (a real 404 stays an error).
     assert not node_daemon._is_already_completed(
         FakeExc(404, "stage not found")
     )
-    # Muster, aber kein 404 → NEIN.
+    # pattern but not a 404 → NO.
     assert not node_daemon._is_already_completed(
         FakeExc(409, "not claimed by this node, or not in claimed status")
     )
-    # Andere Exception-Klasse ohne response-Attribut → NEIN.
+    # different exception class without a response attribute → NO.
     assert not node_daemon._is_already_completed(ValueError("boom"))
 
 
 def test_script_complete_404_treated_as_done(daemon, monkeypatch, caplog):
-    # Flag gesetzt + 404-Muster → tasks_completed + 1, kein failure.
+    # flag set + 404 pattern → tasks_completed + 1, no failure.
     daemon.client.complete = MagicMock(
         side_effect=FakeExc(
             404, "stage s1 not claimed by this node, or not in claimed status"
@@ -90,14 +90,14 @@ def test_script_complete_404_treated_as_done(daemon, monkeypatch, caplog):
         MagicMock(return_value={"status": "ok", "stdout": "{}"}))
     with caplog.at_level(logging.INFO):
         rc = daemon._run_stage(_cap({"complete_by_script": True}), _stage())
-    assert rc is None  # _run_stage ist void — der Zähler ist der Contract
+    assert rc is None  # _run_stage is void — the counter is the contract
     assert daemon.tasks_completed == 1
     assert daemon.tasks_failed == 0
     assert "already completed by script" in caplog.text
 
 
 def test_no_flag_404_failure_as_before(daemon, monkeypatch):
-    # Flag NICHT gesetzt + 404 → failure-Pfad wie bisher (Regression).
+    # flag NOT set + 404 → failure path as before (regression).
     daemon.client.complete = MagicMock(
         side_effect=FakeExc(
             404, "stage s1 not claimed by this node, or not in claimed status"
@@ -112,8 +112,8 @@ def test_no_flag_404_failure_as_before(daemon, monkeypatch):
 
 
 def test_no_flag_normal_complete_unaffected(daemon, monkeypatch):
-    # Regression: stdout-Contract ohne Flag — normaler complete funktioniert
-    # exakt wie heute.
+    # regression: stdout contract without the flag — a normal complete works
+    # exactly as it does today.
     daemon.client.complete = MagicMock(return_value={"ok": True})
     monkeypatch.setattr(
         node_daemon, "run_handler",
@@ -124,8 +124,8 @@ def test_no_flag_normal_complete_unaffected(daemon, monkeypatch):
 
 
 def test_flag_with_real_error_still_fails(daemon, monkeypatch):
-    # Flag gesetzt, aber der Fehler ist KEIN 404-Muster (z. B. 500) →
-    # normaler Fehlerpfad (Plan: "bisheriger Fehlerpfad unverändert").
+    # flag set, but the error is NOT a 404 pattern (e.g. 500) →
+    # normal failure path (plan: "previous failure path unchanged").
     daemon.client.complete = MagicMock(side_effect=FakeExc(500, "internal server error"))
     monkeypatch.setattr(
         node_daemon, "run_handler",

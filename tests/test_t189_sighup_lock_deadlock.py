@@ -1,15 +1,16 @@
-"""T-189 (F2, HIGH): ``invalidate()`` darf nie den Load-Lock nehmen.
+"""T-189 (F2, HIGH): ``invalidate()`` must never take the load lock.
 
-Beleg aus dem Senior-Review 2026-09-30: ``ActiveProfileCache._lock`` ist ein
-nicht-reentranter ``threading.Lock``; ``get()`` hält ihn WÄHREND
-``validate_profile()`` (YAML-Parse). Der SIGHUP-Handler ruft
-``invalidate_active_cache()`` → nimmt denselben Lock → Self-Deadlock, weil
-Signal-Handler auf dem Main-Thread laufen und der Polling-Daemon
-``_claim_loop`` ebenfalls dort fährt. ``node-cli capabilities publish``
-feuert genau dieses Signal.
+Evidence from the senior review 2026-09-30: ``ActiveProfileCache._lock`` is a
+non-reentrant ``threading.Lock``; ``get()`` holds it WHILE
+``validate_profile()`` (YAML parse) runs. The SIGHUP handler calls
+``invalidate_active_cache()`` → takes the same lock → self-deadlock,
+because signal handlers run on the main thread and the polling daemon
+``_claim_loop`` runs there too. ``node-cli capabilities publish`` fires
+exactly this signal.
 
-Der Test bildet das nach: ein Thread ist mitten im Load, der Main-Thread
-ruft ``invalidate()``. Ohne Fix blockiert der Invalidierungs-Aufruf.
+The test reconstructs this: one thread is in the middle of the load
+while the main thread calls ``invalidate()``. Without the fix the
+invalidate call blocks.
 """
 from __future__ import annotations
 

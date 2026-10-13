@@ -105,7 +105,7 @@ def test_load_pct_clamped_at_100():
 @pytest.mark.parametrize("loadavg,cpu,expected", [
     (1.0, 2, 50.0),
     (2.0, 2, 100.0),
-    (2.63, 2, 100.0),   # der CT-902/906-Fall
+    (2.63, 2, 100.0),   # the CT-902/906 case
     (8.0, 1, 100.0),    # single-core spike
     (0.5, 4, 12.5),
 ])

@@ -1,9 +1,9 @@
-"""T-191 (F4, MED): stdout des Handlers braucht ein Größenlimit.
+"""T-191 (F4, MED): the handler's stdout needs a size limit.
 
-Beleg aus dem Senior-Review 2026-09-30: ``subprocess.run(capture_output=
-True)`` puffert unbounded; ein Handler, der versehentlich eine Riesendatei
-nach stdout schreibt, killt den Node-Daemon (OOM) — denselben Prozess, der
-Agent/Serve/Heartbeat hält.
+Evidence from the senior review 2026-09-30: ``subprocess.run(capture_output=
+True)`` buffers unbounded; a handler that accidentally writes a giant file
+to stdout kills the node daemon (OOM) — the same process that holds
+Agent/Serve/Heartbeat.
 """
 from __future__ import annotations
 

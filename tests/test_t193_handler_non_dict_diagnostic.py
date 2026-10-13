@@ -1,10 +1,10 @@
-"""T-193 (F6, MED): ``_handle`` als Nicht-dict darf den Stage-Run nicht abbrechen.
+"""T-193 (F6, MED): ``_handle`` as a non-dict must not abort the stage run.
 
-Beleg aus dem Senior-Review 2026-09-30: liefert ein konformer Handler ein
-``completed``-Envelope MIT ``_handler`` als Nicht-dict, wirft
-``parsed["_handler"]["stderr"] = …`` einen ``TypeError``. Im Daemon bricht
-damit ``_run_stage`` VOR ``client.complete()`` ab → Stage läuft in den
-Lease-Timeout statt gemeldet zu werden.
+Evidence from the senior review 2026-09-30: if a conforming handler
+returns a ``completed`` envelope WITH ``_handler`` as a non-dict,
+``parsed["_handler"]["stderr"] = …`` raises a ``TypeError``. In the
+daemon ``_run_stage`` then breaks BEFORE ``client.complete()`` → the
+stage runs into the lease timeout instead of being reported.
 """
 from __future__ import annotations
 

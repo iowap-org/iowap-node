@@ -1,14 +1,14 @@
-"""T-179: hp put/get — Script-Primitives über node-cli (Phase 2 Stubs).
+"""T-179: hp put/get — script primitives via node-cli (phase 2 stubs).
 
-Jeder Test beginnt mit ``assert False  # TODO`` — Phase 3 (integrate)
-füllt die Körper. Die Test-Namen und -Intents sind bereits die
-Vertrags-Checkliste aus dem Plan (Task 2/2b/3) und F2 (Phase 1):
-Signaturen, Exit-Codes (0 ok / 1 Fehler / 2 usage) und stdout-Form
-(GENAU EINE compacte JSON-Zeile) werden hier eingespielt.
+Every test starts with ``assert False  # TODO`` — phase 3 (integrate)
+fills the bodies. The test names and intents are already the contract
+checklist from the plan (Task 2/2b/3) and F2 (phase 1): signatures,
+exit codes (0 ok / 1 error / 2 usage) and the stdout form (EXACTLY ONE
+compact JSON line) are put in place here.
 
-Technik: FakeClient/MagicMock wie tests/conftest.py (nur sys.path-Bootstrap);
-``cli_hp`` importiert node_cli NICHT (F2.2), Tests patchen
-``cli_hp._load_capability_modes`` (F2.11 Monkeypatch-Surface).
+Technique: FakeClient/MagicMock like tests/conftest.py (only a
+sys.path bootstrap); ``cli_hp`` does NOT import node_cli (F2.2), tests
+patch ``cli_hp._load_capability_modes`` (F2.11 monkeypatch surface).
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _modes(monkeypatch, modes: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# decide_mode (Task 2 + Task 2b — geteilter Entscheid-Punkt)
+# decide_mode (Task 2 + Task 2b — shared decision point)
 # ---------------------------------------------------------------------------
 
 
@@ -68,22 +68,22 @@ def test_decide_mode_respects_threshold_inline_over_limit():
 
 
 def test_decide_mode_respects_threshold_artifact_over_limit():
-    # artifact über explizites Limit → Stufe wird übersprungen (inline
-    # passt); explizite 0 verbietet artifact komplett.
+    # artifact above the explicit limit → tier skipped (inline
+    # fits); an explicit 0 forbids artifact entirely.
     th = {"max_inline_bytes": 100, "max_artifact_bytes": 50}
     assert cli_hp.decide_mode(60, ["inline", "artifact"], th) == "inline"
     assert (
         cli_hp.decide_mode(60, ["inline", "artifact"], {"max_artifact_bytes": 0})
         == "inline"
     )
-    # artifact über Limit, inline nicht angeboten, bridge nicht angeboten
+    # artifact above the limit, inline not offered, bridge not offered
     # → ValueError.
     with pytest.raises(ValueError):
         cli_hp.decide_mode(60, ["artifact"], {"max_artifact_bytes": 50})
 
 
 def test_decide_mode_no_mode_fits_raises_valueerror():
-    # FROZEN Meldung (F2.4): beide Stufen über Limit + keine bridge.
+    # FROZEN message (F2.4): both tiers above the limit + no bridge.
     with pytest.raises(ValueError) as excinfo:
         cli_hp.decide_mode(
             100,
@@ -124,11 +124,11 @@ def test_decide_mode_force_overrides_size_logic():
 
 
 def test_cli_file_choose_mode_delegates_and_keeps_zero_default_semantics():
-    # cli_file materialisiert die 0-Defaults: fehlender Server-Key = Stufe
-    # verboten (anders als decide_mode allein, wo fehlend = unbegrenzt).
+    # cli_file materializes the 0-defaults: a missing server key = tier
+    # forbidden (unlike decide_mode alone, where missing = unlimited).
     from nodes.common.cli import cli_file
 
-    # Beide Schwellwerte fehlen (transfer_cfg leer) → nichts passt.
+    # both thresholds missing (transfer_cfg empty) → nothing fits.
     with pytest.raises(SystemExit) as excinfo:
         cli_file._choose_mode(10, {}, ["inline", "artifact"])
     msg = str(excinfo.value)
@@ -145,7 +145,7 @@ def test_cli_file_choose_mode_identical_ladder_decisions():
     assert cli_file._choose_mode(500, cfg, ["artifact", "bridge"]) == "bridge"
     assert cli_file._choose_mode(150, cfg, ["artifact", "bridge"]) == "artifact"
     assert cli_file._choose_mode(500, cfg, ["bridge"]) == "bridge"
-    # force-Pfad bleibt unverändert (SystemExit, nicht ValueError).
+    # the force path stays unchanged (SystemExit, not ValueError).
     with pytest.raises(SystemExit) as excinfo:
         cli_file._choose_mode(10, cfg, ["inline"], force="bridge")
     assert "--force 'bridge' not supported by capability" in str(excinfo.value)
@@ -159,7 +159,7 @@ def test_cli_file_choose_mode_identical_ladder_decisions():
 
 def test_put_small_file_prefers_inline(tmp_path, client, monkeypatch, capsys):
     # Plan-Snippet (Task 2): Datei b"hello" in tmp_path; _load_capability_modes
-    # gepatcht → {"upload_modes": ["inline"]}; rc = cli_hp.cmd_put(client,
+    # patched → {"upload_modes": ["inline"]}; rc = cli_hp.cmd_put(client,
     # cap="cap.x", path=f, name=None); stdout (capsys) → json.loads →
     # __iowap_ref__.src == "inline", size_bytes == 5, rc == 0.
     f = tmp_path / "hello.txt"
@@ -197,7 +197,7 @@ def test_put_missing_file_returns_exit_2(tmp_path, client):
 
 def test_put_decide_mode_valueerror_returns_exit_1(
         tmp_path, client, monkeypatch, capsys):
-    # Datei zu groß für jede Stufe → stderr-Meldung + return 1 (F2.7/8).
+    # file too large for every tier → stderr message + return 1 (F2.7/8).
     f = tmp_path / "big.bin"
     f.write_bytes(b"x" * 10)
     _modes(monkeypatch, ["inline", "artifact"])
@@ -212,7 +212,7 @@ def test_put_decide_mode_valueerror_returns_exit_1(
 
 def test_put_artifact_without_artifact_id_returns_exit_1(
         tmp_path, client, monkeypatch):
-    # upload_artifact liefert kein artifact_id → stderr + return 1 (F2-Vertrag).
+    # upload_artifact returns no artifact_id → stderr + return 1 (F2 contract).
     f = tmp_path / "blob.bin"
     f.write_bytes(b"0123456789")
     _modes(monkeypatch, ["artifact"])
@@ -220,9 +220,9 @@ def test_put_artifact_without_artifact_id_returns_exit_1(
     assert cli_hp.cmd_put(client, cap="cap.x", path=f) == 1
 
 
-# (T-166 Phase 3: die MVP-Grenz-Pins test_put_bridge_raises_notimplementederror
-# und test_get_bridge_not_supported_returns_exit_1 sind ersetzt — bridge-put/get
-# sind implementiert, Verträge jetzt in tests/test_t166_hp_bridge.py.)
+# (T-166 phase 3: the MVP edge pins test_put_bridge_raises_notimplementederror
+# and test_get_bridge_not_supported_returns_exit_1 are replaced — bridge put/get
+# are implemented, contracts now live in tests/test_t166_hp_bridge.py.)
 
 
 def test_put_name_override_sets_envelope_filename(tmp_path, client, monkeypatch, capsys):
@@ -237,7 +237,7 @@ def test_put_name_override_sets_envelope_filename(tmp_path, client, monkeypatch,
 
 def test_put_prints_exactly_one_compact_json_line(
         tmp_path, client, monkeypatch, capsys):
-    # F2.8: stdout-Vertragsform — eine Zeile, envelope.dump + "\n".
+    # F2.8: stdout contract form — one line, envelope.dump + "\n".
     f = tmp_path / "hello.txt"
     f.write_bytes(b"hello")
     _modes(monkeypatch, ["inline"])
@@ -245,13 +245,13 @@ def test_put_prints_exactly_one_compact_json_line(
     out = capsys.readouterr().out
     assert out.count("\n") == 1
     assert out.endswith("\n")
-    # compact: keine Leerzeichen nach Trennern.
+    # compact: no spaces after separators.
     assert ": " not in out and ", " not in out
 
 
 def test_put_out_none_resolves_sys_stdout_at_call_time(
         tmp_path, client, monkeypatch, capsys):
-    # F2.1: out=None → sys.stdout zur CALL-ZEIT (capsys-Kompatibilität).
+    # F2.1: out=None → sys.stdout AT CALL TIME (capsys compatibility).
     f = tmp_path / "hello.txt"
     f.write_bytes(b"hello")
     _modes(monkeypatch, ["inline"])
@@ -262,7 +262,7 @@ def test_put_out_none_resolves_sys_stdout_at_call_time(
 
 def test_put_reads_size_via_stat_not_full_file(
         tmp_path, client, monkeypatch):
-    # F2.9: size via path.stat().st_size, Bytes erst nach der Entscheidung.
+    # F2.9: size via path.stat().st_size, bytes only after the decision.
     f = tmp_path / "blob.bin"
     f.write_bytes(b"0" * 10)
     _modes(monkeypatch, ["artifact"])
@@ -279,8 +279,8 @@ def test_put_reads_size_via_stat_not_full_file(
     monkeypatch.setattr(pathlib.Path, "read_bytes", spy)
     rc = cli_hp.cmd_put(client, cap="cap.x", path=f)
     assert rc == 0
-    # artifact-Pfad: Bytes NIE ganz gelesen (nur der Upload-Stream des
-    # Clients — hier MagicMock, also kein read_bytes).
+    # artifact path: bytes NEVER read in full (only the client upload stream
+    # — here MagicMock, so no read_bytes).
     assert read_calls == []
 
 
@@ -355,8 +355,8 @@ def test_get_invalid_envelope_returns_exit_1(client, tmp_path, capsys):
 
 
 def test_get_filename_sanitized_no_traversal(client, tmp_path, capsys):
-    # F2-Vertrag: filename aus dem Umschlag ist NICHT trustbar (keine
-    # ".."/absoluten Pfade).
+    # F2 contract: the filename from the envelope is NOT trustable (no
+    # ".."/absolute paths).
     env = _inline_envelope(b"evil", "../../etc/passwd")
     out_dir = tmp_path / "out"
     rc = cli_hp.cmd_get(client, envelope=env, out_dir=out_dir)
@@ -377,7 +377,7 @@ def test_get_sha256_mismatch_returns_exit_1(client, tmp_path, capsys):
 
 
 def test_get_out_dir_created_when_missing(client, tmp_path, capsys):
-    # mkdir(parents=True, exist_ok=True) — auch bei output-Override.
+    # mkdir(parents=True, exist_ok=True) — also with an output override.
     deep = tmp_path / "a" / "b" / "c"
     env = _inline_envelope(b"data", "f.txt")
     rc = cli_hp.cmd_get(client, envelope=env, out_dir=deep)
@@ -410,8 +410,8 @@ def test_get_prints_path_size_bytes_src_json_line(client, tmp_path, capsys):
 
 def test_get_output_override_writes_to_given_path(client, tmp_path, capsys):
     env = _inline_envelope(b"payload", "orig.txt")
-    # output-Override im out_dir-Unterordner: cmd_get legt out_dir an
-    # (Vertrag), target darunter ist neu.
+    # output override inside an out_dir subfolder: cmd_get creates out_dir
+    # (contract), the target below it is new.
     out_dir = tmp_path / "out"
     target = out_dir / "renamed.bin"
     rc = cli_hp.cmd_get(
@@ -419,7 +419,7 @@ def test_get_output_override_writes_to_given_path(client, tmp_path, capsys):
     )
     assert rc == 0
     assert target.read_bytes() == b"payload"
-    # Orig-Filename wird NICHT angelegt (output hat Vorrang).
+    # the original filename is NOT created (output takes precedence).
     assert not (out_dir / "orig.txt").exists()
 
 
@@ -478,7 +478,7 @@ def test_dispatch_get_reads_envelope_from_stdin(
 
 
 def test_dispatch_get_invalid_json_returns_exit_2(client, tmp_path, capsys):
-    # usage-Fehler: ungültiges JSON → return 2 (F2.7).
+    # usage error: invalid JSON → return 2 (F2.7).
     import argparse
 
     args = argparse.Namespace(
@@ -508,19 +508,19 @@ def test_dispatch_get_delegates_to_cmd_get(client, tmp_path, monkeypatch):
     assert cli_hp.dispatch_get(client, args) == 0
     assert seen["envelope"] == env
     assert seen["output"] == tmp_path / "t.bin"
-    # out_dir=None → default_out_dir() mit RELAY_TASK_ID (F2.6).
+    # out_dir=None → default_out_dir() from RELAY_TASK_ID (F2.6).
     assert seen["out_dir"] == Path.home() / ".relay" / "tmp" / "t_99"
 
 
 # ---------------------------------------------------------------------------
-# Signaturen-Vertrag (Phase 1 FROZEN — inspect-basiert, wie F4 verifiziert)
+# signature contract (phase 1 FROZEN — inspect-based, verified like F4)
 # ---------------------------------------------------------------------------
 
 
 def test_cli_hp_signatures_unchanged():
-    # F2: inspect.signature-Output ist verbindlich — Phase 2/3 dürfen die
-    # Signaturen nicht ändern. (Annotationen zeigen als Strings, weil das
-    # Modul `from __future__ import annotations` nutzt.)
+    # F2: the inspect.signature output is binding — phase 2/3 must not
+    # change the signatures. (annotations show as strings because the
+    # module uses `from __future__ import annotations`.)
     assert str(inspect.signature(cli_hp.decide_mode)) == (
         "(size_bytes: 'int', upload_modes: 'list[str]', "
         "thresholds: 'dict[str, int] | None' = None, force: 'str | None' = None) -> 'str'"
@@ -543,7 +543,7 @@ def test_cli_hp_signatures_unchanged():
 
 
 def test_module_has_no_node_cli_import():
-    # F2.2: cli_hp importiert node_cli NICHT (kein circular import).
+    # F2.2: cli_hp does NOT import node_cli (no circular import).
     src = inspect.getsource(cli_hp)
     assert "import node_cli" not in src
     assert "from nodes.common import node_cli" not in src
