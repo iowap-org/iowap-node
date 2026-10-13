@@ -1,31 +1,31 @@
 """T-179: handler primitives — ``node-cli hp put/get``.
 
-Scripts reden ausschließlich mit dem lokalen node-cli (Subprocess-Contract,
-Board-Entscheid ①): Token, Ladder-Verhandlung und Transfer-Formate bleiben
-im CLI-Prozess. Scripts sehen nur Pfad rein / Pfad raus.
+Scripts talk exclusively to the local node-cli (subprocess contract,
+board decision ①): token, ladder negotiation and the transfer formats
+stay inside the CLI process. Scripts see only a path in / a path out.
 
 FROZEN CONTRACT (Phase 1, T-179)
 ================================
-Jede öffentliche Signatur in diesem Modul ist unveränderlich für Phase 2
-(scaffold: Test-Stubs + Parser-Boilerplate) und Phase 3 (integrate:
-Implementierung). Insbesondere FROZEN:
+Every public signature in this module is immutable across Phase 2
+(scaffold: test stubs + parser boilerplate) and Phase 3 (integrate:
+implementation). Specifically FROZEN:
 
-* Parameternamen + -reihenfolge (Tests der Phasen 2/3 rufen positional
-  und keyword auf — beides muss stabil bleiben),
-* Rückgabe-Typen (``int`` exit codes; ``0`` ok / ``1`` Fehler / ``2`` usage),
-* stdout-Verträge (je EINE compacte JSON-Zeile, siehe cmd_put/cmd_get),
-* Fehler-Meldungs-Strings von ``decide_mode`` (Task 2b benötigt sie
-  byte-identisch zu ``cli_file._choose_mode``).
+* parameter names + order (the Phase 2/3 tests call them positionally
+  and by keyword — both must remain stable),
+* return types (``int`` exit codes; ``0`` ok / ``1`` error / ``2`` usage),
+* stdout contracts (exactly ONE compact JSON line each, see cmd_put/cmd_get),
+* the error message strings of ``decide_mode`` (Task 2b needs them
+  byte-identical to ``cli_file._choose_mode``).
 
-Haus-Konvention (wie cli_file/cli_task, T-117 split): CLI-Handler sind
-``(client, args) -> int`` und werden bei der Parser-Registrierung in
-``node_cli.py`` mit ``with_client(...)`` dekoriert. Dieses Modul
-importiert ``node_cli`` NICHT (kein circular import, RelayClient-
-Monkeypatch bleibt funktionsfähig).
+House convention (like cli_file/cli_task, T-117 split): CLI handlers are
+``(client, args) -> int`` and get the ``with_client(...)`` decorator at
+parser registration time in ``node_cli.py``. This module does NOT import
+``node_cli`` (no circular import; the RelayClient monkeypatch stays
+functional).
 
-Phase 1 liefert nur Signaturen + Vertrags-Dokumentation; die Körper
-werden in Phase 3 implementiert (Phase 2 erzeugt ``NotImplementedError``-
-Test-Stubs, die hier bereits vorbereitet sind).
+Phase 1 delivers only signatures + contract documentation; the bodies
+are implemented in Phase 3 (Phase 2 produces ``NotImplementedError``
+test stubs that are already prepared here).
 """
 
 from __future__ import annotations
@@ -52,8 +52,8 @@ from nodes.common.envelope import (  # noqa: F401
 )
 from nodes.common.relay_client import RelayClient
 
-# Reihenfolge = Präferenz; erste erlaubte Stufe, deren Schwellwert passt.
-# FROZEN: Reihenfolge ist Vertragsbestandteil (inline < artifact < bridge).
+# Order = preference; the first allowed rung whose threshold fits.
+# FROZEN: the order is part of the contract (inline < artifact < bridge).
 _LADDER = ("inline", "artifact", "bridge")
 
 
@@ -63,46 +63,47 @@ def decide_mode(
     thresholds: dict[str, int] | None = None,
     force: str | None = None,
 ) -> str:
-    """Wähle die Ladder-Stufe für eine Datei — der geteilte Entscheid-Punkt.
+    """Pick the ladder rung for a file — the shared decision point.
 
-    FROZEN SIGNATUR (Phase 1) — Task 2b lässt ``cli_file._choose_mode``
-    über diese Funktion laufen; deshalb sind auch die Fehlermeldungen
-    FROZEN (siehe unten).
+    FROZEN SIGNATURE (Phase 1) — Task 2b routes ``cli_file._choose_mode``
+    through this function; that is why the error messages are FROZEN
+    too (see below).
 
-    Semantik
-    --------
-    * Ladder-Präferenz: erste Stufe aus ``_LADDER``, die (a) in
-      ``upload_modes`` erlaubt ist und (b) deren Schwellwert die Größe
-      trägt.
-    * ``thresholds``: Keys ``max_inline_bytes`` / ``max_artifact_bytes``
-      (vom Server, ``RelayClient.get_transfer_config()``).
-      - Key fehlt oder ist ``None`` → Stufe gilt als **unbegrenzt**
-        (Safety-Net ist der Server-Payload-Limit, kein stiller Fehler).
-      - Explicit ``0`` → Stufe **verboten** (cli_file-Semantik bei
-        fehlender Server-Antwort).
-      - ``thresholds=None`` → alle Stufen unbegrenzt → reine
-        Präferenz-Wahl nach ``upload_modes``.
-    * ``bridge`` hat keinen Threshold-Key (Server definiert keinen) →
-      unbegrenzt, wird gewählt, sobald inline/artifact nicht passen.
-    * ``force``: überschreibt die Wahl, muss aber in ``upload_modes``
-      sein. Wird VOR der Größen-Logik geprüft (wie cli_file).
+    Semantics
+    ---------
+    * Ladder preference: the first rung of ``_LADDER`` that (a) is
+      allowed in ``upload_modes`` and (b) whose threshold carries the
+      size.
+    * ``thresholds``: keys ``max_inline_bytes`` / ``max_artifact_bytes``
+      (from the server, ``RelayClient.get_transfer_config()``).
+      - Missing key or ``None`` → the rung counts as **unlimited**
+        (the safety net is the server payload limit, not a silent
+        failure).
+      - Explicit ``0`` → rung **forbidden** (cli_file semantics when
+        the server response is missing).
+      - ``thresholds=None`` → all rungs unlimited → pure preference
+        choice according to ``upload_modes``.
+    * ``bridge`` has no threshold key (the server defines none) →
+      unlimited; chosen as soon as inline/artifact do not fit.
+    * ``force``: overrides the choice but must be in ``upload_modes``.
+      Checked BEFORE the size logic (like cli_file).
 
-    Fehler (FROZEN, byte-identisch zu ``cli_file._choose_mode``)
+    Errors (FROZEN, byte-identical to ``cli_file._choose_mode``)
     ------------------------------------------------------------
-    Raise ``ValueError`` (Library-Level; CLI-Adapter wandeln in
-    SystemExit/exit-code um):
+    Raise ``ValueError`` (library level; the CLI adapter converts it
+    to SystemExit/exit code):
 
-    * force nicht erlaubt::
+    * force not allowed::
 
         --force {force!r} not supported by capability (upload_modes={upload_modes})
 
-    * keine Stufe passt::
+    * no rung fits::
 
         file too big: {size_bytes} bytes, capability supports only {upload_modes} (server ladder: inline<={max_inline}, artifact<={max_artifact})
 
-      mit ``max_inline = (thresholds or {}).get("max_inline_bytes", 0)`` usw.
+      with ``max_inline = (thresholds or {}).get("max_inline_bytes", 0)`` etc.
 
-    Task-2b-Mapping (FROZEN, verhaltensidentisch) in ``cli_file.py``::
+    Task-2b mapping (FROZEN, behavior-identical) in ``cli_file.py``::
 
         thresholds = {
             "max_inline_bytes": int(transfer_cfg.get("max_inline_bytes", 0)),
@@ -113,9 +114,9 @@ def decide_mode(
         except ValueError as exc:
             raise SystemExit(str(exc))
 
-    (cli_file materialisiert die 0-Defaults explizit — damit bleibt das
-    "fehlender Key = unbegrenzt"-Verhalten von decide_mode ohne Wirkung
-    auf den cli_file-Pfad.)
+    (cli_file materializes the 0-defaults explicitly — this keeps the
+    "missing key = unlimited" behavior of decide_mode without any
+    effect on the cli_file path.)
     """
     if force is not None:
         if force not in upload_modes:
@@ -145,12 +146,12 @@ def decide_mode(
 
 
 def _serve_count_from_env() -> int:
-    """``--serve-count``-Äquivalent aus ``IOWAP_SERVE_COUNT`` (1–10, F6).
+    """``--serve-count`` equivalent from ``IOWAP_SERVE_COUNT`` (1–10, F6).
 
-    Die FROZEN ``cmd_put``-Signatur (F9) hat keinen ``serve_count``-Param —
-    der F6-Mehrfach-Download läuft über die Env (0/ungültig/out-of-range →
-    1, kein WARNING-Spam für den Normalfall). Ein ``< 1``-Wert würde in
-    ``stage_file`` eh fail-fasten — hier normalisieren wir sauber auf 1.
+    The FROZEN ``cmd_put`` signature (F9) has no ``serve_count`` param —
+    the F6 multi-download runs through the env (0/invalid/out-of-range →
+    1, no WARNING spam for the normal case). A value ``< 1`` would fail
+    fast in ``stage_file`` anyway — here we normalize cleanly to 1.
     """
     raw = os.environ.get("IOWAP_SERVE_COUNT")
     if not raw:
@@ -170,53 +171,54 @@ def cmd_put(
     name: str | None = None,
     out: TextIO | None = None,
 ) -> int:
-    """``node-cli hp put <path> --cap <cap>`` → Umschlag-JSON auf stdout.
+    """``node-cli hp put <path> --cap <cap>`` → envelope JSON on stdout.
 
-    FROZEN SIGNATUR (Phase 1).
+    FROZEN SIGNATURE (Phase 1).
 
-    Vertrag
-    -------
-    * Lädt Capability-Details via ``_load_capability_modes(client, cap)``
-      (``upload_modes``; dessen ``SystemExit`` bei HTTP-/Lookup-Fehlern
-      propagiert — ``main()`` wandelt es in den exit code).
-    * Thresholds via ``client.get_transfer_config()``; defensiv extrahieren
-      (nur echte ints übernehmen, alles andere = Key weglassen → Stufe
-      unbegrenzt). HTTP-Fehler hier → ``return 1`` mit klarer Meldung.
-    * ``mode = decide_mode(size, upload_modes, thresholds)`` mit
-      ``size = path.stat().st_size`` (NICHT erst ganz einlesen — artifact/
-      bridge sollen große Dateien ohne RAM-Peak handhaben; inline liest
-      die Bytes erst nach der Entscheidung). ``ValueError`` aus
-      decide_mode → stderr + ``return 1``.
+    Contract
+    --------
+    * Loads the capability details via ``_load_capability_modes(client,
+      cap)`` (``upload_modes``; its ``SystemExit`` on HTTP/lookup errors
+      propagates — ``main()`` turns it into the exit code).
+    * Thresholds via ``client.get_transfer_config()``; extract defensively
+      (take only real ints, anything else = omit the key → the rung is
+      unlimited). HTTP errors here → ``return 1`` with a clear message.
+    * ``mode = decide_mode(size, upload_modes, thresholds)`` with
+      ``size = path.stat().st_size`` (do NOT read the entire file first —
+      artifact/bridge are meant to handle big files without a RAM peak;
+      inline reads the bytes only after the decision). ``ValueError``
+      from decide_mode → stderr + ``return 1``.
     * inline  → ``make_envelope(src="inline", filename=name or path.name,
       data=<bytes>)``.
     * artifact → ``client.upload_artifact(path, name=name or path.name)``;
-      fehlende ``artifact_id`` in der Antwort → stderr + ``return 1``;
-      sonst ``make_envelope(src="artifact", ..., artifact_id=aid)``.
-    * bridge → ``raise NotImplementedError("bridge-put folgt in Task 3")``
-      (MVP-Grenze, bewusst — Envelope kann bridge, der Kanal-Open-Flow
-      nicht; siehe Plan T-179).
-    * stdout: GENAU EINE Zeile — compactes JSON des Umschlags
-      (``envelope.dump``) + ``"\\n"``. ``out=None`` → ``sys.stdout`` zur
-      CALL-ZEIT (nicht Import-Zeit!) auflösen, damit pytest-capsys
-      funktioniert. Keine anderen stdout-Ausgaben; Fehler → stderr.
-    * Exit codes: ``0`` ok, ``1`` Transfer-/Protokollfehler,
-      ``2`` usage (Datei fehlt — geprüft im dispatch_put).
+      a missing ``artifact_id`` in the response → stderr + ``return 1``;
+      otherwise ``make_envelope(src="artifact", ..., artifact_id=aid)``.
+    * bridge → ``raise NotImplementedError("bridge-put follows in Task
+      3")`` (deliberate MVP boundary — the envelope can carry bridge, the
+      channel-open flow cannot; see plan T-179).
+    * stdout: EXACTLY ONE line — compact JSON of the envelope
+      (``envelope.dump``) + ``"\n"``. ``out=None`` → resolve
+      ``sys.stdout`` at CALL time (not import time!) so that pytest-capsys
+      works. No other stdout output; errors → stderr.
+    * Exit codes: ``0`` ok, ``1`` transfer/protocol error,
+      ``2`` usage (file missing — checked in dispatch_put).
 
-    ``name`` überschreibt den Dateinamen im Umschlag (Default: path.name).
+    ``name`` overrides the filename inside the envelope (default:
+    path.name).
     """
     if not path.is_file():
         print(f"file not found: {path}", file=sys.stderr)
         return 2
 
-    # 1. Capability-Details (upload_modes); SystemExit bei Lookup-Fehlern
-    #    propagiert — main() macht daraus den exit code.
+    # 1. Capability details (upload_modes); SystemExit on lookup errors
+    #    propagates — main() turns it into the exit code.
     cap_detail = _load_capability_modes(client, cap)
     upload_modes = list(
         cap_detail.get("upload_modes") or ["inline", "artifact", "bridge"]
     )
 
-    # 2. Server-Treppen-Konfig laden; defensiv: nur echte ints übernehmen,
-    #    alles andere = Key weglassen → Stufe unbegrenzt (F2.5-Semantik).
+    # 2. Load the server ladder config; defensively: take only real ints,
+    #    anything else = omit the key → rung unlimited (F2.5 semantics).
     try:
         transfer_cfg = client.get_transfer_config()
     except httpx.HTTPError as exc:
@@ -229,7 +231,7 @@ def cmd_put(
             if isinstance(value, int) and not isinstance(value, bool):
                 thresholds[key] = value
 
-    # 3. Größe via stat (F2.9) — Bytes erst nach der Entscheidung lesen.
+    # 3. Size via stat (F2.9) — read the bytes only after the decision.
     size = path.stat().st_size
     try:
         mode = decide_mode(size, upload_modes, thresholds)
@@ -237,7 +239,7 @@ def cmd_put(
         print(str(exc), file=sys.stderr)
         return 1
 
-    # 4. Umschlag je Modus bauen.
+    # 4. Build the envelope per mode.
     if mode == "inline":
         envelope = make_envelope(
             src="inline", filename=name or path.name, data=path.read_bytes()
@@ -275,10 +277,10 @@ def cmd_put(
             path, max_downloads=_serve_count_from_env()
         )
         route_path = f"/download/{transfer_id}"
-        # D8: advertise-Host aus dem Manifest (Daemon schreibt die
-        # serve_host()-Adresse) — der Proxy dialt die Adresse WÖRTLICH,
-        # also muss sie von der Relay-Maschine auflösbar sein, nicht nur
-        # von hier (Live: LXC 903 ↔ Hermes-Host).
+        # D8: advertise host from the manifest (the daemon writes the
+        # serve_host() address) — the proxy dials the address VERBATIM,
+        # so it must be resolvable from the relay machine, not only from
+        # here (live: LXC 903 ↔ Hermes host).
         upstream = (
             f"http://{manifest.get('host', file_serve.SERVE_HOST)}:{manifest['port']}"
             f"/transfer/{transfer_id}"
@@ -297,7 +299,7 @@ def cmd_put(
                 description="iowap ephemeral file serve (T-166)",
             )
         except httpx.HTTPError as exc:
-            # Kein stale Rest ohne Route (F6): staged Datei + Manifest weg.
+            # No stale left-over without a route (F6): staged file + manifest gone.
             file_serve.discard_staged(transfer_id)
             print(f"hp put: route registration failed: {exc}", file=sys.stderr)
             return 1
@@ -306,11 +308,11 @@ def cmd_put(
             filename=name or path.name,
             storage_ref=file_serve.build_storage_ref(node_id, route_path, expires),
             sha256=sha_hex,
-            size_bytes=size,  # vor stage_file gelesen — Move-Semantik (F5)
+            size_bytes=size,  # read before stage_file — move semantics (F5)
         )
 
-    # 5. stdout: GENAU EINE compacte JSON-Zeile; out=None → sys.stdout zur
-    #    CALL-Zeit (capsys-kompatibel).
+    # 5. stdout: EXACTLY ONE compact JSON line; out=None → sys.stdout at
+    #    CALL time (capsys-compatible).
     stream = out if out is not None else sys.stdout
     stream.write(dump(envelope) + "\n")
     return 0
@@ -324,35 +326,35 @@ def cmd_get(
     output: Path | None = None,
     out: TextIO | None = None,
 ) -> int:
-    """``node-cli hp get`` → Umschlag auflösen, Datei lokal ablegen.
+    """``node-cli hp get`` → resolve the envelope, store the file locally.
 
-    FROZEN SIGNATUR (Phase 1).
+    FROZEN SIGNATURE (Phase 1).
 
-    Vertrag
-    -------
+    Contract
+    --------
     * ``parse_envelope(envelope)`` → ``(src, ref)``; ``EnvelopeError`` →
-      ``"hp get: {exc}"`` auf stderr + ``return 1``.
-    * Dateiname: ``envelope["__iowap_ref__"].get("filename") or
-      "download"`` (Filename aus dem Umschlag ist NICHT trustbar als
-      Pfad — keine ``..``/absoluten Pfade akzeptieren, sanitizen).
-    * ``out_dir`` wird bei Bedarf angelegt (``mkdir(parents=True,
-      exist_ok=True)``) — auch bei ``output``-Override, damit der
-      Default-Pfad-Zweig konsistent bleibt.
+      ``"hp get: {exc}"`` on stderr + ``return 1``.
+    * Filename: ``envelope["__iowap_ref__"].get("filename") or
+      "download"`` (the filename from the envelope is NOT trustworthy
+      as a path — do not accept ``..``/absolute paths, sanitize).
+    * ``out_dir`` is created when needed (``mkdir(parents=True,
+      exist_ok=True)``) — also for the ``output`` override, so the
+      default-path branch stays consistent.
     * inline  → ``target = output or out_dir / filename``;
       ``target.write_bytes(ref)``.
     * artifact → ``target = client.download_artifact(ref, output or
-      out_dir / filename)`` (RelayClient kümmert sich ums Streaming).
+      out_dir / filename)`` (RelayClient takes care of the streaming).
     * bridge  → stderr ``"hp get: bridge resolution not supported by
-      this node-cli version"`` + ``return 1`` (MVP-Grenze, exakter
-      Meldungsstring ist FROZEN — Plan T-179 Task 3).
-    * sha256-Verifikation, wenn der Umschlag einen trägt (inline trägt
-      immer einen): mismatch → stderr
+      this node-cli version"`` + ``return 1`` (MVP boundary; the exact
+      message string is FROZEN — plan T-179 Task 3).
+    * sha256 verification when the envelope carries one (inline always
+      does): mismatch → stderr
       ``"hp get: sha256 mismatch ({digest} != {expected})"`` + ``return 1``.
-    * stdout: GENAU EINE Zeile — compactes JSON
+    * stdout: EXACTLY ONE line — compact JSON
       ``{"path": str(target), "size_bytes": target.stat().st_size,
-      "src": <mode>}`` + ``"\\n"`` (Keys FROZEN). ``out=None`` →
-      ``sys.stdout`` zur CALL-ZEIT (capsys-kompatibel).
-    * Exit codes: ``0`` ok, ``1`` Auflöse-/Verifikationsfehler,
+      "src": <mode>}`` + ``"\n"`` (keys FROZEN). ``out=None`` →
+      ``sys.stdout`` at CALL time (capsys-compatible).
+    * Exit codes: ``0`` ok, ``1`` resolution/verification error,
       ``2`` usage.
     """
     try:
@@ -361,8 +363,8 @@ def cmd_get(
         print(f"hp get: {exc}", file=sys.stderr)
         return 1
 
-    # Dateiname aus dem Umschlag ist NICHT trustbar (keine ../absoluten
-    # Pfade) — sanitizen.
+    # The filename from the envelope is NOT trustworthy (no
+    # ../absolute paths) — sanitize.
     raw_name = (envelope.get(ENVELOPE_KEY) or {}).get("filename")
     if not isinstance(raw_name, str) or not raw_name:
         raw_name = "download"
@@ -393,9 +395,9 @@ def cmd_get(
         if client.token:
             headers["Authorization"] = f"Bearer {client.token}"
         try:
-            # POST mit leerem Body — der Proxy matcht die registrierte
-            # Methode exakt (route_registry.py:194-200); GET auf einer
-            # POST-Route wäre 404. Der Serve-Handler ignoriert den Body.
+            # POST with an empty body — the proxy matches the registered
+            # method exactly (route_registry.py:194-200); GET on a POST
+            # route would be 404. The serve handler ignores the body.
             with httpx.stream(
                 "POST",
                 url,
@@ -414,24 +416,25 @@ def cmd_get(
             except OSError:
                 pass
             return 1
-        # F7: Der Empfänger unregistriert NIEMALS (nicht Owner) —
-        # Ephemeralität/TTL liegt beim Sender-Daemon.
+        # F7: the receiver NEVER unregisters (it is not the owner) —
+        # ephemerality/TTL is the sender daemon's job.
 
     elif src == "inline":
         target = output or out_dir / safe_name
         target.write_bytes(ref)
-    else:  # artifact — RelayClient kümmert sich ums Streaming.
+    else:  # artifact — RelayClient takes care of the streaming.
         try:
             target = client.download_artifact(ref, output or out_dir / safe_name)
         except httpx.HTTPError as exc:
             print(f"hp get: artifact download failed: {exc}", file=sys.stderr)
             return 1
 
-    # sha256-Verifikation, wenn der Umschlag einen trägt (inline immer).
+    # sha256 verification when the envelope carries one (inline always does).
     expected = (envelope.get(ENVELOPE_KEY) or {}).get("sha256")
     if expected:
-        # T-192 (F5): chunkwise hashen (64 KiB) — kein RAM-Peak auf dem
-        # großen Bridge-/Artifact-Pfad, den der Rest bewusst streamt.
+        # T-192 (F5): hash chunkwise (64 KiB) — no RAM peak on the
+        # big bridge/artifact path, which the rest of the flow streams
+        # deliberately.
         digest = file_serve._sha256_file(target)
         if digest != expected:
             print(
@@ -460,34 +463,34 @@ def cmd_get(
 
 
 def default_out_dir() -> Path:
-    """Default-Ablageverzeichnis für ``hp get``: ``~/.relay/tmp/<task_id>/``.
+    """Default drop directory for ``hp get``: ``~/.relay/tmp/<task_id>/``.
 
-    FROZEN SIGNATUR (Phase 1). Task-ID aus ``RELAY_TASK_ID`` (vom
-    handler_runner an jeden Handler vergeben, siehe
-    ``handler_runner.HANDLER_ENV_KEYS``); ohne Handler-Kontext →
-    ``adhoc``. Analog zu ``node_config.BASE_DIR`` (``~/.relay``) —
-    derselbe Stamm wie Profile/Meta, kein neuer Wurzelordner.
+    FROZEN SIGNATURE (Phase 1). Task ID from ``RELAY_TASK_ID`` (assigned
+    by the handler_runner to every handler, see
+    ``handler_runner.HANDLER_ENV_KEYS``); without handler context →
+    ``adhoc``. Mirrors ``node_config.BASE_DIR`` (``~/.relay``) — the same
+    root as profile/meta, no new root folder.
     """
     task_id = __import__("os").environ.get("RELAY_TASK_ID") or "adhoc"
     return Path.home() / ".relay" / "tmp" / task_id
 
 
 def dispatch_put(client: RelayClient, args: argparse.Namespace) -> int:
-    """Argparse-Adapter: ``node-cli hp put <path> --cap <cap> [--name N]``.
+    """Argparse adapter: ``node-cli hp put <path> --cap <cap> [--name N]``.
 
-    FROZEN SIGNATUR (Phase 1). Haus-Konvention ``(client, args) -> int``;
-    Registrierung in ``node_cli.py`` (Phase 2)::
+    FROZEN SIGNATURE (Phase 1). House convention ``(client, args) -> int``;
+    registration in ``node_cli.py`` (Phase 2)::
 
         p_hp_put.set_defaults(func=with_client(cli_hp.dispatch_put))
 
-    Namespace-Attribute (FROZEN, Phase 2 registriert genau diese):
+    Namespace attributes (FROZEN, Phase 2 registers exactly these):
 
-    * ``args.path``   (str, positional)   — Datei, existenzgeprüft hier:
-      fehlt → stderr + ``return 2`` (wie cli_file._cmd_file_send).
+    * ``args.path``   (str, positional)   — file, existence-checked here:
+      missing → stderr + ``return 2`` (like cli_file._cmd_file_send).
     * ``args.cap``    (str, --cap, required)
     * ``args.name``   (str | None, --name, default None)
 
-    Delegiert an ``cmd_put(client, cap=args.cap, path=Path(args.path),
+    Delegates to ``cmd_put(client, cap=args.cap, path=Path(args.path),
     name=args.name)``.
     """
     path = Path(args.path)
@@ -498,23 +501,23 @@ def dispatch_put(client: RelayClient, args: argparse.Namespace) -> int:
 
 
 def dispatch_get(client: RelayClient, args: argparse.Namespace) -> int:
-    """Argparse-Adapter: ``node-cli hp get [--file F] [--output P]``.
+    """Argparse adapter: ``node-cli hp get [--file F] [--output P]``.
 
-    FROZEN SIGNATUR (Phase 1). Haus-Konvention ``(client, args) -> int``;
-    Registrierung in ``node_cli.py`` (Phase 2)::
+    FROZEN SIGNATURE (Phase 1). House convention ``(client, args) -> int``;
+    registration in ``node_cli.py`` (Phase 2)::
 
         p_hp_get.set_defaults(func=with_client(cli_hp.dispatch_get))
 
-    Namespace-Attribute (FROZEN, Phase 2 registriert genau diese):
+    Namespace attributes (FROZEN, Phase 2 registers exactly these):
 
-    * ``args.file``    (str | None, --file, default None) — Umschlag-JSON
-      als Datei; ohne --file wird stdin gelesen (``sys.stdin``, Call-Zeit).
+    * ``args.file``    (str | None, --file, default None) — envelope JSON
+      as a file; without --file stdin is read (``sys.stdin``, call time).
     * ``args.output``  (Path | None, --output/-o, default None)
-    * ``args.out_dir`` (Path | None, --out-dir, default None) — Override,
-      sonst ``default_out_dir()``.
+    * ``args.out_dir`` (Path | None, --out-dir, default None) — override,
+      otherwise ``default_out_dir()``.
 
-    Eingabe muss ein JSON-Objekt mit ``__iowap_ref__`` sein; ungültiges
-    JSON → stderr + ``return 2`` (usage). Delegiert an ``cmd_get``.
+    The input must be a JSON object with ``__iowap_ref__``; invalid
+    JSON → stderr + ``return 2`` (usage). Delegates to ``cmd_get``.
     """
     if args.file:
         try:

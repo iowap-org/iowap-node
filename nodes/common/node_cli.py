@@ -201,15 +201,15 @@ class Daemon:
 
     def _write_status(self, error: str | None = None) -> None:
         caps = load_active_profile()
-        # T-108: Loop-Detection — wenn der Daemon in einem Auth-Fehler-Loop
-        # festhängt (Backoff > 0 + 401/403), reichern wir den Fehler-String
-        # an und markieren den Status als degraded, so dass `node info`/
-        # Dashboard und Log klar signalisieren, dass die Token-Datei
-        # geprüft oder der Daemon neu gestartet werden muss.
+        # T-108: loop detection — when the daemon is stuck in an auth
+        # error loop (backoff > 0 + 401/403), we enrich the error string
+        # and mark the status as degraded so that `node info`/dashboard
+        # and the log clearly signal that the token file must be checked
+        # or the daemon restarted.
         backoff = self.client._current_backoff()
         auth_loop = backoff > 0 and "401" in (error or "")
         if auth_loop:
-            error = (error or "") + " | AUTH-LOOP: token invalid — Datei prüfen oder Daemon neu starten"
+            error = (error or "") + " | AUTH-LOOP: token invalid — check the token file or restart the daemon"
         status = {
             "pid": os.getpid(),
             "node_id": self.client.meta.get("node_id"),
@@ -260,8 +260,8 @@ class Daemon:
                 error = str(exc)
                 log.error("heartbeat error: %s", exc)
             self._write_status(error=error)
-            # T-108: Backoff nach wiederholten Auth-Fehlschlägen, damit
-            # der Daemon nicht alle ~8s hämmert. Nach Erfolg sofort 0.
+            # T-108: back off after repeated auth failures so the daemon
+            # does not hammer every ~8s. Immediately 0 after success.
             sleep_interval = interval + self.client._current_backoff()
             for _ in range(max(1, int(sleep_interval))):
                 if self._stop_event.is_set():
@@ -402,7 +402,7 @@ class Daemon:
                 log.error("claim loop http error %s", exc.response.status_code)
             except Exception as exc:  # noqa: BLE001
                 log.error("claim loop error: %s", exc)
-            # T-108: Backoff nach wiederholten Auth-Fehlschlägen.
+            # T-108: back off after repeated auth failures.
             sleep_interval = interval + self.client._current_backoff()
             for _ in range(max(1, int(sleep_interval))):
                 if self._stop_event.is_set():
@@ -431,11 +431,12 @@ class Daemon:
         self._write_status()
         self._start_heartbeat_thread()
         self._start_probe_thread()
-        # T-166 (F1): ephemeral file serve im Daemon — der CLI-Prozess stirbt
-        # nach dem stdout-Envelope, der Serve-Endpoint muss überleben.
-        # Spiegelt die Verdrahtung aus node_daemon.py (SSE-Daemon); Bind-
-        # Fehler (Port belegt) = WARNING, der Node läuft ohne Serve weiter
-        # (hp put bridge meldet dann den F5-Fehler statt zu crashen).
+        # T-166 (F1): ephemeral file serve inside the daemon — the CLI
+        # process dies after the stdout envelope, the serve endpoint must
+        # survive. Mirrors the wiring from node_daemon.py (SSE daemon);
+        # bind errors (port in use) = WARNING, the node keeps running
+        # without serve (hp put bridge then reports the F5 error instead
+        # of crashing).
         try:
             file_serve.set_on_exhausted(
                 lambda route_path: file_serve.unregister_after_transfer(
@@ -1110,8 +1111,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_file_get.set_defaults(func=with_client(cli_file._cmd_file_get))
 
     # T-179: hp put/get — handler primitives for handler scripts.
-    # Scripts reden ausschließlich mit dem lokalen node-cli (Subprocess-
-    # Contract); Token/Ladder/Envelope-Verhandlung bleiben im CLI-Prozess.
+    # Scripts talk exclusively to the local node-cli (subprocess
+    # contract); token/ladder/envelope negotiation stays in the CLI
+    # process.
     p_hp = sub.add_parser(
         "hp", help="Handler primitives for handler scripts (T-179)."
     )

@@ -359,9 +359,9 @@ class RelayClient:
         # proactively before it expires. ``None`` means unknown (e.g.
         # a migrated legacy token or a server that omits expires_at).
         self.token_expires_at: str | None = data.get("expires_at") if data else None
-        # T-108: Auth-Failure-Streak für exponentiellen Backoff. Nach
-        # wiederholten 401/403-Fehlschlägen erhöht der Daemon den
-        # Heartbeat/Claim-Abstand, statt in einem engen Loop zu hämmern.
+        # T-108: auth-failure streak for exponential backoff. After
+        # repeated 401/403 failures the daemon increases the
+        # heartbeat/claim spacing instead of hammering in a tight loop.
         self._auth_fail_streak = 0
         # T-182: fixed-interval credential maintenance. The daemons call
         # maybe_refresh_token() every heartbeat tick; the client tracks
@@ -534,10 +534,11 @@ class RelayClient:
         if recovered is not None:
             self._register_backoff_success()
             return True
-        # Refresh + Recovery fehlgeschlagen: Datei neu lesen — ein externer
-        # Prozess/manueller Eingriff könnte den Token inzwischen korrigiert
-        # haben (T-108 Task 1). Backoff-Streak erhöhen, damit der Daemon
-        # nicht in einem engen 401-Loop verharrt (T-108 Task 2).
+        # Refresh + recovery failed: re-read the file from disk — an
+        # external process/manual intervention might have corrected the
+        # token in the meantime (T-108 task 1). Increment the backoff
+        # streak so the daemon does not stay in a tight 401 loop (T-108
+        # task 2).
         self._reload_token_from_disk()
         self._register_backoff_failure()
         return False
@@ -789,13 +790,13 @@ class RelayClient:
                 entry["description"] = cap.get("description")
             if cap.get("input_schema"):
                 entry["input_schema"] = cap.get("input_schema")
-            # T-164: upload_modes (inline/artifact/bridge) an den Server
-            # durchreichen, damit die node-capabilities-Tabelle sie speichert
-            # und file send/file get sie für die Modus-Wahl nutzen kann.
+            # T-164: forward upload_modes (inline/artifact/bridge) to the
+            # server so the node-capabilities table stores them and file
+            # send/file get can use them for mode selection.
             if cap.get("upload_modes"):
                 entry["upload_modes"] = cap.get("upload_modes")
-            # T-004 (iowap-flow): result_path_hints an den Server durchreichen,
-            # damit der Flow-Planner valide ${ref.result.path}-Pfade kennt.
+            # T-004 (iowap-flow): forward result_path_hints to the server
+            # so the flow planner knows valid ${ref.result.path} paths.
             if cap.get("result_path_hints"):
                 entry["result_path_hints"] = cap.get("result_path_hints")
             cap_status.append(entry)

@@ -1,26 +1,27 @@
-"""T-179: Envelope-Format v1 für Handler-Primitives (put/get).
+"""T-179: Envelope format v1 for handler primitives (put/get).
 
-Vertrag: Sender-node-cli ersetzt ein Payload-Feld durch den Umschlag,
-Empfänger-node-cli erkennt __iowap_ref__ und löst auf. Scripts sehen
-nur Pfad rein / Pfad raus.
+Contract: the sending node-cli replaces a payload field with the
+envelope; the receiving node-cli recognizes ``__iowap_ref__`` and
+resolves it. Scripts see only a path in / a path out.
 
-FROZEN (Phase 1, T-179) — jede Signatur in diesem Modul ist unveränderlich
-für Phase 2 (scaffold) und Phase 3 (integrate). Feld-Semantik v1:
+FROZEN (Phase 1, T-179) — every signature in this module is immutable
+for Phase 2 (scaffold) and Phase 3 (integrate). Field semantics v1:
 
-* ``v``           — Version, muss exakt 1 sein (alles andere: harter Fehler,
-                    forward-compat bricht alte Empfänger nie still).
-* ``src``         — ``inline`` | ``artifact`` | ``bridge``; unbekannt → Fehler.
-* ``filename``    — Anzeigename im Umschlag (nicht trustbar als Pfad —
-                    Empfänger sanitize).
-* ``size_bytes``  — inline: exakte Byte-Länge; sonst 0 (Platzhalter, Größe
-                    steht erst nach Auflösung fest).
-* ``sha256``      — inline: immer gesetzt (berechnet); sonst optional, der
-                    Sender kann ihn kennt, wenn er die Bytes gesehen hat.
-* ``data_base64`` — nur bei src=inline.
-* ``artifact_id`` — nur bei src=artifact.
-* ``storage_ref`` — nur bei src=bridge (``{type, id, ...}``).
+* ``v``           — version, must be exactly 1 (anything else: hard
+                    error; forward-compat never silently breaks old
+                    receivers).
+* ``src``         — ``inline`` | ``artifact`` | ``bridge``; unknown → error.
+* ``filename``    — display name inside the envelope (not trustworthy
+                    as a path — receivers sanitize).
+* ``size_bytes``  — inline: exact byte length; otherwise 0 (placeholder,
+                    the size only becomes fixed after resolution).
+* ``sha256``      — inline: always set (computed); otherwise optional; the
+                    sender may know it when it saw the bytes.
+* ``data_base64`` — only for src=inline.
+* ``artifact_id`` — only for src=artifact.
+* ``storage_ref`` — only for src=bridge (``{type, id, ...}``).
 
-Der Umschlag ersetzt das Payload-Feld komplett (kein Wrapper-Objekt).
+The envelope replaces the payload field completely (no wrapper object).
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ SUPPORTED_SOURCES = ("inline", "artifact", "bridge")
 
 
 class EnvelopeError(ValueError):
-    """Umschlag fehlt, ist fremd oder trägt ein nicht unterstütztes Format."""
+    """Envelope missing, foreign, or carrying an unsupported format."""
 
 
 def make_envelope(
@@ -48,17 +49,18 @@ def make_envelope(
     sha256: str | None = None,
     size_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Baue einen v1-Umschlag. ``data`` nur bei src=inline (wird base64-kodiert).
+    """Build a v1 envelope. ``data`` only for src=inline (base64-encoded).
 
-    Raise: EnvelopeError bei unbekanntem ``src`` oder widersprüchlicher
-    Feld-Kombination (inline+artifact_id, inline ohne data, bridge+data …).
-    Fail-fast am Erzeuger — ein ungültiger Umschlag soll nie das Repo
-    verlassen, damit der Empfänger nur noch transport-bedingte Fehler sieht.
+    Raise: EnvelopeError on unknown ``src`` or a contradicting field
+    combination (inline+artifact_id, inline without data, bridge+data …).
+    Fail fast at the producer — an invalid envelope should never leave
+    the repo, so the receiver only sees transport-related errors.
 
-    ``size_bytes``: tatsächliche Dateigröße für artifact/bridge (dort ist
-    ``data`` nicht im Umschlag). Default ``0`` — T-166-Lieferung hatte
-    fälschlich immer ``0`` für Nicht-Inline (Bugfix nach Live-E2E).
-    Negativ oder kleiner als eine gesetzte ``data``-Länge → EnvelopeError.
+    ``size_bytes``: actual file size for artifact/bridge (there the
+    ``data`` is not inside the envelope). Default ``0`` — the original
+    T-166 delivery erroneously always had ``0`` for non-inline
+    (bugfix after the live E2E). Negative or smaller than a set
+    ``data`` length → EnvelopeError.
     """
     if not isinstance(size_bytes, int) or isinstance(size_bytes, bool):
         if size_bytes is not None:
@@ -88,17 +90,17 @@ def make_envelope(
         "v": SUPPORTED_VERSION,
         "src": src,
         "filename": filename,
-        # inline: immer aus data hergeleitet; artifact/bridge: explizite
-        # Größe (Datei liegt nicht im Umschlag), Default 0.
+        # inline: always derived from data; artifact/bridge: explicit
+        # size (the file is not inside the envelope), default 0.
         "size_bytes": len(data) if data is not None else (
             size_bytes if size_bytes is not None else 0
         ),
     }
     if data is not None:
         ref["data_base64"] = base64.b64encode(data).decode("ascii")
-    # T-166 (F8): sha256 im Envelope — inline berechnet sie aus den Daten,
-    # bridge/artifact tragen den Sender-Hash explizit (F8-Verifizierung beim
-    # Empfänger auch ohne inline-Payload).
+    # T-166 (F8): sha256 in the envelope — inline computes it from the
+    # data, bridge/artifact carry the sender hash explicitly (F8
+    # verification at the receiver even without inline payload).
     if sha256 is not None:
         ref["sha256"] = sha256
     elif data is not None:
@@ -111,15 +113,15 @@ def make_envelope(
 
 
 def parse_envelope(envelope: dict[str, Any]) -> tuple[str, Any]:
-    """Validiere einen Umschlag, gib ``(src, rohe Referenz)`` zurück.
+    """Validate an envelope, return ``(src, raw reference)``.
 
-    inline   → zweiter Wert sind die dekodierten Bytes (``bytes``)
-    artifact → zweiter Wert ist die artifact_id (``str``)
-    bridge   → zweiter Wert ist das storage_ref-Dict
+    inline   → second value is the decoded bytes (``bytes``)
+    artifact → second value is the artifact_id (``str``)
+    bridge   → second value is the storage_ref dict
 
-    Raise: EnvelopeError bei fehlendem/widersprüchlichem Umschlag —
-    unbekannte ``v`` oder unbekanntes ``src`` brechen den Empfänger
-    laut (forward-compat: neue Modi brechen alte Empfänger nicht still).
+    Raise: EnvelopeError on a missing/contradicting envelope —
+    unknown ``v`` or unknown ``src`` breaks the receiver loudly
+    (forward-compat: new modes never break old receivers silently).
     """
     if not isinstance(envelope, dict) or ENVELOPE_KEY not in envelope:
         raise EnvelopeError(f"no {ENVELOPE_KEY} key — not an envelope")
@@ -139,7 +141,7 @@ def parse_envelope(envelope: dict[str, Any]) -> tuple[str, Any]:
         try:
             return src, base64.b64decode(raw)
         except (ValueError, TypeError) as exc:
-            # binascii.Error ist eine ValueError-Unterklasse.
+            # binascii.Error is a ValueError subclass.
             raise EnvelopeError(f"invalid base64 in inline envelope: {exc}") from exc
     if src == "artifact":
         artifact_id = ref.get("artifact_id")
@@ -153,14 +155,14 @@ def parse_envelope(envelope: dict[str, Any]) -> tuple[str, Any]:
 
 
 def is_envelope(value: Any) -> bool:
-    """True, wenn ``value`` ein dict mit dem ``__iowap_ref__``-Key ist.
+    """True if ``value`` is a dict with the ``__iowap_ref__`` key.
 
-    Reine Shape-Prüfung ohne Validierung — für "ist dieses Payload-Feld
-    ein Umschlag?"-Entscheidungen auf Empfängerseite.
+    Pure shape check without validation — for "is this payload field an
+    envelope?" decisions on the receiver side.
     """
     return isinstance(value, dict) and ENVELOPE_KEY in value
 
 
 def dump(envelope: dict[str, Any]) -> str:
-    """Serialisiere einen Umschlag als compactes JSON (Trennzeilen-frei)."""
+    """Serialize an envelope as compact JSON (no separator lines)."""
     return json.dumps(envelope, separators=(",", ":"))

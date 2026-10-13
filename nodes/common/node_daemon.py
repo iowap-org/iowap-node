@@ -286,14 +286,14 @@ class SseDaemon:
 
     def _write_status(self, error: str | None = None) -> None:
         caps = load_active_profile()
-        # T-108: Loop-Detection — wenn der Daemon in einem Auth-Fehler-Loop
-        # festhängt (Backoff > 0 + 401/403), reichern wir den Fehler-String
-        # an und markieren den Status als degraded. Zentrale Logik liegt
-        # im geteilten RelayClient (greift für beide Daemons).
+        # T-108: loop detection — when the daemon is stuck in an auth
+        # error loop (backoff > 0 + 401/403), we enrich the error string
+        # and mark the status as degraded. The core logic lives in the
+        # shared RelayClient (applies to both daemons).
         backoff = self.client._current_backoff()
         auth_loop = backoff > 0 and "401" in (error or "")
         if auth_loop:
-            error = (error or "") + " | AUTH-LOOP: token invalid — Datei prüfen oder Daemon neu starten"
+            error = (error or "") + " | AUTH-LOOP: token invalid — check the token file or restart the daemon"
         status = {
             "pid": os.getpid(),
             "node_id": self.client.meta.get("node_id"),
@@ -348,9 +348,10 @@ class SseDaemon:
                 error = str(exc)
                 log.error("heartbeat error: %s", exc)
             self._write_status(error=error)
-            # T-108: Backoff nach wiederholten Auth-Fehlschlägen (zentral
-            # im RelayClient). SSE-Reconnect bleibt separat via
-            # _RECONNECT_DELAY, da er andere Fehlerursachen abdeckt.
+            # T-108: back off after repeated auth failures (handled
+            # centrally in the RelayClient). SSE reconnect stays separate
+            # via _RECONNECT_DELAY because it covers different error
+            # causes.
             sleep_interval = interval + self.client._current_backoff()
             for _ in range(max(1, int(sleep_interval))):
                 if self._stop_event.is_set():
@@ -757,10 +758,10 @@ class SseDaemon:
                         self.tasks_completed += 1
                 log.info("completed stage %s", stage_id)
             except Exception as exc:  # noqa: BLE001
-                # T-179 Task 5: complete_by_script — wenn das Handler-Script
-                # den Stage selbst completed hat, antwortet das Relay mit
-                # dem 404 "not claimed"-Detail. Bei Opt-in zählt das als
-                # Erfolg, nicht als Fehler.
+                # T-179 task 5: complete_by_script — when the handler
+                # script completed the stage itself, the relay answers
+                # with the 404 "not claimed" detail. With opt-in that
+                # counts as success, not as failure.
                 script_complete = bool((cap.get("config") or {}).get(
                     "complete_by_script"
                 ))
@@ -824,10 +825,11 @@ class SseDaemon:
         self._write_status()
         self._start_heartbeat_thread()
         self._start_probe_thread()
-        # T-166 (F1): ephemeral file serve im Daemon — der CLI-Prozess stirbt
-        # nach dem stdout-Envelope, der Serve-Endpoint muss überleben. Bind-
-        # Fehler (Port belegt) = WARNING, der Node läuft ohne Serve weiter
-        # (hp put bridge meldet dann den F5-Fehler statt zu crashen).
+        # T-166 (F1): ephemeral file serve inside the daemon — the CLI
+        # process dies after the stdout envelope, the serve endpoint must
+        # survive. Bind errors (port in use) = WARNING, the node keeps
+        # running without serve (hp put bridge then reports the F5 error
+        # instead of crashing).
         try:
             file_serve.set_on_exhausted(
                 lambda route_path: file_serve.unregister_after_transfer(

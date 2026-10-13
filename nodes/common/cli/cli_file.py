@@ -187,22 +187,22 @@ def _cmd_file_send(client: RelayClient, args) -> int:
         return 2
     size = file_path.stat().st_size
 
-    # 1. Server-Treppen-Konfig laden.
+    # 1. Load the server ladder config.
     try:
         transfer_cfg = client.get_transfer_config()
     except httpx.HTTPError as exc:
         print(f"failed to load transfer config: {exc}", file=sys.stderr)
         return 1
 
-    # 2. Capability-Details laden (upload_modes).
+    # 2. Load capability details (upload_modes).
     cap_detail = _load_capability_modes(client, args.cap)
     upload_modes = list(cap_detail.get("upload_modes") or ["inline", "artifact", "bridge"])
 
-    # 3. Modus wählen.
+    # 3. Choose the mode.
     mode = _choose_mode(size, transfer_cfg, upload_modes, force=args.force)
 
-    # 4. Datei-Feld aus dem Capability-input_schema ableiten (wie file get):
-    #    storage.store → path, backup.create → source, sonst path.
+    # 4. Derive the file field from the capability input_schema (like
+    #    file get): storage.store → path, backup.create → source, else path.
     schema = cap_detail.get("input_schema") or {}
     fields = (schema.get("fields") or {}) if isinstance(schema, dict) else {}
     if "source" in fields:
@@ -210,7 +210,7 @@ def _cmd_file_send(client: RelayClient, args) -> int:
     else:
         file_field = "path"
 
-    # 5. Orchestrieren.
+    # 5. Orchestrate.
     if mode == "inline":
         data_b64 = base64.b64encode(file_path.read_bytes()).decode("ascii")
         payload: dict[str, Any] = {
@@ -245,7 +245,7 @@ def _cmd_file_send(client: RelayClient, args) -> int:
         _print_send_result(args, resp, mode, size, artifact_id=artifact_id)
         return 0
 
-    # mode == "bridge": Zwei-Schritt-Flow.
+    # mode == "bridge": two-step flow.
     result = _bridge_open_channel(client, args.cap, file_path, args)
     ref_id = result.get("backup_id") or result.get("channel_id")
     ref_type = "backup" if result.get("backup_id") else "channel"
@@ -293,14 +293,14 @@ def _print_send_result(
 
 
 def _cmd_file_get(client: RelayClient, args) -> int:
-    # Capability-Details laden → upload_modes + input_schema bestimmen die
-    # Feld-Interpretation von <ref>.
+    # Load capability details → upload_modes + input_schema determine how
+    # <ref> is interpreted.
     cap_detail = _load_capability_modes(client, args.cap)
     upload_modes = list(cap_detail.get("upload_modes") or ["inline", "artifact", "bridge"])
     schema = cap_detail.get("input_schema") or {}
     fields = (schema.get("fields") or {}) if isinstance(schema, dict) else {}
 
-    # Welches Payload-Feld trägt <ref>? Aus input_schema ableiten.
+    # Which payload field carries <ref>? Derived from input_schema.
     if "path" in fields:
         ref_field = "path"
     elif "backup_id" in fields:
@@ -315,8 +315,8 @@ def _cmd_file_get(client: RelayClient, args) -> int:
         )
         return 1
 
-    # Bridge-Download bevorzugt, wenn die Capability bridge anbietet —
-    # sonst inline (Task abschicken, Result enthält data_base64).
+    # Prefer the bridge download when the capability offers bridge —
+    # otherwise inline (submit the task, the result carries data_base64).
     if "bridge" in upload_modes and ref_field in ("backup_id", "channel_id"):
         return _file_get_bridge(client, args, ref_field)
     return _file_get_inline(client, args, ref_field)

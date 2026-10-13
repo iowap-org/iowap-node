@@ -1,46 +1,46 @@
-"""T-166: Ephemeral file serve — CLI→Daemon Handoff für ``hp put`` bridge.
+"""T-166: Ephemeral file serve — CLI→daemon handoff for ``hp put`` bridge.
 
-Der Sende-Node staged die Datei nach ``~/.relay/serve/{transfer_id}``
-und registriert eine temp Route, deren Upstream auf den Serve-Server im
-DAEMON zeigt (F1 — der CLI-Prozess stirbt nach dem Envelope, deshalb
-lebt der Endpoint im Dauerdienst). Der Empfänger pullt über den
-Relay-Proxy (F7). Nach ``max_downloads`` erfolgreichen Downloads (F6,
-Default 1) löscht der Daemon Datei + Manifest und unregistriert die
-Route (TTL-Sweep T-125 ist der Backstop).
+The sending node stages the file to ``~/.relay/serve/{transfer_id}``
+and registers a temp route whose upstream points at the serve server
+inside the DAEMON (F1 — the CLI process dies after the envelope, so
+the endpoint must live in the long-running service). The receiver
+pulls through the relay proxy (F7). After ``max_downloads`` successful
+downloads (F6, default 1) the daemon deletes file + manifest and
+unregisters the route (the TTL sweep T-125 is the backstop).
 
-FROZEN (Phase 1, T-166) — jede Signatur in diesem Modul ist unveränderlich
-für Phase 2 (scaffold) und Phase 3 (integrate):
+FROZEN (Phase 1, T-166) — every signature in this module is immutable
+for Phase 2 (scaffold) and Phase 3 (integrate):
 
-* ``serve_port()``            — env ``IOWAP_SERVE_PORT``, sonst 8792.
-* ``read_manifest()``        — serve.json lesen; ``None`` wenn fehlend/
-                                ungültig (der Normalfall ohne Daemon).
-* ``write_manifest(port)``    — atomar (tmp + os.replace) schreiben.
-* ``new_transfer_id()``      — ``secrets.token_urlsafe(16)`` → 22 Zeichen
-                                (≤64-Zeichen-Limit der Route-Registry).
-* ``stage_file(src)``        — staged nach ``SERVE_DIR``, berechnet sha256
-                                (F8), schreibt das F6-Manifest
+* ``serve_port()``            — env ``IOWAP_SERVE_PORT``, else 8792.
+* ``read_manifest()``        — read serve.json; ``None`` when missing/
+                                invalid (the normal case without a daemon).
+* ``write_manifest(port)``    — write atomically (tmp + os.replace).
+* ``new_transfer_id()``      — ``secrets.token_urlsafe(16)`` → 22 chars
+                                (≤64-char limit of the route registry).
+* ``stage_file(src)``        — stage to ``SERVE_DIR``, compute sha256
+                                (F8), write the F6 manifest
                                 ``{file, size, sha256, max_downloads}``.
-* ``build_storage_ref(...)``  — F4-Shape ``{type, node_id, path, expires_at}``
-                                (Envelope v1 unverändert).
-* ``proxy_url(...)``         — F7-URL-Shape, identisch zum
-                                ``unregister_temp_route``-Pfad (T-126).
-* ``probe_serve(port)``      — ``GET /health``; ``True`` gdw. HTTP 200.
-* ``EphemeralServeHandler``  — Skeleton; Phase 3 (Plan Task 2) füllt
+* ``build_storage_ref(...)``  — F4 shape ``{type, node_id, path, expires_at}``
+                                (envelope v1 unchanged).
+* ``proxy_url(...)``         — F7 URL shape, identical to the
+                                ``unregister_temp_route`` path (T-126).
+* ``probe_serve(port)``      — ``GET /health``; ``True`` iff HTTP 200.
+* ``EphemeralServeHandler``  — skeleton; Phase 3 (plan task 2) fills
                                 POST ``/transfer/{id}`` + GET ``/health``.
-* ``start_serve_thread()``   — Skeleton; Phase 3 (Plan Task 3) füllt den
-                                Bind + Manifest-Write + daemon-Thread.
-* ``unregister_after_transfer`` — best-effort Route-Löschung (F6), Fehler
-                                nur loggen (TTL ist der Backstop).
+* ``start_serve_thread()``   — skeleton; Phase 3 (plan task 3) fills the
+                                bind + manifest write + daemon thread.
+* ``unregister_after_transfer`` — best-effort route deletion (F6),
+                                log errors only (TTL is the backstop).
 
-Phase-1-Präzisierungen (FROZEN, im Plan unter „Phase 1" dokumentiert):
+Phase-1 refinements (FROZEN, documented in the plan under "Phase 1"):
 
-* ``stage_file`` bekommt das keyword-only-Argument ``max_downloads=1``
-  (F6) — call-kompatibel zum Plan-Snippet ``stage_file(path)``.
-* ``read_manifest()`` validiert port streng (int 1–65535, bool ausdrücklich
-  ausgeschlossen) — cmd_put (Task 4) bekommt eine getypte Garantie.
-* ``serve_port()`` toleriert ungültige Env-Werte mit WARNING + Default
-  (Haus-Pattern: relay_client._effective_config) statt SystemExit.
-* ``probe_serve`` wertet nur HTTP 200 als „erreichbar“.
+* ``stage_file`` gets the keyword-only argument ``max_downloads=1``
+  (F6) — call-compatible with the plan snippet ``stage_file(path)``.
+* ``read_manifest()`` validates the port strictly (int 1–65535, bool
+  explicitly excluded) — cmd_put (task 4) gets a typed guarantee.
+* ``serve_port()`` tolerates invalid env values with WARNING + default
+  (house pattern: relay_client._effective_config) instead of SystemExit.
+* ``probe_serve`` counts only HTTP 200 as "reachable".
 """
 from __future__ import annotations
 
@@ -65,29 +65,29 @@ from nodes.common.relay_client import RelayClient
 log = logging.getLogger("file-serve")
 
 SERVE_PORT_DEFAULT = 8792
-SERVE_HOST = "127.0.0.1"          # Default — der Relay-Proxy ist der einzige Client.
-# T-166 Live-Smoke-Deviation (D8): Relay und Node laufen auf verschiedenen
-# Maschinen (LXC 903 vs. Hermes-Host). Der Proxy dialt die registrierte
-# upstream-Adresse WÖRTLICH — ``127.0.0.1`` zeigt dort ins Leere (502).
-# ``IOWAP_SERVE_HOST`` überschreibt Bind- UND Advertise-Adresse (z. B. die
-# LAN-IP); Default bleibt das Single-Host-Verhalten des Plans.
+SERVE_HOST = "127.0.0.1"          # Default — the relay proxy is the only client.
+# T-166 live-smoke deviation (D8): the relay and the node run on different
+# machines (LXC 903 vs. Hermes host). The proxy dials the registered
+# upstream address VERBATIM — ``127.0.0.1`` points into the void there (502).
+# ``IOWAP_SERVE_HOST`` overrides the bind AND advertise address (e.g. the
+# LAN IP); the default remains the plan's single-host behavior.
 
-# T-166 D9: Source-IP-Allowlist (T-128-Muster vom Storage-Node). Bindet
-# der Serve auf 0.0.0.0, sind die Transfer-Endpunkte im LAN erreichbar —
-# akzeptiert werden nur Verbindungen von der Relay-Server-IP (T-128:
-# "der Relay-Proxy ist der einzige legitime Dialer") plus loopback für
-# den lokalen CLI-Probe-Pfad. Fail-closed, wenn die IP nicht auflösbar
-# ist. X-Forwarded-For wird nie ausgewertet — der Socket-Peer ist
-# autoritativ (sonst spoofbar).
+# T-166 D9: source-IP allowlist (T-128 pattern from the storage node). When
+# the serve binds to 0.0.0.0, the transfer endpoints are reachable in the
+# LAN — only connections from the relay server IP (T-128: "the relay proxy
+# is the only legitimate dialer") plus loopback for the local CLI probe
+# path are accepted. Fail closed when the IP is not resolvable.
+# X-Forwarded-For is never evaluated — the socket peer is
+# authoritative (otherwise spoofable).
 
 
 def serve_host() -> str:
-    """Bind-/Advertise-Host: env ``IOWAP_SERVE_HOST``, sonst ``SERVE_HOST``.
+    """Bind/advertise host: env ``IOWAP_SERVE_HOST``, else ``SERVE_HOST``.
 
-    Haus-Pattern wie ``serve_port()``: ein unsinniger Env-Wert (leer,
-    Whitespace, >255 Zeichen) → WARNING + Default, kein harter Absturz.
-    Wird im Daemon UND im CLI ausgewertet — beide laufen auf derselben
-    Maschine, also liefert derselbe Env-Satz dieselbe Adresse.
+    House pattern like ``serve_port()``: a nonsensical env value (empty,
+    whitespace, >255 chars) → WARNING + default, no hard crash.
+    Evaluated in the daemon AND in the CLI — both run on the same
+    machine, so the same env set yields the same address.
     """
     raw = os.environ.get("IOWAP_SERVE_HOST")
     if raw is None:
@@ -100,12 +100,12 @@ def serve_host() -> str:
 
 
 def _relay_host_ip() -> str | None:
-    """Erste IPv4 des Relay-Hostnamens aus der Node-Relay-Config (D9).
+    """First IPv4 of the relay hostname from the node relay config (D9).
 
-    Reihenfolge wie ``_effective_config()``/Storage-Node-T-128: env
-    ``RELAY_BASE_URL`` → relay_config.json ``base_url`` → mDNS-Discovery.
-    ``None``, wenn nichts davon auflösbar ist (Caller entscheidet dann
-    fail-closed).
+    Order like ``_effective_config()``/storage-node T-128: env
+    ``RELAY_BASE_URL`` → relay_config.json ``base_url`` → mDNS discovery.
+    ``None`` when none of these is resolvable (the caller then decides
+    to fail closed).
     """
     import socket
     from urllib.parse import urlparse
@@ -139,15 +139,15 @@ def _relay_host_ip() -> str | None:
 
 
 def serve_allow_ip() -> str | None:
-    """Die eine erlaubte Client-IP am Serve-Endpoint (D9).
+    """The single allowed client IP at the serve endpoint (D9).
 
-    Kette: env ``IOWAP_SERVE_ALLOW`` (explizite Override) → Relay-IP aus
-    der Node-Config. ``None`` = nicht auflösbar → LAN-Peers werden
-    abgewiesen (fail-closed für den Remote-Pfad); der lokale Probe-Pfad
-    (loopback/advertise-IP) bleibt unabhängig davon bedienbar (D8-Lektion:
-    ``hp put`` probt die advertise-Adresse — Peer ist die eigene LAN-IP).
-    Wird beim Server-Bind gecacht (T-128-Semantik: Relay-IP-Änderung →
-    Daemon-Restart).
+    Chain: env ``IOWAP_SERVE_ALLOW`` (explicit override) → relay IP from
+    the node config. ``None`` = not resolvable → LAN peers are rejected
+    (fail closed for the remote path); the local probe path
+    (loopback/advertise IP) stays servable regardless (D8 lesson:
+    ``hp put`` probes the advertise address — the peer is the node's
+    own LAN IP). Cached at server bind time (T-128 semantics: relay IP
+    change → daemon restart).
     """
     raw = os.environ.get("IOWAP_SERVE_ALLOW")
     if raw and raw.strip():
@@ -164,19 +164,19 @@ def serve_allow_ip() -> str | None:
 
 
 def _allowed_peers() -> frozenset[str]:
-    """Vollständige Peer-Allowlist (D9): Relay + advertise + loopback.
+    """Complete peer allowlist (D9): relay + advertise + loopback.
 
-    Legitime Clients am Serve-Endpoint:
+    Legitimate clients at the serve endpoint:
 
-    * der Relay-Proxy (Relay-IP — ``serve_allow_ip()``),
-    * die Node-CLI auf demselben Host (loopback; via advertise-Adresse
-      getarnt als die eigene LAN-IP — D8: ``probe_serve`` zielt auf die
-      advertise-Adresse, daher ist die eigene advertise-IP ebenfalls
-      erlaubt),
-    * loopback generell (Probe, lokale Tools).
+    * the relay proxy (relay IP — ``serve_allow_ip()``),
+    * the node CLI on the same host (loopback; disguised via the
+      advertise address as the node's own LAN IP — D8: ``probe_serve``
+      targets the advertise address, so the node's own advertise IP is
+      allowed too),
+    * loopback in general (probe, local tools).
 
-    Ein Relay-IP-Ausfall degradiert nur den Remote-Pfad (WARNING beim
-    Bind), nie den lokalen.
+    A relay-IP outage degrades only the remote path (WARNING at bind),
+    never the local one.
     """
     import socket
 
@@ -198,14 +198,14 @@ MANIFEST_PATH = Path.home() / ".relay" / "serve.json"
 
 _ROUTE_BASE = "/relay/v2/dashboard/api/node-routes"
 
-# --- Laufzeitzustand (Task 2/3) ------------------------------------------------
-# TTL für staged Reste ohne Route (Sweep-Backstop, F6); Sweep-Intervall im
-# Serve-Thread. transfer_id: genau 22 url-safe Zeichen (F2).
+# --- Runtime state (task 2/3) -------------------------------------------------
+# TTL for staged leftovers without a route (sweep backstop, F6); sweep
+# interval inside the serve thread. transfer_id: exactly 22 url-safe chars (F2).
 _SERVE_TTL_SECONDS = 3600.0
 _SWEEP_INTERVAL = 60.0
 _TRANSFER_RE = re.compile(r"^/transfer/([A-Za-z0-9_-]{22})$")
 
-# Daemon-Laufzeit: Tests patchen diese Modul-Attribute (Call-Zeit-Lookup).
+# Daemon runtime: tests patch these module attributes (call-time lookup).
 _serve_thread: threading.Thread | None = None
 _serve_server: ThreadingHTTPServer | None = None
 _ON_EXHAUSTED: Callable[[str], None] | None = None
@@ -214,33 +214,35 @@ _transfer_lock = threading.Lock()
 
 
 def set_on_exhausted(hook: Callable[[str], None] | None) -> None:
-    """Hook ``(route_path) -> None`` nach erschöpftem Transfer (F6).
+    """Hook ``(route_path) -> None`` after an exhausted transfer (F6).
 
-    Der Daemon verdrahtet hier ``unregister_after_transfer`` (Closure über
-    seinen RelayClient); Tests setzen einen Spy. Aufruf erfolgt im
-    Request-Thread NACH vollständig gesendeter Antwort — Hook-Fehler
-    werden geloggt, brechen den Download nie.
+    The daemon wires ``unregister_after_transfer`` here (a closure over
+    its RelayClient); tests set a spy. Invocation happens in the request
+    thread AFTER the fully sent response — hook errors are logged and
+    never break the download.
     """
     global _ON_EXHAUSTED
     _ON_EXHAUSTED = hook
 
 
 def discard_staged(transfer_id: str) -> None:
-    """Staged Datei + Transfer-Manifest entfernen (Rollback nach Register-Fail).
+    """Remove the staged file + transfer manifest (rollback after a register failure).
 
-    ``hp put`` (Task 4) ruft das, wenn die Route-Registrierung scheitert —
-    kein stale Rest ohne Route im SERVE_DIR (der Sweep ist der Backstop).
+    ``hp put`` (task 4) calls this when the route registration fails —
+    no stale leftover without a route in SERVE_DIR (the sweep is the
+    backstop).
     """
     (SERVE_DIR / transfer_id).unlink(missing_ok=True)
     (SERVE_DIR / (transfer_id + ".json")).unlink(missing_ok=True)
 
 
 def _sweep_stale_transfers() -> None:
-    """Lösche SERVE_DIR-Reste älter als ``_SERVE_TTL_SECONDS`` (rate-limited).
+    """Delete SERVE_DIR leftovers older than ``_SERVE_TTL_SECONDS`` (rate-limited).
 
-    Deckt Abbrüche zwischen Staging und Register ab (Datei ohne Route).
-    Läuft im Request-Pfad, aber höchstens alle ``_SWEEP_INTERVAL`` Sekunden
-    (``_last_sweep``); jede Datei-Operation ist best-effort.
+    Covers aborts between staging and register (a file without a
+    route). Runs in the request path, but at most every
+    ``_SWEEP_INTERVAL`` seconds (``_last_sweep``); every file operation
+    is best-effort.
     """
     global _last_sweep
     now = time.time()
@@ -261,10 +263,10 @@ def _sweep_stale_transfers() -> None:
 
 
 def serve_port() -> int:
-    """Serv-Port: env ``IOWAP_SERVE_PORT``, sonst ``SERVE_PORT_DEFAULT``.
+    """Serve port: env ``IOWAP_SERVE_PORT``, else ``SERVE_PORT_DEFAULT``.
 
-    Ungültige Env-Werte (nicht-int, out of range) → WARNING + Default —
-    ein Tippfehler in der Env bricht den Daemon nicht (Haus-Pattern wie
+    Invalid env values (not an int, out of range) → WARNING + default —
+    a typo in the env does not break the daemon (house pattern like
     ``relay_client._effective_config``).
     """
     raw = os.environ.get("IOWAP_SERVE_PORT")
@@ -282,17 +284,18 @@ def serve_port() -> int:
 
 
 def read_manifest() -> dict | None:
-    """serve.json lesen; ``None`` wenn fehlend oder ungültig.
+    """Read serve.json; ``None`` when missing or invalid.
 
-    „Ungültig“ schließt explizit ein: kein JSON, kein dict, ``port``
-    fehlt/kein int/kein gültiger Port-Wert. Der Normalfall ohne Daemon
-    ist ``None`` (CLI meldet dann den F5-Fehler).
+    "Invalid" explicitly includes: not JSON, not a dict, ``port``
+    missing/not an int/not a valid port value. The normal case without
+    a daemon is ``None`` (the CLI then reports the F5 error).
 
-    D8: Rückgabe enthält zusätzlich ``host`` (Advertise-Adresse für die
-    upstream-URL). Manifeste ohne ``host``-Key (vor D8) erhalten den
-    Default ``SERVE_HOST`` — ein ungültiger ``host``-Wert fällt ebenso
-    auf den Default zurück, statt das Manifest komplett zu verwerfen
-    (Port bleibt der relevante Teil des Contracts).
+    D8: the return additionally contains ``host`` (the advertise
+    address for the upstream URL). Manifests without a ``host`` key
+    (before D8) get the default ``SERVE_HOST`` — an invalid ``host``
+    value likewise falls back to the default instead of discarding the
+    entire manifest (the port remains the relevant part of the
+    contract).
     """
     try:
         raw = MANIFEST_PATH.read_text()
@@ -309,7 +312,7 @@ def read_manifest() -> dict | None:
     if not isinstance(data, dict):
         return None
     port = data.get("port")
-    # bool ist eine int-Unterklasse — True wäre sonst „Port 1“.
+    # bool is an int subclass — otherwise True would be "port 1".
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         return None
     host = data.get("host", SERVE_HOST)
@@ -320,13 +323,13 @@ def read_manifest() -> dict | None:
 
 
 def write_manifest(port: int, host: str | None = None) -> None:
-    """``{"port": port, "host": host}`` nach ``MANIFEST_PATH`` — atomar.
+    """Write ``{"port": port, "host": host}`` to ``MANIFEST_PATH`` — atomically.
 
-    Der Daemon schreibt das Manifest beim Serve-Start (F5 Port-Discovery);
-    ein CLI, das mitten im Write liest, sieht nie ein halbes JSON.
-    ``host`` ist die D8-Advertise-Adresse (``serve_host()``); ``None``
-    schreibt den Default ``SERVE_HOST`` — alte Manifeste ohne ``host``-Key
-    bleiben lesbar (read_manifest ergänzt ihn, siehe dort).
+    The daemon writes the manifest at serve start (F5 port discovery);
+    a CLI reading midway through the write never sees a half-written
+    JSON. ``host`` is the D8 advertise address (``serve_host()``);
+    ``None`` writes the default ``SERVE_HOST`` — old manifests without
+    a ``host`` key stay readable (read_manifest adds it, see there).
     """
     MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = MANIFEST_PATH.with_name(MANIFEST_PATH.name + ".tmp")
@@ -337,25 +340,26 @@ def write_manifest(port: int, host: str | None = None) -> None:
 
 
 def new_transfer_id() -> str:
-    """``secrets.token_urlsafe(16)`` → 22 url-safe Zeichen (F2).
+    """``secrets.token_urlsafe(16)`` → 22 url-safe chars (F2).
 
-    22 ≤ 64-Zeichen-Limit der Route-Registry; Kollisionen sind bei 128
-    Bit Entropie ausgeschlossen.
+    22 ≤ the route registry's 64-char limit; collisions are impossible
+    with 128 bits of entropy.
     """
     return secrets.token_urlsafe(16)
 
 
 def stage_file(src: Path, *, max_downloads: int = 1) -> tuple[str, Path, str]:
-    """Stage ``src`` nach ``SERVE_DIR/{transfer_id}``, gib (id, staged, sha256).
+    """Stage ``src`` to ``SERVE_DIR/{transfer_id}``, return (id, staged, sha256).
 
-    Move-Semantik (F5): ``os.replace`` = O(1) auf gleichem FS, mit
-    ``shutil.copy`` + unlink-Fallback über FS-Grenzen (EXDEV). Schreibt
-    das F6-Manifest ``SERVE_DIR/{transfer_id}.json`` mit
-    ``{file, size, sha256, max_downloads}`` — der Daemon zählt daran
-    entlang und räumt nach ``max_downloads`` Downloads ab.
+    Move semantics (F5): ``os.replace`` = O(1) on the same filesystem,
+    with a ``shutil.copy`` + unlink fallback across filesystem
+    boundaries (EXDEV). Writes the F6 manifest
+    ``SERVE_DIR/{transfer_id}.json`` with
+    ``{file, size, sha256, max_downloads}`` — the daemon counts along
+    it and cleans up after ``max_downloads`` downloads.
 
-    Raise ``ValueError`` für ``max_downloads < 1`` — ein 0-Download-
-    Transfer wäre eine tote Route (fail-fast am Erzeuger).
+    Raise ``ValueError`` for ``max_downloads < 1`` — a 0-download
+    transfer would be a dead route (fail fast at the producer).
     """
     if max_downloads < 1:
         raise ValueError(f"max_downloads must be >= 1, got {max_downloads}")
@@ -375,7 +379,7 @@ def stage_file(src: Path, *, max_downloads: int = 1) -> tuple[str, Path, str]:
 
 
 def _sha256_file(path: Path) -> str:
-    """sha256 einer Datei chunkwise (64 KiB) — kein RAM-Peak (F8)."""
+    """sha256 of a file, chunkwise (64 KiB) — no RAM peak (F8)."""
     digest = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(64 * 1024), b""):
@@ -384,7 +388,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _write_transfer_manifest(staged: Path, sha_hex: str, max_downloads: int) -> None:
-    """F6-Manifest neben der staged Datei (atomar via tmp+replace)."""
+    """F6 manifest next to the staged file (atomic via tmp+replace)."""
     manifest = Path(str(staged) + ".json")
     tmp = Path(str(manifest) + ".tmp")
     payload = {
@@ -398,12 +402,12 @@ def _write_transfer_manifest(staged: Path, sha_hex: str, max_downloads: int) -> 
 
 
 def build_storage_ref(node_id: str, route_path: str, expires_at: str) -> dict:
-    """F4 — ``storage_ref`` für den Envelope v1 (Shape FROZEN):
+    """F4 — ``storage_ref`` for envelope v1 (shape FROZEN):
 
     ``{"type": "node_serve", "node_id": ..., "path": ..., "expires_at": ...}``
 
-    ``parse_envelope`` gibt das dict generisch zurück (T-179) — kein
-    Envelope-Change, kein Contract-Break für alte Empfänger.
+    ``parse_envelope`` returns the dict generically (T-179) — no
+    envelope change, no contract break for old receivers.
     """
     return {
         "type": "node_serve",
@@ -414,25 +418,25 @@ def build_storage_ref(node_id: str, route_path: str, expires_at: str) -> dict:
 
 
 def proxy_url(base_url: str, node_id: str, route_path: str) -> str:
-    """F7 — Proxy-URL für den Empfänger-Pull.
+    """F7 — proxy URL for the receiver's pull.
 
-    Pfad-Shape identisch zu ``unregister_temp_route``
+    Path shape identical to ``unregister_temp_route``
     (``relay_client.py``): ``{base_url}{_ROUTE_BASE}/{node_id}{path}``.
-    ``base_url`` verliert einen trailing slash; ``route_path`` bekommt
-    seinen führenden Slash garantiert (defensiv gegen beide Schreibweisen).
+    ``base_url`` loses a trailing slash; ``route_path`` is guaranteed
+    its leading slash (defensively against both spellings).
     """
     path = route_path if route_path.startswith("/") else "/" + route_path
     return f"{base_url.rstrip('/')}{_ROUTE_BASE}/{node_id}{path}"
 
 
 def probe_serve(port: int, timeout: float = 2.0, host: str | None = None) -> bool:
-    """``GET http://{host|SERVE_HOST}:{port}/health`` — ``True`` gdw. 200.
+    """``GET http://{host|SERVE_HOST}:{port}/health`` — ``True`` iff 200.
 
-    Alles andere (Connection refused, Timeout, 4xx/5xx, ungültige
-    Antwort) ist „nicht erreichbar“ → ``False`` ohne Raise. Der CLI
-    (Task 4) leitet daraus den F5-Fehler ab. ``host`` (D8) erlaubt das
-    Probe gegen die advertise-Adresse aus dem Manifest; Default bleibt
-    ``SERVE_HOST`` (localhost, Plan-Verhalten).
+    Everything else (connection refused, timeout, 4xx/5xx, invalid
+    response) is "unreachable" → ``False`` without raising. The CLI
+    (task 4) derives the F5 error from it. ``host`` (D8) allows probing
+    against the advertise address from the manifest; the default stays
+    ``SERVE_HOST`` (localhost, plan behavior).
     """
     try:
         r = httpx.get(f"http://{host or SERVE_HOST}:{port}/health", timeout=timeout)
@@ -445,27 +449,29 @@ def probe_serve(port: int, timeout: float = 2.0, host: str | None = None) -> boo
 class EphemeralServeHandler(BaseHTTPRequestHandler):
     """POST ``/transfer/{id}`` + GET ``/health`` (T-166, F2/F6/F7).
 
-    Verträge (FROZEN aus Phase 1, jetzt implementiert):
+    Contracts (FROZEN from Phase 1, now implemented):
 
-    * POST ``/transfer/{transfer_id}`` (Body wird ignoriert/drainiert):
-      streamt die staged Datei chunkwise (``shutil.copyfileobj``, 64 KiB)
-      mit ``Content-Length``; zählt den Download erst bei vollständig
-      gesendetem Body (HTTP 200, kein Abbruch); löscht Datei + Manifest
-      nach ``max_downloads`` (F6) und triggert den ``on_exhausted``-Hook
-      (Daemon verdrahtet dort ``unregister_after_transfer``); Abbrüche
-      zählen NICHT → Retry bis TTL. Nebeneffekt: rate-limited Sweep.
-    * GET ``/health`` → 200 ``{"ok": true}`` (Contract für ``probe_serve``).
-    * Unbekannte/fremde Pfade oder falsche ID-Form → 404. GET auf
-      ``/transfer/...`` → 404 (POST-only-Kanal — der Proxy matcht die
-      registrierte Methode exakt).
-    * Logging quiet (Debug-Level, kein Stderr-Spam pro Request im Daemon).
+    * POST ``/transfer/{transfer_id}`` (body is ignored/drained):
+      streams the staged file chunkwise (``shutil.copyfileobj``, 64 KiB)
+      with ``Content-Length``; counts the download only once the body
+      was fully sent (HTTP 200, no abort); deletes file + manifest
+      after ``max_downloads`` (F6) and triggers the ``on_exhausted``
+      hook (the daemon wires ``unregister_after_transfer`` there);
+      aborts do NOT count → retry until the TTL. Side effect:
+      rate-limited sweep.
+    * GET ``/health`` → 200 ``{"ok": true}`` (contract for ``probe_serve``).
+    * Unknown/foreign paths or a wrong ID form → 404. GET on
+      ``/transfer/...`` → 404 (POST-only channel — the proxy matches
+      the registered method exactly).
+    * Logging quiet (debug level, no stderr spam per request in the
+      daemon).
     """
 
     def log_message(self, format: str, *args) -> None:
         log.debug("serve: " + format, *args)
 
     def _drain_body(self) -> None:
-        """Request-Body konsumieren (F7 sendet leer; Proxy kann mehr schicken)."""
+        """Consume the request body (F7 sends it empty; the proxy may send more)."""
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -485,12 +491,12 @@ class EphemeralServeHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _peer_allowed(self) -> bool:
-        """D9: Socket-Peer gegen die gecachte Allowlist prüfen.
+        """D9: check the socket peer against the cached allowlist.
 
-        Gecacht am Server-Objekt (T-128-Semantik: einmalig beim Start,
-        ``_allowed_peers``). Fail-closed gilt für den Remote-Pfad: keine
-        Relay-IP auflösbar → LAN-Peers abgewiesen; loopback und die
-        advertise-IP bleiben legitim (lokaler Probe-/CLI-Pfad, D8).
+        Cached on the server object (T-128 semantics: resolved once at
+        start, ``_allowed_peers``). Fail closed applies to the remote
+        path: no relay IP resolvable → LAN peers rejected; loopback and
+        the advertise IP stay legitimate (local probe/CLI path, D8).
         """
         allowed: frozenset[str] | None = getattr(self.server, "_allow_ip", None)
         peer = self.client_address[0]
@@ -543,7 +549,7 @@ class EphemeralServeHandler(BaseHTTPRequestHandler):
                 shutil.copyfileobj(fh, self.wfile, length=64 * 1024)
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-            # Abgebrochener Download zählt NICHT (F6 — Retry möglich bis TTL).
+            # Aborted download does NOT count (F6 — retry possible until the TTL).
             log.warning("transfer %s aborted mid-stream: %s", transfer_id, exc)
             return
         self._record_download(transfer_id, staged, manifest_file)
@@ -551,12 +557,12 @@ class EphemeralServeHandler(BaseHTTPRequestHandler):
     def _record_download(
         self, transfer_id: str, staged: Path, manifest_file: Path
     ) -> None:
-        """Download zählen; bei ``max_downloads`` abräumen + Hook feuern (F6)."""
+        """Count the download; at ``max_downloads`` clean up + fire the hook (F6)."""
         with _transfer_lock:
             try:
                 data = json.loads(manifest_file.read_text())
             except (OSError, ValueError):
-                # Parallel-Request hat bereits erschöpft — nichts mehr zu zählen.
+                # A parallel request has already exhausted it — nothing left to count.
                 return
             downloads = int(data.get("downloads", 0)) + 1
             max_downloads = int(data.get("max_downloads", 1))
@@ -581,16 +587,18 @@ class EphemeralServeHandler(BaseHTTPRequestHandler):
 
 
 def start_serve_thread() -> threading.Thread:
-    """Serve-Thread im Daemon starten (F1) — bind, Manifest, daemon-Thread.
+    """Start the serve thread in the daemon (F1) — bind, manifest, daemon thread.
 
     * bind ``SERVE_HOST:serve_port()`` (``ThreadingHTTPServer``),
-      ``write_manifest(port)`` nach erfolgreichem Bind (F5 Port-Discovery).
-    * Thread ``daemon=True`` → stirbt mit dem Daemon-Prozess.
-    * ``RuntimeError`` bei Bind-Fehl — der Daemon-Wrapper fängt
-      OSError/RuntimeError → WARNING, Node läuft ohne Serve weiter (F1:
-      ``hp put`` bridge meldet dann den F5-Fehler).
-    * Idempotenz: bereits laufender Serve-Thread → derselbe Thread
-      zurückgegeben (kein Doppel-Bind beim Re-Run).
+      ``write_manifest(port)`` after a successful bind (F5 port
+      discovery).
+    * Thread ``daemon=True`` → dies with the daemon process.
+    * ``RuntimeError`` on bind failure — the daemon wrapper catches
+      OSError/RuntimeError → WARNING, the node keeps running without
+      serve (F1: ``hp put`` bridge then reports the F5 error instead
+      of crashing).
+    * Idempotency: an already-running serve thread → the same thread
+      is returned (no double bind on re-run).
     """
     global _serve_server, _serve_thread
     existing = _serve_thread
@@ -598,9 +606,10 @@ def start_serve_thread() -> threading.Thread:
         return existing
     port = serve_port()
     host = serve_host()
-    # D9: Peer-Allowlist einmalig beim Bind auflösen und am Server-Objekt
-    # cachen (T-128-Semantik). Ohne Relay-IP läuft der Serve fail-closed
-    # für Remote-Peers — der lokale Probe-Pfad bleibt bedienbar.
+    # D9: resolve the peer allowlist once at bind time and cache it on
+    # the server object (T-128 semantics). Without a relay IP the serve
+    # runs fail-closed for remote peers — the local probe path stays
+    # servable.
     allow_peers = _allowed_peers()
     if serve_allow_ip() is None:
         log.warning(
@@ -627,11 +636,11 @@ def start_serve_thread() -> threading.Thread:
 def unregister_after_transfer(
     client: RelayClient, route_path: str, method: str = "POST"
 ) -> None:
-    """Best-effort Route-Löschung nach erschöpftem Transfer (F6).
+    """Best-effort route deletion after an exhausted transfer (F6).
 
-    Der Daemon ruft das nach dem letzten erfolgreichen Download —
-    HTTP-Fehler werden nur geloggt (niemals gereraised): der Download
-    selbst war schon erfolgreich, der TTL-Sweep (T-125) ist der Backstop.
+    The daemon calls this after the last successful download —
+    HTTP errors are only logged (never re-raised): the download itself
+    already succeeded; the TTL sweep (T-125) is the backstop.
     """
     try:
         client.unregister_temp_route(route_path, method=method)
