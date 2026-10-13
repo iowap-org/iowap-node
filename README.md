@@ -6,22 +6,22 @@
 
 The node framework provides everything you need to register, heartbeat, claim tasks, and run handlers. Nodes are the workers — they advertise what they can do and execute tasks when matched.
 
-## Quick Start
+## Quick Start (Linux)
 
 ```bash
-# Clone
+curl -fsSL https://raw.githubusercontent.com/iowap-org/iowap-node/main/install.sh | bash
+```
+
+Manuell (jede Plattform):
+
+```bash
 git clone https://github.com/iowap-org/iowap-node.git
 cd iowap-node
-
-# Setup
 pip install -e .
-cp relay_config.json.example .relay/relay_config.json
-# Edit .relay/relay_config.json: set relay_url, register with a server
-
-# Register & run
-node-cli node register    # Get a node ID and token
-node-cli capabilities publish default   # Publish your capabilities
-node-daemon               # Start the event-driven worker
+cp relay_config.json.example ~/.relay/relay_config.json
+# edit ~/.relay/relay_config.json
+node-cli node register
+node-cli capabilities publish default
 ```
 
 ## What You Can Build
