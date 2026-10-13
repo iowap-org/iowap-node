@@ -6,23 +6,31 @@ REPO_URL="${IOWAP_REPO_URL:-https://github.com/iowap-org/iowap-node.git}"
 INSTALL_DIR="${IOWAP_INSTALL_DIR:-$HOME/iowap-node}"
 PYTHON_MIN="${IOWAP_PYTHON_MIN:-3.11}"
 RELAY_URL="${IOWAP_RELAY_URL:-}"
+NONINTERACTIVE="${IOWAP_NONINTERACTIVE:-0}"
+MODE="${IOWAP_MODE:-}"
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing: $1"; }
+ask() {
+  local var="$1" prompt="$2" def="${3:-}" reply
+  if [ "$NONINTERACTIVE" = "1" ]; then
+    reply="$def"
+  else
+    read -r -p "$prompt " reply </dev/tty || reply=""
+    reply="${reply:-$def}"
+  fi
+  printf -v "$var" '%s' "$reply"
+}
 
-# 1. OS gate
 case "$(uname -s)" in
   Linux) ;;
   *) die "this installer supports Linux (systemd). For macOS see docs/node/setup.md." ;;
 esac
 
-# 2. Dependencies: check first, optionally install (apt/dnf/pacman).
 check_python() {
   if command -v python3 >/dev/null 2>&1; then
-    local v
-    v="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
-    python3 -c "import sys;exit(0 if sys.version_info[:2] >= (3,11) else 1)" 2>/dev/null || die "Python >= ${PYTHON_MIN} required (found $v)"
+    python3 -c "import sys;exit(0 if sys.version_info[:2] >= (3,11) else 1)" 2>/dev/null || return 1
   else
     return 1
   fi
@@ -44,13 +52,44 @@ ensure_deps() {
       die "no supported package manager; install Python >= ${PYTHON_MIN}, pip, git, venv manually"
     fi
   fi
-  # python venv module present?
   python3 -c "import venv" >/dev/null 2>&1 || die "python venv module missing"
 }
 
+installed=0
+if [ -d "$INSTALL_DIR/.git" ] && [ -d "$INSTALL_DIR/.venv" ]; then
+  installed=1
+fi
+
+if [ "$installed" = "1" ] && [ -z "$MODE" ]; then
+  log "iowap-node already installed in $INSTALL_DIR"
+  ask MODE "Choose: [u]pdate / [o]verride / [x]uninstall / [a]bort? (u/o/x/a)" "u"
+  case "$MODE" in
+    u|U|update) MODE=update ;;
+    o|O|override) MODE=override ;;
+    x|X|uninstall) MODE=uninstall ;;
+    *) MODE=abort ;;
+  esac
+fi
+
+case "$MODE" in
+  abort) log "Aborted."; exit 0 ;;
+  uninstall)
+    log "Uninstalling..."
+    systemctl --user disable --now iowap-node-daemon 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/iowap-node-daemon.service"
+    rm -rf "$INSTALL_DIR"
+    rm -rf "$HOME/.relay"
+    log "Uninstalled."
+    exit 0
+    ;;
+esac
+
 ensure_deps
 
-# 3. Clone or update
+if [ "$MODE" = "override" ]; then
+  rm -rf "$INSTALL_DIR"
+fi
+
 if [ -d "$INSTALL_DIR/.git" ]; then
   log "Updating existing checkout: $INSTALL_DIR"
   git -C "$INSTALL_DIR" pull --ff-only
@@ -59,7 +98,6 @@ else
   git clone "$REPO_URL" "$INSTALL_DIR"
 fi
 
-# 4. venv + install
 cd "$INSTALL_DIR"
 if [ ! -d .venv ]; then
   python3 -m venv .venv
@@ -68,14 +106,24 @@ fi
 pip install --upgrade pip >/dev/null
 pip install -e . >/dev/null
 
-# 5. Config scaffold
-mkdir -p "$HOME/.relay"
-if [ ! -f "$HOME/.relay/relay_config.json" ] && [ -f relay_config.json.example ]; then
-  cp relay_config.json.example "$HOME/.relay/relay_config.json"
-  log "Created $HOME/.relay/relay_config.json — edit relay_url before registering"
-fi
-if [ -n "$RELAY_URL" ]; then
-  python3 - "$HOME/.relay/relay_config.json" "$RELAY_URL" <<'PY'
+if [ "$MODE" != "update" ]; then
+  mkdir -p "$HOME/.relay"
+  if [ -z "$RELAY_URL" ]; then
+    ask RELAY_CHOICE "Relay: [u]rl or [d]iscover (mDNS)? (u/d)" "u"
+    case "$RELAY_CHOICE" in
+      d|D|discover) RELAY_DISCOVER=1 ;;
+      *) ask RELAY_URL "Relay URL (e.g. http://192.168.2.60:8788):" ""
+         RELAY_DISCOVER=0 ;;
+    esac
+  else
+    RELAY_DISCOVER=0
+  fi
+
+  if [ ! -f "$HOME/.relay/relay_config.json" ] || [ "$MODE" = "override" ]; then
+    cp relay_config.json.example "$HOME/.relay/relay_config.json" 2>/dev/null || true
+  fi
+  if [ -n "$RELAY_URL" ]; then
+    python3 - "$HOME/.relay/relay_config.json" "$RELAY_URL" <<'PY'
 import json,sys
 p,u=sys.argv[1],sys.argv[2]
 try:
@@ -86,9 +134,18 @@ d.setdefault("relay_url", u)
 d["relay_url"]=u
 json.dump(d, open(p,"w"), indent=2)
 PY
+  fi
+
+  if [ "${RELAY_DISCOVER:-0}" = "1" ]; then
+    "$INSTALL_DIR/.venv/bin/node-cli" relay discover || true
+  fi
+
+  if [ -n "$RELAY_URL" ]; then
+    log "Registering with relay..."
+    "$INSTALL_DIR/.venv/bin/node-cli" node register || log "Registration failed — run manually after approving on server"
+  fi
 fi
 
-# 6. systemd user unit (daemon)
 UNIT_DIR="$HOME/.config/systemd/user"
 mkdir -p "$UNIT_DIR"
 cat >"$UNIT_DIR/iowap-node-daemon.service" <<EOF
@@ -110,12 +167,15 @@ EOF
 systemctl --user daemon-reload 2>/dev/null || true
 log "Systemd user unit written: iowap-node-daemon.service"
 
-# 7. Next steps
+if [ "$MODE" != "update" ]; then
+  ask ENABLE "Enable/start iowap-node-daemon via systemd? (y/n)" "y"
+  if [[ "$ENABLE" =~ ^[Yy] ]]; then
+    systemctl --user enable --now iowap-node-daemon 2>/dev/null || log "systemctl enable failed (user session?)"
+  fi
+fi
+
 log ""
-log "Installed. Next:"
-log "  1. Edit $HOME/.relay/relay_config.json (relay_url) if not set"
-log "  2. $INSTALL_DIR/.venv/bin/node-cli node register"
-log "  3. $INSTALL_DIR/.venv/bin/node-cli capabilities publish default"
-log "  4. systemctl --user enable --now iowap-node-daemon"
-log ""
-log "Upgrade later with:  IOWAP_INSTALL_DIR=$INSTALL_DIR bash $INSTALL_DIR/install.sh   (or re-run curl | bash)"
+log "Done. Next:"
+log "  - config: $HOME/.relay/relay_config.json"
+log "  - node-cli: $INSTALL_DIR/.venv/bin/node-cli"
+log "  - daemon: systemctl --user status iowap-node-daemon"
