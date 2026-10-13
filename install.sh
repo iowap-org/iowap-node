@@ -146,17 +146,22 @@ if [ "$MODE" != "update" ]; then
   fi
 
   if [ -n "$RELAY_URL" ]; then
+    REGISTER=1
+    FORCE_FLAG=""
     if [ -f "$HOME/.relay/iowap-agent.json" ]; then
       ask REREG "Node identity already exists. Re-register fresh (new node on server)? (y/n)" "n"
       if [[ "$REREG" =~ ^[Yy] ]]; then
-        log "Registering with relay ($RELAY_URL)..."
-        "$INSTALL_DIR/.venv/bin/node-cli" node register "$RELAY_URL" --force || log "Registration failed - run manually: node-cli node register $RELAY_URL --force"
+        FORCE_FLAG="--force"
       else
+        REGISTER=0
         log "Keeping existing node identity - registration skipped"
       fi
-    else
-      log "Registering with relay ($RELAY_URL)..."
-      "$INSTALL_DIR/.venv/bin/node-cli" node register "$RELAY_URL" || log "Registration failed - run manually: node-cli node register $RELAY_URL"
+    fi
+    if [ "$REGISTER" = "1" ]; then
+      DEFAULT_NODE_NAME="$(hostname)"
+      ask NODE_NAME "Node name [$DEFAULT_NODE_NAME]:" "$DEFAULT_NODE_NAME"
+      log "Registering with relay ($RELAY_URL) as node '$NODE_NAME'..."
+      "$INSTALL_DIR/.venv/bin/node-cli" node register "$RELAY_URL" --name "$NODE_NAME" ${FORCE_FLAG:+"$FORCE_FLAG"} || log "Registration failed - run manually: node-cli node register $RELAY_URL --name \"$NODE_NAME\" $FORCE_FLAG"
     fi
   fi
 fi
