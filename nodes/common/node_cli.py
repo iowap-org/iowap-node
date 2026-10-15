@@ -71,6 +71,7 @@ from nodes.common.node_utils import (
     TOKEN_PATH,
     load_json,
     load_meta,
+    post_result_rescue_note,
     write_json_atomic,
 )
 from nodes.common import node_utils as _nu
@@ -341,6 +342,28 @@ class Daemon:
                         self.tasks_completed += 1
                 log.info("completed stage %s", stage_id)
             except Exception as exc:  # noqa: BLE001
+                # T-001c-c: the stage is gone server-side (404: expired/
+                # re-queued/failed) — the handler's result is rescued as a
+                # task note instead of being dropped. Other failures stay
+                # plain (retryable); there is no complete_by_script
+                # fallthrough here.
+                cli_resp = getattr(exc, "response", None)
+                if (
+                    getattr(cli_resp, "status_code", None) == 404
+                    and task_id
+                ):
+                    cli_saved = post_result_rescue_note(
+                        self.client,
+                        str(task_id),
+                        str(stage_id),
+                        result,
+                        reason=str(exc),
+                    )
+                    if cli_saved:
+                        log.info(
+                            "stage %s complete rejected (404) — result rescued as note",
+                            stage_id,
+                        )
                 with self._lock:
                     self.tasks_failed += 1
                     if task_id is not None:

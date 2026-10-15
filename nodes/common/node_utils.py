@@ -403,3 +403,46 @@ def apply_wheel_update(
             f"pip ok ({before} -> {after}) but service restart failed: {exc}"
         )
     return result
+
+
+def post_result_rescue_note(
+    client,
+    task_id: str | None,
+    stage_id: str,
+    result,
+    *,
+    reason: str = "complete rejected",
+    char_cap: int = 4000,
+) -> bool:
+    """T-001c-c: rescue a handler result whose ``complete`` call was rejected.
+
+    A 404 from ``/scheduler/stages/{id}/complete`` means the stage is gone
+    server-side (expired/re-queued/failed while the handler was running).
+    The handler had already done the work — posting the result as an info
+    note on the task (T-052 note channel, rides in TaskView) keeps it out
+    of the bit bucket. Best effort: ``False`` when the task is gone or the
+    note call fails; never raises.
+    """
+    if not task_id:
+        return False
+    try:
+        payload = json.dumps(result, default=str)
+    except (TypeError, ValueError):
+        payload = repr(result)
+    if len(payload) > char_cap:
+        payload = payload[: char_cap - 3] + "..."
+    try:
+        client.add_task_note(
+            str(task_id),
+            f"[result-rescue] stage {stage_id} complete failed ({reason}); "
+            f"result preserved:\n{payload}",
+            kind="info",
+        )
+        return True
+    except Exception:  # noqa: BLE001 — best effort, the failure is logged below
+        logger.error(
+            "result-rescue note for task %s stage %s failed — result not recoverable",
+            task_id,
+            stage_id,
+        )
+        return False

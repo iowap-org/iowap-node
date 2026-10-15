@@ -62,6 +62,7 @@ from nodes.common.node_utils import (
     STATUS_PATH,
     TOKEN_PATH,
     load_meta,
+    post_result_rescue_note,
     write_json_atomic,
 )
 from nodes.common.relay_client import RelayClient, _effective_config, _setup_logging
@@ -773,6 +774,27 @@ class SseDaemon:
                         stage_id,
                     )
                     return
+                # T-001c-c: a 404 means the stage is gone server-side
+                # (expired/re-queued/failed while the handler ran). The
+                # handler DID work — rescue the result as a task note
+                # instead of dropping it. Non-404 failures stay retryable.
+                response = getattr(exc, "response", None)
+                if (
+                    getattr(response, "status_code", None) == 404
+                    and task_id
+                ):
+                    saved = post_result_rescue_note(
+                        self.client,
+                        str(task_id),
+                        str(stage_id),
+                        result,
+                        reason=str(exc),
+                    )
+                    if saved:
+                        log.info(
+                            "stage %s complete rejected (404) — result rescued as note",
+                            stage_id,
+                        )
                 with self._lock:
                     self.tasks_failed += 1
                     if task_id is not None:
