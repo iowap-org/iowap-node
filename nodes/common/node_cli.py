@@ -1287,6 +1287,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(raw)
     try:
+        # T-226: every invocation records its own absolute path as the
+        # top-level node_cli_path stamp in the active profile — consumers
+        # without PATH knowledge (desktop gateway) resolve the binary from
+        # there. Drift-guarded; never raises.
+        from nodes.common.node_config import ensure_node_cli_stamp
+
+        ensure_node_cli_stamp()
         return int(args.func(args))
     except SystemExit as exc:
         if exc.code is None:

@@ -54,6 +54,7 @@ from nodes.common import file_serve
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     current_profile_name,
+    ensure_node_cli_stamp,
     invalidate_active_cache,
     load_active_profile,
 )
@@ -835,6 +836,10 @@ class SseDaemon:
             self.client.base_url,
         )
         BASE_DIR.mkdir(parents=True, exist_ok=True)
+        # T-226: keep the node_cli_path stamp in the active profile — after
+        # a host reboot or a wheel redeploy the running interpreter's cli
+        # script is the truth consumers resolve their node-cli from.
+        ensure_node_cli_stamp()
         # T-185: refresh the registration secret synchronously BEFORE any
         # connection thread starts — the very first heartbeat/SSE request
         # presents fresh credentials (no startup 401 race). Non-fatal on

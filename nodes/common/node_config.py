@@ -45,6 +45,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -578,6 +579,10 @@ def publish_profile(name: str) -> Path:
     shutil.copyfile(src, tmp)
     os.replace(tmp, ACTIVE_PATH)
     write_current_profile_name(name)
+    # T-226: the byte-exact copy replaced the active file — re-stamp the
+    # node_cli_path so the key self-heals through validate→publish even
+    # when it is not part of the working profile.
+    ensure_node_cli_stamp()
     return ACTIVE_PATH
 
 
@@ -756,6 +761,90 @@ def write_active_status(status: str | None) -> None:
 def invalidate_active_cache() -> None:
     """Force the next :func:`load_active_profile` call to re-read disk."""
     _active_cache.invalidate()
+
+
+# ---------------------------------------------------------------------------
+# node_cli_path stamp (T-226)
+# ---------------------------------------------------------------------------
+
+_NODE_CLI_STAMP_KEY = "node_cli_path"
+# Top-level only: 'node_cli_path:' at column 0. MULTILINE '^' matches
+# line starts, and capability-level keys are indented — those never match.
+_NODE_CLI_STAMP_RE = re.compile(
+    rf"^({_NODE_CLI_STAMP_KEY}):(.*)$", re.MULTILINE
+)
+
+
+def resolve_own_cli_path() -> str | None:
+    """Best-effort absolute path of the node-cli console script.
+
+    Preference order: the ``node-cli`` sibling of the running interpreter
+    (covers ``python -m nodes.common.node_cli`` AND console-script runs —
+    both exec from the same venv), then argv[0] when it *is* the cli
+    script (symlink-resolved, e.g. pipx), then ``shutil.which``. Returns
+    ``None`` when nothing derivable exists so callers stamp nothing.
+    """
+    exe = str(sys.executable or "")
+    if exe:
+        cand = Path(exe).with_name("node-cli")
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return os.path.realpath(cand)
+    argv0 = sys.argv[0] if sys.argv else ""
+    if os.path.basename(argv0) in ("node-cli", "node_cli.py"):
+        try:
+            resolved = Path(argv0).resolve()
+        except (OSError, ValueError):
+            resolved = None
+        if resolved and resolved.is_file() and os.access(resolved, os.X_OK):
+            return os.path.realpath(resolved)
+    which = shutil.which("node-cli")
+    if which:
+        return os.path.realpath(which)
+    return None
+
+
+def ensure_node_cli_stamp(stamp: str | None = None) -> None:
+    """Ensure the active profile carries the node_cli_path stamp (T-226).
+
+    Consumers of node-cli that cannot rely on PATH (the Hermes desktop
+    gateway does not inherit the login-shell PATH) read the top-level
+    ``node_cli_path`` key from the active profile. The stamp:
+
+    * never raises and never creates node.yaml (register-only hosts stay
+      untouched — the consumer falls back to PATH/known locations);
+    * is drift-guarded: rewrites ONLY when the recorded value differs,
+      so the steady state is mtime-silent (the daemon's
+      ActiveProfileCache reloads on mtime change);
+    * edits the YAML as text — comments, key order and formatting are
+      preserved verbatim (same discipline as ``write_active_status``).
+
+    ``stamp`` overrides the derived path (tests, callers that know
+    better); pass an empty string to make the call a no-op.
+    """
+    value = stamp if stamp is not None else resolve_own_cli_path()
+    if not value:
+        return
+    path = ACTIVE_PATH
+    if not path.exists():
+        return
+    try:
+        raw = path.read_text(encoding="utf-8")
+        m = _NODE_CLI_STAMP_RE.search(raw)
+        current = m.group(2).strip().strip("'\"") if m else None
+        if current == value:
+            return
+        quoted = '"' + value.replace('"', "") + '"'
+        if m:
+            new_text = raw[: m.start(2)] + " " + quoted + raw[m.end(2):]
+        else:
+            new_text = f"{_NODE_CLI_STAMP_KEY}: {quoted}\n" + raw
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, yaml.YAMLError) as exc:
+        __import__("logging").getLogger("relay.node_config").warning(
+            "could not record node_cli_path in %s: %s", path, exc
+        )
 
 
 # ---------------------------------------------------------------------------
