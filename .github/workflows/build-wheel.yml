@@ -29,6 +29,8 @@ permissions:
 jobs:
   build-wheel:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,3 +69,45 @@ jobs:
           fi
           echo "--- release assets:"
           gh release view "$TAG" --json assets --jq '.assets[].name'
+
+  publish-pypi:
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.build-wheel.outputs.version }}
+        run: |
+          mkdir -p dist
+          gh release download "wheel-v${VER}" -p "*.whl" -D dist
+          ls -la dist/
+
+      - name: Publish to PyPI
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          if [ -z "$PYPI_TOKEN" ]; then
+            echo "PYPI_TOKEN secret not set — skipping publish (release asset is still on GitHub)"
+            exit 0
+          fi
+          python -m pip install --quiet twine
+          export TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN"
+          # PyPI versions are immutable: an intentional re-run of this job for
+          # an already-published version hits "File already exists" — that is
+          # 'published successfully earlier', so treat it as success.
+          if ! twine upload --non-interactive dist/*.whl | tee /tmp/twine.log; then
+            if grep -qi "already exists" /tmp/twine.log; then
+              echo "Version already on PyPI — idempotent re-run, treated as success"
+              exit 0
+            fi
+            exit 1
+          fi

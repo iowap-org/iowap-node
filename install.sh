@@ -3,6 +3,7 @@
 set -euo pipefail
 
 REPO_URL="${IOWAP_REPO_URL:-https://github.com/iowap-org/iowap-node.git}"
+SOURCE="${IOWAP_SOURCE:-pypi}"   # pypi (default) | git — git = clone into INSTALL_DIR + pip install -e . (dev)
 INSTALL_DIR="${IOWAP_INSTALL_DIR:-$HOME/iowap-node}"
 PYTHON_MIN="${IOWAP_PYTHON_MIN:-3.11}"
 RELAY_URL="${IOWAP_RELAY_URL:-}"
@@ -38,7 +39,9 @@ check_python() {
 }
 
 ensure_deps() {
-  need git
+  if [ "$SOURCE" = "git" ]; then
+    need git
+  fi
   if ! check_python; then
     log "Python ${PYTHON_MIN}+ not found — attempting install"
     if command -v apt-get >/dev/null 2>&1; then
@@ -57,7 +60,7 @@ ensure_deps() {
 }
 
 installed=0
-if [ -d "$INSTALL_DIR/.git" ] && [ -d "$INSTALL_DIR/.venv" ]; then
+if [ -d "$INSTALL_DIR/.venv" ]; then
   installed=1
 fi
 
@@ -94,14 +97,17 @@ if [ "$MODE" = "override" ]; then
   rm -rf "$INSTALL_DIR"
 fi
 
-if [ -d "$INSTALL_DIR/.git" ]; then
-  log "Updating existing checkout: $INSTALL_DIR"
-  git -C "$INSTALL_DIR" pull --ff-only
-else
-  log "Cloning iowap-node into $INSTALL_DIR"
-  git clone "$REPO_URL" "$INSTALL_DIR"
+if [ "$SOURCE" = "git" ]; then
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    log "Updating existing checkout: $INSTALL_DIR"
+    git -C "$INSTALL_DIR" pull --ff-only
+  else
+    log "Cloning iowap-node into $INSTALL_DIR"
+    git clone "$REPO_URL" "$INSTALL_DIR"
+  fi
 fi
 
+mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 if [ ! -d .venv ]; then
   python3 -m venv .venv
@@ -109,9 +115,20 @@ fi
 . .venv/bin/activate
 log "Upgrading pip..."
 pip install --upgrade pip >/dev/null
-log "Installing Python dependencies (pip install -e .)..."
-pip install -e . >/dev/null
-log "✓ Python dependencies installed"
+if [ "$SOURCE" = "git" ]; then
+  log "Installing Python dependencies (pip install -e .)..."
+  pip install -e . >/dev/null
+elif [ "$MODE" = "update" ]; then
+  log "Upgrading iowap-node from PyPI..."
+  pip install --upgrade iowap-node >/dev/null
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    log "Note: existing git checkout kept on disk; the package now comes from PyPI (checkout no longer feeds the install)."
+  fi
+else
+  log "Installing iowap-node from PyPI..."
+  pip install iowap-node >/dev/null
+fi
+log "✓ Python package installed"
 
 if [ "$MODE" != "update" ]; then
   mkdir -p "$HOME/.relay"
