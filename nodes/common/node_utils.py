@@ -500,7 +500,10 @@ def resolve_update_source(
 def resolve_mcp_install() -> dict:
     """Locate a potentially installed iowap-client-mcp on this host.
 
-    Chain: PATH (shutil.which) → ~/.local/bin → ~/iowap-client-mcp/.venv.
+    Chain: PATH (shutil.which) → ~/.local/bin → ~/iowap-client-mcp/.venv →
+    ~/projects/iowap-client-mcp/.venv → the Hermes MCP registration
+    (~/.hermes/config.yaml: any mcp_servers entry whose command basename is
+    ``iowap-mcp`` — the authoritative hint on Hermes hosts).
     Returns ``{"installed": True, "venv_python": Path}`` when the binary
     resolves, ``{"installed": False}`` otherwise (not an error — the toolkit
     is optional on a node host).
@@ -509,7 +512,9 @@ def resolve_mcp_install() -> dict:
         shutil.which("iowap-mcp"),
         os.path.expanduser("~/.local/bin/iowap-mcp"),
         os.path.expanduser("~/iowap-client-mcp/.venv/bin/iowap-mcp"),
+        os.path.expanduser("~/projects/iowap-client-mcp/.venv/bin/iowap-mcp"),
     ]
+    candidates.extend(_hermes_mcp_config_commands())
     for found in candidates:
         if not found:
             continue
@@ -520,6 +525,41 @@ def resolve_mcp_install() -> dict:
                 return {"installed": True, "venv_python": venv_root / "bin" / "python",
                         "venv": venv_root}
     return {"installed": False}
+
+
+def _hermes_mcp_config_commands() -> list[str]:
+    """Commands from ~/.hermes/config.yaml whose basename is ``iowap-mcp``.
+
+    Best-effort YAML-less-safe: parses via pyyaml when available, falls back
+    to a line-regex; a missing/unreadable config yields no candidates.
+    """
+    import glob
+
+    results: list[str] = []
+    for cfg in (*glob.glob(os.path.expanduser("~/.hermes/config.yaml")),):
+        try:
+            with open(cfg, "r", encoding="utf-8") as fh:
+                raw = fh.read()
+            try:
+                import yaml
+
+                servers = (yaml.safe_load(raw) or {}).get("mcp_servers") or {}
+            except Exception:  # noqa: BLE001 — no pyyaml → line-scan fallback
+                servers = {}
+            found: list[str] = []
+            if servers and isinstance(servers, dict):
+                for server in servers.values():
+                    cmd = (server or {}).get("command") if isinstance(server, dict) else None
+                    if cmd and os.path.basename(str(cmd)) == "iowap-mcp":
+                        found.append(str(cmd))
+            if not found:
+                found = re.findall(
+                    r"command:\s*(\S*/iowap-mcp)\b", raw
+                )
+            results.extend(found)
+        except Exception:  # noqa: S112 — config probe never breaks updates
+            continue
+    return results
 
 
 def _venv_dist_url_kind(venv_python: Path, dist: str = MCP_DIST) -> str | None:

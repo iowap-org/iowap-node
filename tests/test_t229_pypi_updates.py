@@ -240,7 +240,39 @@ def test_resolve_mcp_install_fallback_home_local(monkeypatch, tmp_path: Path) ->
     assert out.get("installed") is False
 
 
+def test_resolve_mcp_install_hermes_config_layout(monkeypatch, tmp_path: Path) -> None:
+    """Hermes MCP registration is the authoritative hint (absolute command)."""
+    monkeypatch.setattr(nu.shutil, "which", lambda *_: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    venv_bin = tmp_path / "projects" / "iowap-client-mcp" / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").write_text("#!/bin/sh\nexit 0\n")
+    exe = venv_bin / "iowap-mcp"
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    hermes_dir = tmp_path / ".hermes"
+    hermes_dir.mkdir()
+    (hermes_dir / "config.yaml").write_text(
+        "mcp_servers:\n"
+        "  iowap:\n"
+        f"    command: {exe}\n"
+        "    enabled: true\n"
+    )
+    out = nu.resolve_mcp_install()
+    assert out["installed"] is True
+    assert out["venv_python"] == venv_bin / "python"
+
+
+def test_hermes_mcp_config_commands_tolerates_garbage(monkeypatch, tmp_path: Path) -> None:
+    """A missing/unreadable/unparseable config yields no candidates, no raise."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".hermes").mkdir()
+    (tmp_path / ".hermes" / "config.yaml").write_text(":]\nnot: [valid\n")
+    assert nu._hermes_mcp_config_commands() == []
+
+
 def test_resolve_mcp_install_venv_layout(monkeypatch, tmp_path: Path) -> None:
+    """PATH misses → dedicated home-layout venv (~/iowap-client-mcp/.venv)."""
     monkeypatch.setattr(nu.shutil, "which", lambda *_: None)
     monkeypatch.setenv("HOME", str(tmp_path))
     venv_bin = tmp_path / "iowap-client-mcp" / ".venv" / "bin"
