@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -243,15 +244,26 @@ SERVICE_UNIT = os.environ.get("RELAY_SERVICE_UNIT", "iowap-node-daemon.service")
 #   RELAY_RESTART_COMMAND='/usr/bin/launchctl kickstart -k gui/$UID/{unit}'
 RESTART_COMMAND = os.environ.get("RELAY_RESTART_COMMAND")
 
+# T-229: update sources — pypi-first with GitHub fallback for the node wheel.
+UPDATE_SOURCE_DEFAULT = os.environ.get("IOWAP_UPDATE_SOURCE", "auto")  # auto|pypi|github
+NODE_DIST = "iowap-node"
+MCP_DIST = "iowap-client-mcp"
+MCP_SPEC = "iowap-client-mcp[mcp]"
 
-def get_local_wheel_version() -> str | None:
-    """Return the installed ``iowap-node`` distribution version (or None)."""
+
+def get_local_dist_version(dist: str) -> str | None:
+    """Return the installed distribution version of ``dist`` (or None)."""
     try:
         from importlib import metadata
 
-        return metadata.version("iowap-node")
+        return metadata.version(dist)
     except Exception:  # noqa: BLE001 — not installed / metadata unreadable
         return None
+
+
+def get_local_wheel_version() -> str | None:
+    """Return the installed ``iowap-node`` distribution version (or None)."""
+    return get_local_dist_version("iowap-node")
 
 
 def get_latest_release_version(repo: str | None = None) -> dict:
@@ -318,6 +330,27 @@ def check_wheel_updates(*, repo: str | None = None) -> dict:
     return info
 
 
+def _restart_service(service_unit: str | None, restart_command: str | None) -> tuple[bool, str]:
+    """Restart the daemon unit after an update (shared by both apply paths).
+
+    Returns (restarted, error_note). Honors RELAY_RESTART_COMMAND for hosts
+    without systemd (``{unit}`` placeholder replaced).
+    """
+    unit = service_unit or SERVICE_UNIT
+    restart_cmd = restart_command or RESTART_COMMAND
+    if restart_cmd:
+        import shlex
+
+        argv = [tok.replace("{unit}", unit) for tok in shlex.split(os.path.expanduser(restart_cmd))]
+    else:
+        argv = ["systemctl", "--user", "restart", unit]
+    try:
+        subprocess.run(argv, capture_output=True, text=True, timeout=60.0, check=True)
+        return True, ""
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def apply_wheel_update(
     *,
     repo: str | None = None,
@@ -381,28 +414,312 @@ def apply_wheel_update(
         return result
     after = get_local_wheel_version()
     result["after_version"] = after
-    restart_argv: list[str] | None = None
-    restart_cmd = restart_command or RESTART_COMMAND
-    if restart_cmd:
-        import shlex
-
-        argv = shlex.split(os.path.expanduser(restart_cmd))
-        restart_argv = [tok.replace("{unit}", unit) for tok in argv]
-    else:
-        restart_argv = ["systemctl", "--user", "restart", unit]
-    try:
-        subprocess.run(
-            restart_argv,
-            capture_output=True, text=True, timeout=60.0, check=True,
-        )
-        result["restarted"] = True
+    restarted, restart_err = _restart_service(unit, restart_command)
+    result["restarted"] = restarted
+    if restarted:
         result["success"] = True
         result["message"] = f"updated {before} -> {after}; service restarted"
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    else:
         result["message"] = (
-            f"pip ok ({before} -> {after}) but service restart failed: {exc}"
+            f"pip ok ({before} -> {after}) but service restart failed: {restart_err}"
         )
     return result
+
+
+def bump_relevant_version(latest: str | None, local: str | None) -> bool:
+    """True when ``latest`` is strictly newer than ``local`` (semver trio)."""
+    try:
+        return tuple(int(x) for x in latest.split(".")) > tuple(int(x) for x in local.split("."))
+    except (ValueError, AttributeError):
+        return False
+
+
+def get_dist_url_kind(dist: str) -> str | None:
+    """``"dev"`` when the dist was installed editable / from a local path.
+
+    Reads ``direct_url.json`` of the installed distribution: registry installs
+    (PyPI) don't carry it, dev/editable installs carry ``file://`` URLs. Runs
+    the check inside the RUNNING interpreter's environment — for another
+    venv, pass its ``direct_url.json`` via :func:`_is_dev_venv_install`.
+    """
+    try:
+        from importlib import metadata
+
+        raw = metadata.distribution(dist).read_text("direct_url.json")
+        if raw is None:
+            return None
+        url = json.loads(raw).get("url", "")
+        return "dev" if url.startswith("file://") else None
+    except Exception:  # noqa: BLE001 — unreadable metadata = not a dev install
+        return None
+
+
+def get_pypi_latest_version(dist: str) -> dict:
+    """Newest published version of ``dist`` on PyPI (JSON API, no pip call)."""
+    url = f"https://pypi.org/pypi/{dist}/json"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=30.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        latest = str(data.get("info", {}).get("version") or "").strip() or None
+        return {"latest_version": latest, "source": "pypi", "error": None}
+    except Exception as exc:  # noqa: BLE001 — network / HTTP / parse errors
+        return {"latest_version": None, "source": "pypi",
+                "error": f"PyPI lookup failed: {exc}"}
+
+
+def resolve_update_source(
+    dist: str = "iowap-node",
+    *,
+    source: str = "auto",
+    repo: str | None = None,
+) -> dict:
+    """Resolve the newest upstream version: PyPI first, GitHub as fallback.
+
+    ``source``: ``auto`` (PyPI, fall back to GitHub on failure) | ``pypi``
+    (strict — no fallback) | ``github`` (legacy wheel-release path).
+    """
+    if source == "github":
+        info = get_latest_release_version(repo=repo)
+        info["source"] = "github"
+        return info
+    pypi = get_pypi_latest_version(dist)
+    if pypi.get("latest_version"):
+        return pypi
+    if source == "pypi":
+        return {
+            "latest_version": None, "tag": None, "asset_name": None,
+            "asset_url": None, "source": "pypi", "error": pypi["error"],
+        }
+    fallback = get_latest_release_version(repo=repo)
+    fallback["source"] = "github"
+    fallback["pypi_error"] = pypi["error"]
+    return fallback
+
+
+def resolve_mcp_install() -> dict:
+    """Locate a potentially installed iowap-client-mcp on this host.
+
+    Chain: PATH (shutil.which) → ~/.local/bin → ~/iowap-client-mcp/.venv.
+    Returns ``{"installed": True, "venv_python": Path}`` when the binary
+    resolves, ``{"installed": False}`` otherwise (not an error — the toolkit
+    is optional on a node host).
+    """
+    candidates = [
+        shutil.which("iowap-mcp"),
+        os.path.expanduser("~/.local/bin/iowap-mcp"),
+        os.path.expanduser("~/iowap-client-mcp/.venv/bin/iowap-mcp"),
+    ]
+    for found in candidates:
+        if not found:
+            continue
+        binary = Path(found).expanduser().resolve()
+        if binary.is_file() and os.access(binary, os.X_OK):
+            venv_root = binary.parents[1]  # <venv>/bin/<binary>
+            if (venv_root / "bin" / "python").exists():
+                return {"installed": True, "venv_python": venv_root / "bin" / "python",
+                        "venv": venv_root}
+    return {"installed": False}
+
+
+def _venv_dist_url_kind(venv_python: Path, dist: str = MCP_DIST) -> str | None:
+    """Read ``direct_url.json`` of ``dist`` inside ANOTHER venv (dev-guard)."""
+    try:
+        out = subprocess.run(
+            [str(venv_python), "-c",
+             "import importlib.metadata as m; print(m.distribution('" + dist
+             + "').read_text('direct_url.json') or '')"],
+            capture_output=True, text=True, timeout=30.0, check=True,
+        ).stdout.strip()
+        if not out or out == "None":
+            return None
+        url = json.loads(out).get("url", "")
+        return "dev" if url.startswith("file://") else None
+    except Exception:  # noqa: BLE001 — unreadable = treat as registry install
+        return None
+
+
+def check_updates(
+    *,
+    dist: str = "iowap-node",
+    source: str | None = None,
+    repo: str | None = None,
+    include_mcp: bool = True,
+) -> dict:
+    """Full update-check: node block (PyPI-first) + MCP toolkit block.
+
+    The MCP block reports the curated toolkit's state WITHOUT it being an
+    error when absent — every node host simply may not run one.
+    """
+    source = source or UPDATE_SOURCE_DEFAULT
+    local = get_local_dist_version(dist)
+    info = resolve_update_source(dist, source=source, repo=repo)
+    info["local_version"] = local
+    info["local_kind"] = get_dist_url_kind(dist)
+    info["update_available"] = bool(
+        local and info.get("latest_version")
+        and bump_relevant_version(info["latest_version"], local)
+    )
+    if include_mcp:
+        mcp_local = get_local_dist_version(MCP_DIST)
+        if mcp_local is None:
+            info["mcp"] = {"installed": False}
+        else:
+            mcp_info = get_pypi_latest_version(MCP_DIST)
+            info["mcp"] = {
+                "installed": True,
+                "local_version": mcp_local,
+                "latest_version": mcp_info["latest_version"],
+                "update_available": bool(
+                    mcp_info["latest_version"]
+                    and bump_relevant_version(mcp_info["latest_version"], mcp_local)
+                ),
+                "error": mcp_info["error"],
+            }
+    return info
+
+
+def apply_updates(
+    *,
+    source: str | None = None,
+    repo: str | None = None,
+    service_unit: str | None = None,
+    restart_command: str | None = None,
+    include_mcp: bool = True,
+) -> dict:
+    """Apply self-updates: node always (PyPI pip path / GitHub fallback as
+    resolved), the MCP toolkit upgrade in ITS OWN venv when installed.
+
+    Never touches a dev/editable install (refusal with hint — the "apply not
+    from dev venv" rule made machine-checkable). The MCP server has no unit
+    to restart: a running iowap-mcp keeps its code until the next client
+    spawn (the result carries that note).
+    """
+    source = source or UPDATE_SOURCE_DEFAULT
+    result: dict = {
+        "success": False,
+        "message": "",
+        "node": None,
+        "mcp": None,
+    }
+    check = check_updates(source=source, repo=repo, include_mcp=include_mcp)
+    result["check"] = {k: v for k, v in check.items() if k not in ("mcp",)}
+
+    node_local_kind = check.get("local_kind")
+    if check.get("update_available") and node_local_kind == "dev":
+        result["message"] = (
+            "refusing: installed iowap-node is a dev/editable install — "
+            "apply is for registry (PyPI/GitHub) installs only"
+        )
+        return result
+
+    if check.get("update_available"):
+        if check.get("source") == "pypi":
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--quiet",
+                     "--upgrade", NODE_DIST],
+                    capture_output=True, text=True, timeout=600.0, check=True,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                tail = (getattr(exc, "stderr", "") or "").strip().splitlines()[-3:]
+                result["message"] = f"pip upgrade failed: {exc}" + (f" | {tail}" if tail else "")
+                return result
+            after = get_local_dist_version(NODE_DIST)
+            result["node"] = {"before": check["local_version"],
+                              "after": after,
+                              "source": "pypi"}
+            # Same contract as the legacy path: the daemon only runs new code
+            # after a restart — the wheel path must never skip that.
+            restarted, restart_err = _restart_service(service_unit, restart_command)
+            result["node"]["restarted"] = restarted
+            if not restarted:
+                result["message"] = (
+                    f"pip ok ({check['local_version']} -> {after}) but service restart failed: {restart_err}"
+                )
+                return result
+        else:
+            legacy = apply_wheel_update(
+                repo=repo, service_unit=service_unit, restart_command=restart_command,
+            )
+            result["node"] = {
+                "before": legacy.get("before_version"),
+                "after": legacy.get("after_version"),
+                "source": "github",
+                "restarted": legacy.get("restarted"),
+                "wheel_path": legacy.get("wheel_path"),
+            }
+            if not legacy.get("success"):
+                result["message"] = legacy.get("message") or "github apply failed"
+                return result
+
+    mcp_part = None
+    if include_mcp:
+        mcp_check = check.get("mcp") or {}
+        if not mcp_check.get("installed"):
+            mcp_part = {"installed": False}
+        elif not mcp_check.get("update_available"):
+            mcp_part = {"installed": True, "status": "up to date",
+                        "version": mcp_check.get("local_version")}
+        else:
+            resolve = resolve_mcp_install()
+            if not resolve.get("installed"):
+                mcp_part = {"installed": True, "status": "update available but "
+                            "iowap-mcp binary not resolvable (skipped)"}
+            else:
+                venv_python = resolve["venv_python"]
+                if _venv_dist_url_kind(venv_python) == "dev":
+                    mcp_part = {"installed": True, "status": "refused — toolkit "
+                                "venv holds a dev/editable install"}
+                else:
+                    try:
+                        subprocess.run(
+                            [str(venv_python), "-m", "pip", "install", "--quiet",
+                             "--upgrade", MCP_SPEC],
+                            capture_output=True, text=True, timeout=600.0, check=True,
+                        )
+                        mcp_after = _subprocess_dist_version(venv_python)
+                        mcp_part = {
+                            "installed": True,
+                            "before": mcp_check.get("local_version"),
+                            "after": mcp_after,
+                            "status": "updated (server restarts implicitly on the next client spawn)",
+                        }
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                        tail = (getattr(exc, "stderr", "") or "").strip().splitlines()[-3:]
+                        mcp_part = {
+                            "installed": True,
+                            "status": f"pip upgrade failed: {exc}" + (f" | {tail}" if tail else ""),
+                        }
+        result["mcp"] = mcp_part
+
+    node_after = result["node"]["after"] if result["node"] else None
+    ok = (node_after is not None) if check.get("update_available") else True
+    if not check.get("update_available"):
+        result["message"] = (
+            f"node already up to date ({check.get('local_version')}); source={check.get('source')}"
+        )
+    elif ok and result["node"]:
+        restarted_note = ", service restarted" if result["node"].get("restarted") else ""
+        result["message"] = (
+            f"node updated {result['node']['before']} -> {node_after} "
+            f"(source={result['node']['source']}{restarted_note})"
+        )
+    result["success"] = ok
+    return result
+
+
+def _subprocess_dist_version(python: Path, dist: str = MCP_DIST) -> str | None:
+    """Read the installed version of ``dist`` inside the venv of ``python``."""
+    try:
+        out = subprocess.run(
+            [str(python), "-c",
+             f"import importlib.metadata as m; print(m.version('{dist}'))"],
+            capture_output=True, text=True, timeout=30.0, check=True,
+        ).stdout.strip()
+        return out or None
+    except Exception:  # noqa: BLE001 — probe only
+        return None
 
 
 def post_result_rescue_note(

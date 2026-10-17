@@ -48,13 +48,14 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from nodes.common import file_serve
+from nodes.common import node_utils as _nu
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     ACTIVE_PATH,  # noqa: F401 — re-exported so the test fixture's cli.ACTIVE_PATH patch keeps working (T-117)
@@ -65,8 +66,8 @@ from nodes.common.node_config import (
     load_active_profile,
 )
 from nodes.common.node_utils import (
-    SERVICE_UNIT,  # noqa: F401 — referenced by the update subparser's default
-    RESTART_COMMAND,  # noqa: F401 — referenced by the update subparser's default
+    RESTART_COMMAND,
+    SERVICE_UNIT,
     STATUS_PATH,
     TOKEN_PATH,
     load_json,
@@ -74,7 +75,6 @@ from nodes.common.node_utils import (
     post_result_rescue_note,
     write_json_atomic,
 )
-from nodes.common import node_utils as _nu
 from nodes.common.node_utils import (
     pid_running as _nu_pid_running,
 )
@@ -176,7 +176,7 @@ class Daemon:
         # the probe thread and merged into the status file by _write_status.
         self.server_probe: dict[str, Any] = {"ok": False, "error": "probe pending"}
         self._probe_thread: threading.Thread | None = None
-        self._started_at = datetime.now(timezone.utc)
+        self._started_at = datetime.now(UTC)
         # T-060: per-task failure counter so the daemon stops reclaiming
         # stages for a task whose handler keeps failing (exit 0 with an
         # ``error`` result or an exception). Mirrors the server-side
@@ -507,7 +507,7 @@ def _daemon_start(args: argparse.Namespace) -> int:
         return 0
     BASE_DIR.mkdir(parents=True, exist_ok=True)
     log_fd = open(LOG_PATH, "a", encoding="utf-8")  # noqa: SIM115 — kept open by child
-    proc = subprocess.Popen(  # noqa: S603 — intentional self-spawn
+    proc = subprocess.Popen(
         [sys.executable, "-m", "nodes.common.node_cli", "--daemon-internal"],
         stdout=log_fd,
         stderr=log_fd,
@@ -526,7 +526,7 @@ def _daemon_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def _daemon_stop(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _daemon_stop(args: argparse.Namespace) -> int:
     _setup_logging(args.log_level)
     pid = _read_pid()
     if pid is None or not _pid_running(pid):
@@ -554,7 +554,7 @@ def _daemon_stop(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
-def _daemon_status(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _daemon_status(args: argparse.Namespace) -> int:
     pid = _read_pid()
     running = pid is not None and _pid_running(pid)
     active_profile = current_profile_name()
@@ -585,7 +585,7 @@ def _daemon_restart(args: argparse.Namespace) -> int:
     return _daemon_start(args)
 
 
-def _daemon_foreground(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _daemon_foreground(args: argparse.Namespace) -> int:
     _setup_logging(os.environ.get("RELAY_LOG_LEVEL"))
     try:
         meta = load_meta()
@@ -740,7 +740,7 @@ def _cmd_complete(client: RelayClient, args: argparse.Namespace) -> int:
 # status / reload
 # ---------------------------------------------------------------------------
 
-def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _cmd_status(args: argparse.Namespace) -> int:
     if not STATUS_PATH.exists():
         print("(no status file — daemon not started yet)")
         return 1
@@ -753,7 +753,7 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
-def _cmd_reload(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _cmd_reload(args: argparse.Namespace) -> int:
     # t_c214ca25: notify every live daemon pid file (SSE node-daemon.pid
     # first, legacy polling node-cli.pid fallback). The SSE daemon installs
     # a SIGHUP handler (capability-cache invalidation) — probing only the
@@ -1224,20 +1224,39 @@ def build_parser() -> argparse.ArgumentParser:
     # update (wheel-based self-update)
     p_update = sub.add_parser(
         "update",
-        help="Check for and apply wheel-based self-updates (GitHub releases).",
+        help="Check for and apply self-updates (PyPI-first, GitHub fallback).",
     )
     p_update_sub = p_update.add_subparsers(
         dest="update_command", required=True, metavar="<action>"
     )
     p_update_check = p_update_sub.add_parser(
         "check",
-        help="Compare the installed wheel version against the newest GitHub release.",
+        help="Compare installed versions (node + MCP toolkit) against upstream.",
+    )
+    p_update_check.add_argument(
+        "--source",
+        default=None,
+        choices=["auto", "pypi", "github"],
+        help="Upstream: auto (PyPI→GitHub fallback, default; IOWAP_UPDATE_SOURCE), "
+             "pypi (strict, no fallback) or github (legacy wheel releases).",
     )
     p_update_check.set_defaults(func=cli_update._cmd_update_check)
 
     p_update_apply = p_update_sub.add_parser(
         "apply",
-        help="Download the newest wheel release, reinstall it and restart the service.",
+        help="Update node (PyPI pip upgrade / GitHub fallback) and the MCP toolkit.",
+    )
+    p_update_apply.add_argument(
+        "--source",
+        default=None,
+        choices=["auto", "pypi", "github"],
+        help="Upstream for the node update: auto (PyPI→GitHub, default), "
+             "pypi (strict) or github (legacy wheel download path).",
+    )
+    p_update_apply.add_argument(
+        "--no-mcp",
+        action="store_true",
+        help="Skip the iowap-client-mcp check/upgrade in this run.",
     )
     p_update_apply.add_argument(
         "--service-unit",

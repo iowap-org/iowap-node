@@ -14,19 +14,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from unittest.mock import MagicMock
-
-import pytest
 
 from nodes.common import node_utils
 from nodes.common.node_utils import (
     apply_wheel_update,
     check_wheel_updates,
     get_latest_release_version,
-    get_local_wheel_version,
 )
-
 
 # ---------------------------------------------------------------------------
 # get_local_wheel_version
@@ -280,27 +275,71 @@ def test_apply_restart_failure_after_pip(monkeypatch, tmp_path):
 
 def test_cli_check_json(monkeypatch, capsys):
     from nodes.common.cli import cli_update
-    _patch_lookup(monkeypatch, "2.4.0")
-    monkeypatch.setattr(node_utils, "get_local_wheel_version", lambda: "2.3.8")
-    rc = cli_update._cmd_update_check(argparse.Namespace(json=True, log_level="ERROR"))
+    monkeypatch.setattr(
+        node_utils, "get_local_dist_version",
+        lambda dist: "2.3.8" if dist == node_utils.NODE_DIST else None,
+    )
+    monkeypatch.setattr(
+        node_utils, "resolve_update_source",
+        lambda dist, source=None, repo=None: {
+            "latest_version": "2.4.0", "tag": None, "asset_name": None,
+            "asset_url": None, "error": None, "source": "pypi",
+        },
+    )
+    monkeypatch.setattr(node_utils, "get_dist_url_kind", lambda dist: None)
+    rc = cli_update._cmd_update_check(
+        argparse.Namespace(json=True, log_level="ERROR", source=None)
+    )
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["update_available"] is True
+    assert out["mcp"] == {"installed": False}
 
 
 def test_cli_apply_json(monkeypatch, capsys):
     from nodes.common.cli import cli_update
-    _patch_lookup(monkeypatch, "2.3.8")
-    monkeypatch.setattr(node_utils, "get_local_wheel_version", lambda: "2.3.8")
+    monkeypatch.setattr(node_utils, "check_updates", lambda **k: {
+        "local_version": "2.3.8", "local_kind": None,
+        "latest_version": "2.3.8", "source": "pypi",
+        "update_available": False, "error": None, "mcp": {"installed": False},
+    })
     rc = cli_update._cmd_update_apply(
         argparse.Namespace(
             json=True, log_level="ERROR", service_unit="noop.service",
-            restart_command=None,
+            restart_command=None, source=None, no_mcp=False,
         )
     )
-    assert rc == 1  # already up to date -> not "success"
+    # T-229 semantic change: an apply with nothing to update is a clean
+    # no-op success (rc 0) — cron-friendly, like `check` reporting 'up to date'.
+    assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert "already up to date" in out["message"]
+    # toolkit ABSENT is data, not a skip: include_mcp=True reports it.
+    assert out["mcp"] == {"installed": False}
+
+
+def test_cli_check_github_fallback_note(monkeypatch, capsys):
+    from nodes.common.cli import cli_update
+    monkeypatch.setattr(
+        node_utils, "resolve_update_source",
+        lambda dist, source=None, repo=None: {
+            "latest_version": "2.4.0", "tag": "wheel-v2.4.0",
+            "asset_name": "iowap_node-2.4.0-py3-none-any.whl",
+            "asset_url": "https://x/a.whl", "error": None, "source": "github",
+            "pypi_error": "PyPI lookup failed: offline",
+        },
+    )
+    monkeypatch.setattr(
+        node_utils, "get_local_dist_version",
+        lambda dist: "2.3.8" if dist == node_utils.NODE_DIST else None,
+    )
+    monkeypatch.setattr(node_utils, "get_dist_url_kind", lambda dist: None)
+    rc = cli_update._cmd_update_check(
+        argparse.Namespace(json=True, log_level="ERROR", source="auto")
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["source"] == "github" and out["pypi_error"].startswith("PyPI lookup failed")
 
 
 # ---------------------------------------------------------------------------
@@ -416,13 +455,20 @@ def test_apply_cli_restart_command_flag(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(node_utils.subprocess, "run", fake_run)
     monkeypatch.setattr(node_utils.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(node_utils, "check_updates", lambda **k: {
+        "local_version": "2.3.8", "local_kind": None,
+        "latest_version": "2.4.0", "source": "github",
+        "update_available": True, "error": None, "mcp": {"installed": False},
+    })
     rc = cli_update._cmd_update_apply(argparse.Namespace(
         json=True, log_level="ERROR", service_unit="flag.service",
-        restart_command="/bin/true {unit}",
+        restart_command="/bin/true {unit}", source="github", no_mcp=True,
     ))
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["restarted"] is True
+    # T-229: the restart hook lives in the node block (source=github path).
+    assert out["node"]["restarted"] is True
+    assert out["node"]["source"] == "github"
     assert calls[1] == ["/bin/true", "flag.service"]
 
 
