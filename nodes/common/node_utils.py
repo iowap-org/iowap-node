@@ -748,7 +748,7 @@ def apply_updates(
             try:
                 subprocess.run(
                     [sys.executable, "-m", "pip", "install", "--quiet",
-                     "--upgrade", NODE_DIST],
+                     "--upgrade", "--no-cache-dir", NODE_DIST],
                     capture_output=True, text=True, timeout=600.0, check=True,
                 )
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -816,21 +816,22 @@ def apply_updates(
                     try:
                         subprocess.run(
                             [str(venv_python), "-m", "pip", "install", "--quiet",
-                             "--upgrade", MCP_SPEC],
+                             "--upgrade", "--no-cache-dir", MCP_SPEC],
                             capture_output=True, text=True, timeout=600.0, check=True,
                         )
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                        tail = (getattr(exc, "stderr", "") or "").strip().splitlines()[-3:]
+                        mcp_part = {
+                            "installed": True,
+                            "status": f"pip upgrade failed: {exc}" + (f" | {tail}" if tail else ""),
+                        }
+                    else:
                         mcp_after = _subprocess_dist_version(venv_python)
                         mcp_part = {
                             "installed": True,
                             "before": mcp_check.get("local_version"),
                             "after": mcp_after,
                             "status": "updated (server restarts implicitly on the next client spawn)",
-                        }
-                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                        tail = (getattr(exc, "stderr", "") or "").strip().splitlines()[-3:]
-                        mcp_part = {
-                            "installed": True,
-                            "status": f"pip upgrade failed: {exc}" + (f" | {tail}" if tail else ""),
                         }
         result["mcp"] = mcp_part
 

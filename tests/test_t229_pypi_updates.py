@@ -179,12 +179,13 @@ def test_apply_pypi_runs_full_upgrade_in_its_own_venv(monkeypatch) -> None:
     out = nu.apply_updates()
     assert out["success"] is True
     assert calls[0] == [nu.sys.executable, "-m", "pip", "install", "--quiet",
-                        "--upgrade", "iowap-node"]
+                        "--upgrade", "--no-cache-dir", "iowap-node"]
     assert "--no-deps" not in calls[0]  # full upgrade, deps may move
     # order: node pip-upgrade, service restart, mcp pip-upgrade, version probe
     assert calls[1] == ["systemctl", "--user", "restart", "iowap-node-daemon.service"]
     assert out["node"]["restarted"] is True  # same restart contract as legacy
     assert calls[2][:3] == ["/tmp/mcp/.venv/bin/python", "-m", "pip"]
+    assert "--no-cache-dir" in calls[2]
     assert "iowap-client-mcp[mcp]" in calls[2]
     out_mcp = out["mcp"]
     assert out_mcp["before"] == "0.1.1" and out_mcp["after"] == "0.1.2"
