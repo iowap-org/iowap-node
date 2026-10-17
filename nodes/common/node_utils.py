@@ -434,22 +434,37 @@ def bump_relevant_version(latest: str | None, local: str | None) -> bool:
         return False
 
 
-def get_dist_url_kind(dist: str) -> str | None:
-    """``"dev"`` when the dist was installed editable / from a local path.
+def _direct_url_kind(raw: str | None) -> str | None:
+    """Classify a ``direct_url.json`` payload — 'dev' ONLY for editable installs.
 
-    Reads ``direct_url.json`` of the installed distribution: registry installs
-    (PyPI) don't carry it, dev/editable installs carry ``file://`` URLs. Runs
-    the check inside the RUNNING interpreter's environment — for another
-    venv, pass its ``direct_url.json`` via :func:`_is_dev_venv_install`.
+    Editable installs carry ``dir_info.editable: true``. A LOCAL WHEEL file
+    install (legacy `update apply` path) also records a ``file://`` URL —
+    that is a registry-grade install and must NOT be refused.
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    dir_info = data.get("dir_info") if isinstance(data, dict) else None
+    if isinstance(dir_info, dict) and dir_info.get("editable") is True:
+        return "dev"
+    return None
+
+
+def get_dist_url_kind(dist: str) -> str | None:
+    """``"dev"`` when the dist was installed EDITABLE (not a local wheel).
+
+    Reads ``direct_url.json`` of the installed distribution: registry and
+    local-wheel installs must be updatable, editable (pip -e .) installs are
+    dev-land and refuse ``apply``. Runs the check inside the RUNNING
+    interpreter's environment — for another venv, pass the payload reader.
     """
     try:
         from importlib import metadata
 
-        raw = metadata.distribution(dist).read_text("direct_url.json")
-        if raw is None:
-            return None
-        url = json.loads(raw).get("url", "")
-        return "dev" if url.startswith("file://") else None
+        return _direct_url_kind(metadata.distribution(dist).read_text("direct_url.json"))
     except Exception:  # noqa: BLE001 — unreadable metadata = not a dev install
         return None
 
@@ -573,8 +588,7 @@ def _venv_dist_url_kind(venv_python: Path, dist: str = MCP_DIST) -> str | None:
         ).stdout.strip()
         if not out or out == "None":
             return None
-        url = json.loads(out).get("url", "")
-        return "dev" if url.startswith("file://") else None
+        return _direct_url_kind(out)
     except Exception:  # noqa: BLE001 — unreadable = treat as registry install
         return None
 

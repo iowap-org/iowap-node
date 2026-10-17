@@ -286,6 +286,23 @@ def test_resolve_mcp_install_venv_layout(monkeypatch, tmp_path: Path) -> None:
     assert out["venv"] == tmp_path / "iowap-client-mcp" / ".venv"
 
 
+def test_direct_url_kind_distinguishes_editable_vs_local_wheel() -> None:
+    """Dev-guard discriminator: editable YES, local-wheel NO (T-229 fix).
+
+    The legacy apply path installs from a downloaded wheel file — pip writes
+    direct_url.json with a file:// URL and NO editable marker; such installs
+    must stay updatable. (Live finding: the url-prefix heuristic would have
+    wedged felix at 2.3.21 forever.)"""
+    editable = json.dumps({"url": "file:///x/iowap-node", "dir_info": {"editable": True}})
+    wheel_file = json.dumps({"url": "file:///home/x/.relay/wheels/iowap_node-2.3.21-py3-none-any.whl"})
+    assert nu._direct_url_kind(editable) == "dev"
+    assert nu._direct_url_kind(wheel_file) is None
+    assert nu._direct_url_kind(None) is None
+    assert nu._direct_url_kind("") is None
+    assert nu._direct_url_kind("not json {") is None
+    assert nu._direct_url_kind(json.dumps({"url": "https://pypi.org/x.whl"})) is None
+
+
 def test_suite_namespaces_importable() -> None:
     """Sanity: the new API is reachable via the public module namespace."""
     mod = importlib.import_module("nodes.common.node_utils")
