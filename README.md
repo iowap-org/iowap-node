@@ -8,11 +8,22 @@ The node framework provides everything you need to register, heartbeat, claim ta
 
 ## Quick Start (Linux)
 
+**One-liner** — installs the Python package **from PyPI** into a dedicated
+venv (systemd user unit, registration; re-runs offer update / override /
+uninstall). `IOWAP_SOURCE=git` switches to a checkout-based dev install.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iowap-org/iowap-node/main/install.sh | bash
 ```
 
-Manuell (jede Plattform):
+**From PyPI (manual, any platform)**:
+
+```bash
+pip install "iowap-node"          # import namespace: nodes
+node-cli mcp install              # optional: the MCP toolkit (own venv)
+```
+
+**From source (dev)**:
 
 ```bash
 git clone https://github.com/iowap-org/iowap-node.git
@@ -23,6 +34,9 @@ cp relay_config.json.example ~/.relay/relay_config.json
 node-cli node register
 node-cli capabilities publish default
 ```
+
+**Updates**: `node-cli update check` (node + MCP toolkit) and
+`node-cli update apply` — PyPI-first with the GitHub release as fallback.
 
 ## What You Can Build
 
