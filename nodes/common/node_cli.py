@@ -118,6 +118,7 @@ from nodes.common.cli import (
     cli_docs,
     cli_file,
     cli_hp,  # T-179: handler primitives (hp put/get) — subcommand registration below
+    cli_mcp,  # T-230: toolkit install/status (client-neutral)
     cli_node,
     cli_route,
     cli_server,
@@ -1273,6 +1274,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_update_apply.set_defaults(func=cli_update._cmd_update_apply)
+
+    # mcp (T-230): toolkit install/status — client-neutral admin surface
+    cli_mcp.build_parser(sub)
 
     return parser
 

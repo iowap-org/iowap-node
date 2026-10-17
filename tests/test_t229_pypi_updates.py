@@ -96,12 +96,12 @@ def test_check_updates_with_mcp_installed_and_outdated(monkeypatch) -> None:
     monkeypatch.setattr(nu, "resolve_update_source", lambda d, source=None, repo=None: {"latest_version": "2.3.20", "source": "pypi", "error": None})
     monkeypatch.setattr(nu, "get_pypi_latest_version", lambda d: {"latest_version": "0.1.2", "source": "pypi", "error": None})
     monkeypatch.setattr(nu, "get_dist_url_kind", lambda d: None)
-    monkeypatch.setattr(nu, "resolve_mcp_install", lambda: {"installed": True, "venv": "V", "venv_python": "PY"})
+    monkeypatch.setattr(nu, "resolve_mcp_install", lambda: {"installed": True, "venv": Path("V"), "venv_python": "PY"})
     out = nu.check_updates()
     assert out["update_available"] is False  # node current
     assert out["mcp"] == {"installed": True, "local_version": "0.1.1",
                           "latest_version": "0.1.2", "update_available": True,
-                          "error": None, "venv": "V"}
+                          "error": None, "venv": "V", "binary": "V/bin/iowap-mcp"}
     assert out["source"] == "pypi"
 
 
@@ -131,7 +131,7 @@ def test_check_updates_finds_mcp_in_foreign_venv(monkeypatch) -> None:
     absent, but the Hermes MCP registration points at its own venv.)"""
     monkeypatch.setattr(nu, "get_local_dist_version", lambda d: "2.3.20" if d == nu.NODE_DIST else None)
     monkeypatch.setattr(nu, "resolve_mcp_install", lambda: {
-        "installed": True, "venv_python": "PY", "venv": "V"})
+        "installed": True, "venv_python": "PY", "venv": Path("V")})
     probe = lambda python, dist=None: "0.1.2"
     monkeypatch.setattr(nu, "_subprocess_dist_version", probe)
     monkeypatch.setattr(nu, "resolve_update_source", lambda d, source=None, repo=None: {"latest_version": "2.3.20", "source": "pypi", "error": None})
@@ -141,6 +141,7 @@ def test_check_updates_finds_mcp_in_foreign_venv(monkeypatch) -> None:
     mcp = out["mcp"]
     assert mcp["installed"] is True and mcp["local_version"] == "0.1.2"
     assert mcp["update_available"] is False and mcp["venv"] == "V"
+    assert mcp["binary"] == "V/bin/iowap-mcp"
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +289,22 @@ def test_resolve_mcp_install_fallback_home_local(monkeypatch, tmp_path: Path) ->
     # ~/.local/bin holds the binary without a venv-python sibling — the
     # venv gate refuses it deliberately (a bare script is not an install).
     assert out.get("installed") is False
+
+
+def test_resolve_mcp_install_env_venv(monkeypatch, tmp_path: Path) -> None:
+    """IOWAP_MCP_VENV = the same hint install uses (custom --venv layouts)."""
+    monkeypatch.setattr(nu.shutil, "which", lambda *_: None)
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setenv("IOWAP_MCP_VENV", str(tmp_path / "custom"))
+    venv_bin = tmp_path / "custom" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").write_text("#!/bin/sh\nexit 0\n")
+    exe = venv_bin / "iowap-mcp"
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    out = nu.resolve_mcp_install()
+    assert out["installed"] is True
+    assert out["venv"] == tmp_path / "custom"
 
 
 def test_resolve_mcp_install_hermes_config_layout(monkeypatch, tmp_path: Path) -> None:

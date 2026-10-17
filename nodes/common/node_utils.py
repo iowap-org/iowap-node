@@ -515,16 +515,18 @@ def resolve_update_source(
 def resolve_mcp_install() -> dict:
     """Locate a potentially installed iowap-client-mcp on this host.
 
-    Chain: PATH (shutil.which) → ~/.local/bin → ~/iowap-client-mcp/.venv →
-    ~/projects/iowap-client-mcp/.venv → the Hermes MCP registration
-    (~/.hermes/config.yaml: any mcp_servers entry whose command basename is
-    ``iowap-mcp`` — the authoritative hint on Hermes hosts).
-    Returns ``{"installed": True, "venv_python": Path}`` when the binary
-    resolves, ``{"installed": False}`` otherwise (not an error — the toolkit
-    is optional on a node host).
+    Chain: PATH (shutil.which) → IOWAP_MCP_VENV env → ~/.local/bin →
+    ~/iowap-client-mcp/.venv → ~/projects/iowap-client-mcp/.venv → the
+    Hermes MCP registration (~/.hermes/config.yaml: any mcp_servers entry
+    whose command basename is ``iowap-mcp`` — the authoritative hint on
+    Hermes hosts). Returns ``{"installed": True, "venv_python": Path}``
+    when the binary resolves, ``{"installed": False}`` otherwise (not an
+    error — the toolkit is optional on a node host).
     """
+    env_venv = os.environ.get("IOWAP_MCP_VENV", "")
     candidates = [
         shutil.which("iowap-mcp"),
+        (Path(env_venv) / "bin" / "iowap-mcp").as_posix() if env_venv else None,
         os.path.expanduser("~/.local/bin/iowap-mcp"),
         os.path.expanduser("~/iowap-client-mcp/.venv/bin/iowap-mcp"),
         os.path.expanduser("~/projects/iowap-client-mcp/.venv/bin/iowap-mcp"),
@@ -593,6 +595,94 @@ def _venv_dist_url_kind(venv_python: Path, dist: str = MCP_DIST) -> str | None:
         return None
 
 
+def _mcp_block(
+    *,
+    discovered: dict | None = None,
+    source_check: bool = True,
+) -> dict:
+    """Single source of truth for the MCP-toolkit state (check + status).
+
+    Order (T-230): binary discovery chain → version from the toolkit's OWN
+    venv (foreign-venv case) → running-venv metadata only as fallback.
+    Absence is data (``installed: false``), never an error.
+    """
+    resolve = discovered or resolve_mcp_install()
+    mcp_local = get_local_dist_version(MCP_DIST)
+    if mcp_local is None and resolve.get("installed"):
+        mcp_local = _subprocess_dist_version(resolve["venv_python"])
+    if mcp_local is None:
+        return {"installed": False, "discovered": bool(resolve.get("installed"))}
+    block: dict = {"installed": True, "local_version": mcp_local}
+    if source_check:
+        pypi_info = get_pypi_latest_version(MCP_DIST)
+        block.update({
+            "latest_version": pypi_info["latest_version"],
+            "update_available": bool(
+                pypi_info["latest_version"]
+                and bump_relevant_version(pypi_info["latest_version"], mcp_local)
+            ),
+            "error": pypi_info["error"],
+        })
+    block["venv"] = str(resolve.get("venv", "")) if resolve.get("installed") else ""
+    block["binary"] = str((resolve["venv"] / "bin" / "iowap-mcp").as_posix()) if resolve.get("installed") else ""
+    return block
+
+
+def install_mcp_toolkit(*, venv_path: str | None = None) -> dict:
+    """Install/upgrade the MCP toolkit into its own venv — client-neutral.
+
+    Default venv: ``~/iowap-client-mcp/.venv`` (created from the RUNNING
+    interpreter, so the version floor of node-cli applies). Registry source
+    only (PyPI) — keeps every install updatable by ``update apply``. This
+    command wires NOTHING into any MCP client: every agent registers the
+    printed binary path with its own mechanism (Hermes ``mcp add``,
+    Codex ``config.toml``, …).
+    """
+    venv = Path(venv_path) if venv_path else Path.home() / "iowap-client-mcp" / ".venv"
+    bin_dir = venv / "bin"
+    result: dict = {
+        "success": False, "message": "", "venv": str(venv), "binary": "",
+        "version": None, "before_version": None,
+    }
+    before = get_local_dist_version(MCP_DIST) or (
+        _subprocess_dist_version(bin_dir / "python") if (bin_dir / "python").exists() else None
+    )
+    result["before_version"] = before
+    if not bin_dir.exists():
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(venv)],
+                capture_output=True, text=True, timeout=120.0, check=True,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            tail = (getattr(exc, "stderr", "") or "").strip().splitlines()[-2:]
+            result["message"] = f"venv creation failed: {exc}" + (f" | {tail}" if tail else "")
+            return result
+    try:
+        subprocess.run(
+            [str(bin_dir / "python"), "-m", "pip", "install", "--quiet",
+             "--upgrade", MCP_SPEC],
+            capture_output=True, text=True, timeout=600.0, check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        tail = (getattr(exc, "stderr", "") or "").strip().splitlines()[-3:]
+        result["message"] = f"pip install failed: {exc}" + (f" | {tail}" if tail else "")
+        return result
+    version = _subprocess_dist_version(bin_dir / "python")
+    binary = bin_dir / "iowap-mcp"
+    if not version or not binary.is_file() or not os.access(binary, os.X_OK):
+        result["message"] = "pip ok but toolkit verification failed (version/binary missing)"
+        return result
+    result["success"] = True
+    result["version"] = version
+    result["binary"] = str(binary)
+    result["message"] = (
+        f"toolkit {'upgraded to' if before else 'installed'} {version} in {venv}"
+        + (f" (was {before})" if before and before != version else "")
+    )
+    return result
+
+
 def check_updates(
     *,
     dist: str = "iowap-node",
@@ -615,28 +705,7 @@ def check_updates(
         and bump_relevant_version(info["latest_version"], local)
     )
     if include_mcp:
-        resolve = resolve_mcp_install()
-        mcp_local = get_local_dist_version(MCP_DIST)
-        if mcp_local is None and resolve.get("installed"):
-            # Toolkit lives in ANOTHER venv (typical: client-mcp venv next to
-            # the node venv) — the running interpreter's metadata can't see
-            # it; probe the discovered venv's python instead.
-            mcp_local = _subprocess_dist_version(resolve["venv_python"])
-        if mcp_local is None:
-            info["mcp"] = {"installed": False, "discovered": bool(resolve.get("installed"))}
-        else:
-            mcp_info = get_pypi_latest_version(MCP_DIST)
-            info["mcp"] = {
-                "installed": True,
-                "local_version": mcp_local,
-                "latest_version": mcp_info["latest_version"],
-                "update_available": bool(
-                    mcp_info["latest_version"]
-                    and bump_relevant_version(mcp_info["latest_version"], mcp_local)
-                ),
-                "error": mcp_info["error"],
-                "venv": str(resolve.get("venv", "")) if resolve.get("installed") else "",
-            }
+        info["mcp"] = _mcp_block(source_check=True)
     return info
 
 
