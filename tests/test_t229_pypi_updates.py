@@ -96,10 +96,12 @@ def test_check_updates_with_mcp_installed_and_outdated(monkeypatch) -> None:
     monkeypatch.setattr(nu, "resolve_update_source", lambda d, source=None, repo=None: {"latest_version": "2.3.20", "source": "pypi", "error": None})
     monkeypatch.setattr(nu, "get_pypi_latest_version", lambda d: {"latest_version": "0.1.2", "source": "pypi", "error": None})
     monkeypatch.setattr(nu, "get_dist_url_kind", lambda d: None)
+    monkeypatch.setattr(nu, "resolve_mcp_install", lambda: {"installed": True, "venv": "V", "venv_python": "PY"})
     out = nu.check_updates()
     assert out["update_available"] is False  # node current
     assert out["mcp"] == {"installed": True, "local_version": "0.1.1",
-                          "latest_version": "0.1.2", "update_available": True, "error": None}
+                          "latest_version": "0.1.2", "update_available": True,
+                          "error": None, "venv": "V"}
     assert out["source"] == "pypi"
 
 
@@ -109,16 +111,36 @@ def test_check_updates_mcp_not_installed_is_not_an_error(monkeypatch) -> None:
         if state["mcp"] and dist == nu.MCP_DIST:
             return "0.1.2"
         return "2.3.20" if dist == nu.NODE_DIST else None
+    monkeypatch.setattr(nu, "resolve_mcp_install", lambda: {"installed": False})
     monkeypatch.setattr(nu, "get_local_dist_version", _local)
     monkeypatch.setattr(nu, "resolve_update_source", lambda d, source=None, repo=None: {"latest_version": "2.3.20", "source": "pypi", "error": None})
     monkeypatch.setattr(nu, "get_dist_url_kind", lambda d: None)
     monkeypatch.setattr(nu, "get_pypi_latest_version", lambda d: {"latest_version": "0.1.2", "source": "pypi", "error": None})
     out = nu.check_updates()
-    assert out["mcp"] == {"installed": False}
+    assert out["mcp"] == {"installed": False, "discovered": False}
     assert out["update_available"] is False
-    state["mcp"] = True  # same setup with the toolkit present: no exception either
+    state["mcp"] = True
     out = nu.check_updates()
     assert out["mcp"]["update_available"] is False
+
+
+def test_check_updates_finds_mcp_in_foreign_venv(monkeypatch) -> None:
+    """The toolkit is NOT in the node's venv — discovered via its binary.
+
+    (Felix live case: running-installer metadata says iowap-client-mcp is
+    absent, but the Hermes MCP registration points at its own venv.)"""
+    monkeypatch.setattr(nu, "get_local_dist_version", lambda d: "2.3.20" if d == nu.NODE_DIST else None)
+    monkeypatch.setattr(nu, "resolve_mcp_install", lambda: {
+        "installed": True, "venv_python": "PY", "venv": "V"})
+    probe = lambda python, dist=None: "0.1.2"
+    monkeypatch.setattr(nu, "_subprocess_dist_version", probe)
+    monkeypatch.setattr(nu, "resolve_update_source", lambda d, source=None, repo=None: {"latest_version": "2.3.20", "source": "pypi", "error": None})
+    monkeypatch.setattr(nu, "get_dist_url_kind", lambda d: None)
+    monkeypatch.setattr(nu, "get_pypi_latest_version", lambda d: {"latest_version": "0.1.2", "source": "pypi", "error": None})
+    out = nu.check_updates()
+    mcp = out["mcp"]
+    assert mcp["installed"] is True and mcp["local_version"] == "0.1.2"
+    assert mcp["update_available"] is False and mcp["venv"] == "V"
 
 
 # ---------------------------------------------------------------------------

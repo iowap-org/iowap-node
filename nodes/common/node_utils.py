@@ -615,9 +615,15 @@ def check_updates(
         and bump_relevant_version(info["latest_version"], local)
     )
     if include_mcp:
+        resolve = resolve_mcp_install()
         mcp_local = get_local_dist_version(MCP_DIST)
+        if mcp_local is None and resolve.get("installed"):
+            # Toolkit lives in ANOTHER venv (typical: client-mcp venv next to
+            # the node venv) — the running interpreter's metadata can't see
+            # it; probe the discovered venv's python instead.
+            mcp_local = _subprocess_dist_version(resolve["venv_python"])
         if mcp_local is None:
-            info["mcp"] = {"installed": False}
+            info["mcp"] = {"installed": False, "discovered": bool(resolve.get("installed"))}
         else:
             mcp_info = get_pypi_latest_version(MCP_DIST)
             info["mcp"] = {
@@ -629,6 +635,7 @@ def check_updates(
                     and bump_relevant_version(mcp_info["latest_version"], mcp_local)
                 ),
                 "error": mcp_info["error"],
+                "venv": str(resolve.get("venv", "")) if resolve.get("installed") else "",
             }
     return info
 

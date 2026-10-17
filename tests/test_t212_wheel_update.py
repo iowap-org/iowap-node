@@ -287,13 +287,14 @@ def test_cli_check_json(monkeypatch, capsys):
         },
     )
     monkeypatch.setattr(node_utils, "get_dist_url_kind", lambda dist: None)
+    monkeypatch.setattr(node_utils, "resolve_mcp_install", lambda: {"installed": False})
     rc = cli_update._cmd_update_check(
         argparse.Namespace(json=True, log_level="ERROR", source=None)
     )
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["update_available"] is True
-    assert out["mcp"] == {"installed": False}
+    assert out["mcp"] == {"installed": False, "discovered": False}
 
 
 def test_cli_apply_json(monkeypatch, capsys):
