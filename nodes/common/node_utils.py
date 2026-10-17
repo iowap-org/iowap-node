@@ -687,6 +687,17 @@ def apply_updates(
                 result["message"] = f"pip upgrade failed: {exc}" + (f" | {tail}" if tail else "")
                 return result
             after = get_local_dist_version(NODE_DIST)
+            if not after or not bump_relevant_version(after, check["local_version"]):
+                # Honest no-op: pip's (cached) simple index can lag the PyPI
+                # JSON the check used (CDN TTL ≈10 min) — nothing moved.
+                result["message"] = (
+                    f"pip resolved nothing new (still {check['local_version']}) — "
+                    "the pip/simple index lags the PyPI JSON; retry in a few minutes"
+                )
+                result["node"] = {"before": check["local_version"], "after": after,
+                                  "source": "pypi", "restarted": False}
+                result["success"] = False
+                return result
             result["node"] = {"before": check["local_version"],
                               "after": after,
                               "source": "pypi"}

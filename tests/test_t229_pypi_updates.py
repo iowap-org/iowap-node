@@ -231,6 +231,34 @@ def test_apply_mcp_skipped_via_no_mcp_flag(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# honest pip-lag no-op
+# ---------------------------------------------------------------------------
+
+
+def test_apply_pypi_noop_reports_index_lag_honestly(monkeypatch) -> None:
+    """pip's simple index can lag the PyPI JSON the check used (CDN TTL)
+    → pip resolves nothing -> that is NOT success; the result must be
+    retriable, never claim 'updated' without a version change."""
+    calls: list[list[str]] = []
+
+    def _run(argv, **kwargs):
+        calls.append([str(x) for x in argv])
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(nu.subprocess, "run", _run)
+    monkeypatch.setattr(nu, "get_local_dist_version", lambda dist=None: "2.3.22")
+    monkeypatch.setattr(nu, "check_updates", lambda **k: {
+        "local_version": "2.3.22", "local_kind": None,
+        "latest_version": "2.3.24", "source": "pypi",
+        "update_available": True, "error": None, "mcp": {"installed": False},
+    })
+    out = nu.apply_updates(include_mcp=False)
+    assert out["success"] is False
+    assert "retry" in out["message"] and "lags" in out["message"]
+    assert out["node"]["restarted"] is False
+
+
+# ---------------------------------------------------------------------------
 # MCP binary discovery
 # ---------------------------------------------------------------------------
 
