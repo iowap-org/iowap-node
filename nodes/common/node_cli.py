@@ -840,6 +840,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Node ID that must claim this task (owner_node_id).",
     )
+    p_submit.add_argument(
+        "--forward-slot",
+        default=None,
+        metavar="slot",
+        help="Submit against the relay's 'forward' pseudo-capability: replaces the "
+        "--stage capability with 'forward' and carries the slot in the payload; "
+        "the relay resolves (this node, slot) -> target capability via its "
+        "forward mappings (slots are per-node, 1..64 chars of A-Za-z0-9_-).",
+    )
     p_submit.set_defaults(func=with_client(cli_task._cmd_task_submit))
 
     p_result = p_task_sub.add_parser("result", help="Show task result (status, stages, artifacts).")

@@ -24,6 +24,7 @@ from typing import Any
 
 import httpx
 
+from nodes.common.forward import apply_forward_slot
 from nodes.common.node_config import load_active_status
 from nodes.common.node_utils import load_config, load_token, save_meta, save_token
 
@@ -893,7 +894,21 @@ class RelayClient:
         name: str = "",
         priority: int = 0,
         owner_node_id: str | None = None,
+        forward_slot: str | None = None,
     ) -> dict[str, Any]:
+        """Submit a single-stage task to the relay.
+
+        With ``forward_slot``, the request is encoded against the relay's
+        ``forward`` pseudo-capability: ``capability`` is forced to ``forward``
+        and the normalized slot rides inside ``payload["forward_slot"]``; the
+        relay resolves (this node, slot) → target capability and redirects.
+        Relay refusal errors (404 forward_node_unknown, 422 forward_mapping_*,
+        422 target_unknown_capability, 400 redirect_self) are raised as
+        ``httpx.HTTPStatusError`` carrying ``{"detail": "<code>: <message>"}``
+        and are NEVER retried (design.md D-9). Callers' payload dict is never
+        mutated.
+        """
+        capability, payload = apply_forward_slot(capability, payload, forward_slot)
         body = {
             "capability": capability,
             "payload": payload,

@@ -52,6 +52,8 @@ from typing import Any
 
 import yaml
 
+from nodes.common.forward import FORWARD_CAPABILITY
+
 # ---------------------------------------------------------------------------
 # JSON Schema for capability profiles (Draft 2020-12)
 # ---------------------------------------------------------------------------
@@ -449,6 +451,14 @@ def _normalize_caps_list(
         if cap["name"] in seen:
             raise CapabilityValidationError(
                 f"duplicate capability name {cap['name']!r}",
+                file=file,
+                capability=cap["name"],
+            )
+        if cap["name"] == FORWARD_CAPABILITY:
+            raise CapabilityValidationError(
+                "'forward' is the relay's forward-routing pseudo-capability and must not be a node "
+                "capability — it is never advertised (submit with --forward-slot instead; see "
+                "the IOWAP docs, concepts/forward-routing.md)",
                 file=file,
                 capability=cap["name"],
             )

@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from typing import Any
 
 import httpx
 
+from nodes.common.forward import (
+    FORWARD_CAPABILITY,
+    ForwardSlotError,
+    apply_forward_slot,
+    forward_hint,
+)
 from nodes.common.relay_client import RelayClient
 
 
@@ -36,15 +43,60 @@ def _parse_stage_arg(stage: str) -> tuple[str, dict[str, Any]]:
     return cap, payload
 
 
+_RELAY_ERROR_CODE_PATTERN = re.compile(r"^([a-z_]+): (.*)$", re.DOTALL)
+
+
+def _parse_relay_error(response: httpx.Response) -> tuple[str | None, str]:
+    """Extract ("<code>", "<message>") from a relay error response.
+
+    Reads the FastAPI error shape ``{"detail": "<code>: <message>"}``;
+    falls back to the raw response text. Returns ``(None, detail_or_empty)``
+    when the detail does not match the ``<lowercase-snake-code>: <message>``
+    shape. Pure — never raises.
+    """
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if not isinstance(detail, str):
+        detail = response.text or ""
+    match = _RELAY_ERROR_CODE_PATTERN.match(detail)
+    if match:
+        return match.group(1), match.group(2)
+    return None, detail
+
+
 def _cmd_task_submit(client: RelayClient, args) -> int:
     cap, payload = _parse_stage_arg(args.stage)
-    resp = client.submit_simple_task(
-        cap,
-        payload,
-        name=args.name or "",
-        priority=args.priority,
-        owner_node_id=args.owner,
-    )
+    try:
+        cap, payload = apply_forward_slot(cap, payload, args.forward_slot)
+    except ForwardSlotError as exc:
+        raise SystemExit(
+            f"invalid --forward-slot {args.forward_slot!r}: {exc.message}"
+            " — allowed: 1..64 chars of A-Za-z0-9_- (no whitespace, no dots)"
+        )
+    if cap == FORWARD_CAPABILITY and "forward_slot" not in payload:
+        raise SystemExit(
+            "refusing to submit capability 'forward' without a slot — pass "
+            "--forward-slot <slot> or add a forward_slot key to the stage payload"
+        )
+    try:
+        resp = client.submit_simple_task(
+            cap,
+            payload,
+            name=args.name or "",
+            priority=args.priority,
+            owner_node_id=args.owner,
+        )
+    except httpx.HTTPStatusError as exc:
+        code, _message = _parse_relay_error(exc.response)
+        print(f"submit failed: HTTP {exc.response.status_code}: {exc.response.text.strip()}",
+              file=sys.stderr)
+        hint = forward_hint(code)
+        if hint:
+            print(f"hint: {hint}", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(resp, default=str))
         return 0
