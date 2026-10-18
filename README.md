@@ -72,7 +72,13 @@ capabilities:
           description: "low / normal / high"
 ```
 
-Just write a handler script that reads the JSON payload from stdin, calls your push service, and writes the result to stdout. That's it — the node framework handles the rest.
+Just write a handler script that reads the JSON handler envelope from stdin, calls your push service, and writes the result to stdout. Your schema fields arrive NESTED under the `input` key of the envelope — not at the top level:
+
+```
+{"task_id": "...", "capability": "notification.send", "input": {"title": "...", "body": "...", "priority": "normal"}}
+```
+
+That is the frozen T-005b Envelope-Contract (`handler_runner._build_stdin_payload`); stdout is normalized back into the Response Envelope (`{"status": "completed", "result": {...}}`). That's it — the node framework handles the rest.
 
 ## Components
 
