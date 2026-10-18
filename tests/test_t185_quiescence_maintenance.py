@@ -376,7 +376,7 @@ def test_heartbeat_loop_opens_window_only_when_due(
 
     monkeypatch.setattr(client, "maintenance_due", lambda: True)
     monkeypatch.setattr(daemon, "_run_maintenance_window", fake_window)
-    monkeypatch.setattr(client, "heartbeat", lambda caps, inflight: {"status": "ok"})
+    monkeypatch.setattr(client, "heartbeat", lambda caps, inflight, forward_slots=None: {"status": "ok"})
 
     t = threading.Thread(target=daemon._heartbeat_loop, daemon=True)
     t.start()
@@ -394,7 +394,8 @@ def test_heartbeat_loop_opens_window_only_when_due(
                         lambda: windows_run2.append(True))
     monkeypatch.setattr(
         client, "heartbeat",
-        lambda caps, inflight: hb_calls.append(1) or daemon2._stop_event.set()
+        lambda caps, inflight, forward_slots=None: hb_calls.append(1)
+        or daemon2._stop_event.set()
         or {"status": "ok"},
     )
 

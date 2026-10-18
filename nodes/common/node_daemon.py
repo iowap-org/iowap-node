@@ -57,6 +57,7 @@ from nodes.common.node_config import (
     ensure_node_cli_stamp,
     invalidate_active_cache,
     load_active_profile,
+    load_forward_slots,
 )
 from nodes.common.node_utils import (
     BASE_DIR,
@@ -338,9 +339,10 @@ class SseDaemon:
                 if self.client.maintenance_due():
                     self._run_maintenance_window()
                 caps = load_active_profile()
+                forward_slots = load_forward_slots()
                 with self._lock:
                     inflight = dict(self._in_flight)
-                hb = self.client.heartbeat(caps, inflight)
+                hb = self.client.heartbeat(caps, inflight, forward_slots=forward_slots)
                 self.last_heartbeat_status = hb.get("status", "ok")
                 log.info("heartbeat %s", self.last_heartbeat_status)
             except httpx.HTTPStatusError as exc:

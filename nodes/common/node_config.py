@@ -52,7 +52,7 @@ from typing import Any
 
 import yaml
 
-from nodes.common.forward import FORWARD_CAPABILITY
+from nodes.common.forward import FORWARD_CAPABILITY, normalize_forward_slot
 
 # ---------------------------------------------------------------------------
 # JSON Schema for capability profiles (Draft 2020-12)
@@ -702,6 +702,53 @@ _active_cache = ActiveProfileCache()
 def load_active_profile() -> list[dict[str, Any]]:
     """Convenience accessor for the module-level active profile cache."""
     return _active_cache.get()
+
+
+def load_forward_slots() -> list[dict[str, Any]]:
+    """Read the node's declared forward slots (T-Forward-2).
+
+    The active YAML profile may carry a ``forward_slots`` section —
+    either as a mapping (``"1": {label, description}``) or as a list of
+    the same objects. Returned rows are plain dicts with ``slot``,
+    ``label`` and ``description`` (label/description stripped, empty →
+    ``None``); the empty list means "no declared slots". Malformed rows
+    raise ``ValueError`` so operator mistakes are loud.
+    """
+    path = ACTIVE_PATH
+    if not path.exists():
+        return []
+    raw = path.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(raw)
+    if not isinstance(parsed, dict):
+        return []
+    section = parsed.get("forward_slots")
+    if section is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    if isinstance(section, dict):
+        items: list[tuple[Any, Any]] = list(section.items())
+    elif isinstance(section, list):
+        items = [(entry.get("slot"), entry) for entry in section]
+    else:
+        raise ValueError("forward_slots must be a mapping or a list of objects")
+    for raw_slot, entry in items:
+        if raw_slot is None:
+            raise ValueError("forward_slots entries require a slot")
+        slot = normalize_forward_slot(raw_slot)
+        if isinstance(entry, dict):
+            label = entry.get("label")
+            description = entry.get("description")
+        else:
+            label = None
+            description = entry if isinstance(entry, str) else None
+        label_value = label.strip() if isinstance(label, str) else None
+        description_value = description.strip() if isinstance(description, str) else None
+        rows.append({
+            "slot": slot,
+            "label": label_value or None,
+            "description": description_value or None,
+        })
+    return rows
 
 
 def load_active_status() -> str | None:

@@ -348,6 +348,7 @@ class RelayClient:
     def __init__(self, meta: dict[str, Any], cfg: dict[str, Any]) -> None:
         self.meta = meta
         self.cfg = cfg
+        self.forward_slots: list[dict[str, Any]] = []
         self.base_url = _base_url(meta, cfg)
         # TLS (T-111): optional CA cert path for nodes connecting over https
         # to a relay using a private/self-signed CA. When set, httpx verifies
@@ -841,9 +842,22 @@ class RelayClient:
         if load_cap is not None:
             body["load_cap"] = float(load_cap)
 
+        # T-Forward-2: node-declared forward slots from node.yaml.
+        # Optional; when present the server replaces its declaration rows
+        # for this node (replace_forward_slots).
+        if self.forward_slots:
+            body["forward_slots"] = self.forward_slots
+
         return body
 
-    def heartbeat(self, caps: list[dict[str, Any]], in_flight: dict[str, int]) -> dict[str, Any]:
+    def heartbeat(
+        self,
+        caps: list[dict[str, Any]],
+        in_flight: dict[str, int],
+        forward_slots: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if forward_slots is not None:
+            self.forward_slots = list(forward_slots)
         body = self._build_heartbeat_payload(caps, in_flight)
         r = self._post_with_retry(
             # T-176: post to /worker-heartbeat (replace mode). The regular
