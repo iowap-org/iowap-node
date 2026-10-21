@@ -64,6 +64,7 @@ from nodes.common.node_config import (
     current_profile_name,
     invalidate_active_cache,
     load_active_profile,
+    load_forward_slots,
 )
 from nodes.common.node_utils import (
     RESTART_COMMAND,
@@ -252,7 +253,8 @@ class Daemon:
                 caps = load_active_profile()
                 with self._lock:
                     inflight = dict(self.in_flight)
-                hb = self.client.heartbeat(caps, inflight)
+                forward_slots = load_forward_slots()
+                hb = self.client.heartbeat(caps, inflight, forward_slots=forward_slots)
                 self.last_heartbeat_status = hb.get("status", "ok")
                 log.info("heartbeat %s", self.last_heartbeat_status)
             except httpx.HTTPStatusError as exc:
