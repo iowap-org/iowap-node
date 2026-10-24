@@ -52,7 +52,15 @@ from typing import Any
 
 import yaml
 
-from nodes.common.forward import FORWARD_CAPABILITY, normalize_forward_slot
+from nodes.common.forward import (
+    FORWARD_CAPABILITY,
+    SLOT_TYPE_FORWARD,
+    ForwardSlotError,
+    normalize_forward_slot,
+    normalize_slot_ref,
+    normalize_slot_type,
+    normalize_slot_value,
+)
 
 # ---------------------------------------------------------------------------
 # JSON Schema for capability profiles (Draft 2020-12)
@@ -586,7 +594,16 @@ def publish_profile(name: str) -> Path:
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     # Atomic write to active file via temp + rename.
     tmp = ACTIVE_PATH.with_suffix(ACTIVE_PATH.suffix + ".tmp")
+    # T-235 C3: the byte-exact copy would drop the active file's
+    # forward_slots section — read the previous active text first and let
+    # the heal restore the section into tmp before the single replace
+    # (source wins; never raises, never creates).
+    try:
+        previous_text = ACTIVE_PATH.read_text(encoding="utf-8")
+    except OSError:
+        previous_text = None
     shutil.copyfile(src, tmp)
+    _heal_forward_slots_section(tmp, previous_text)
     os.replace(tmp, ACTIVE_PATH)
     write_current_profile_name(name)
     # T-226: the byte-exact copy replaced the active file — re-stamp the
@@ -705,14 +722,16 @@ def load_active_profile() -> list[dict[str, Any]]:
 
 
 def load_forward_slots() -> list[dict[str, Any]]:
-    """Read the node's declared forward slots (T-Forward-2).
+    """Read the node's declared forward slots (T-Forward-2, typed — T-235).
 
     The active YAML profile may carry a ``forward_slots`` section —
-    either as a mapping (``"1": {label, description}``) or as a list of
-    the same objects. Returned rows are plain dicts with ``slot``,
-    ``label`` and ``description`` (label/description stripped, empty →
-    ``None``); the empty list means "no declared slots". Malformed rows
-    raise ``ValueError`` so operator mistakes are loud.
+    either as a mapping (``"1": {label, description, ...}``) or as a list of
+    the same objects. Rows are the frozen 8-key form: ``slot``, ``label``,
+    ``description``, ``type`` (resolved via the client registry, never
+    ``None``), ``value`` (native str/bool/None), ``ref_slot``, ``ref_field``
+    and ``input_schema`` (dict, forward slots only). label/description are
+    stripped (empty → ``None``); the empty list means "no declared slots".
+    Malformed rows raise ``ValueError`` so operator mistakes are loud.
     """
     path = ACTIVE_PATH
     if not path.exists():
@@ -724,31 +743,224 @@ def load_forward_slots() -> list[dict[str, Any]]:
     section = parsed.get("forward_slots")
     if section is None:
         return []
-    rows: list[dict[str, Any]] = []
+    items = _forward_slot_items(section)
+    rows = [_build_forward_slot_row(raw_slot, entry) for raw_slot, entry in items]
+    return _crosscheck_forward_slot_refs(rows)
+
+
+# ---------------------------------------------------------------------------
+# T-235 forward-slot typed declarations (parser row pipeline + publish heal)
+# ---------------------------------------------------------------------------
+
+def _forward_slot_items(section: Any) -> list[tuple[Any, Any]]:
+    """Split a ``forward_slots`` section into ``(raw_slot, entry)`` pairs.
+
+    Mapping form → ``list(section.items())``; list form → ``(entry["slot"],
+    entry)`` for dict entries and ``(None, entry)`` for non-dict entries
+    (the caller's slot-required contract turns those into a loud
+    ``ValueError`` — the old list branch crashed on scalars with an
+    incidental ``AttributeError``, node_config.py:731 — Decision A4).
+    Any other shape → ``ValueError("forward_slots must be a mapping or a
+    list of objects")`` (frozen message, node_config.py:733). Shared by
+    the parser and the publish heal (T-235 C2/C3).
+    """
     if isinstance(section, dict):
-        items: list[tuple[Any, Any]] = list(section.items())
-    elif isinstance(section, list):
-        items = [(entry.get("slot"), entry) for entry in section]
+        return list(section.items())
+    if isinstance(section, list):
+        return [
+            (entry.get("slot"), entry) if isinstance(entry, dict) else (None, entry)
+            for entry in section
+        ]
+    raise ValueError("forward_slots must be a mapping or a list of objects")
+
+
+def _build_forward_slot_row(raw_slot: Any, entry: Any) -> dict[str, Any]:
+    """Normalize ONE forward_slots declaration row via the client registry.
+
+    ValueError-loud (Bestandsvertrag, node_config.py:715). Entry forms:
+    dict (full — typed fields via ``normalize_slot_type``/``normalize_slot_value``/
+    ``normalize_slot_ref`` + ``input_schema`` dict-only-on-forward); str
+    (legacy mapping-form description, node_config.py:742-743); other
+    (label/description None). ``raw_slot is None`` → ``ValueError
+    ("forward_slots entries require a slot")`` (frozen, :735-736). Returns
+    the frozen 8-key row (``slot``, ``label``, ``description``, ``type``,
+    ``value``, ``ref_slot``, ``ref_field``, ``input_schema`` — design §2.2).
+    """
+    if raw_slot is None:
+        raise ValueError("forward_slots entries require a slot")
+    slot = normalize_forward_slot(raw_slot)
+    if isinstance(entry, dict):
+        raw_label = entry.get("label")
+        raw_description = entry.get("description")
+        slot_type = normalize_slot_type(entry.get("type"))
+        value = normalize_slot_value(slot_type, entry.get("value"))
+        ref = normalize_slot_ref(entry, slot_type)
+        raw_schema = entry.get("input_schema")
+        if raw_schema is not None:
+            if slot_type != SLOT_TYPE_FORWARD:
+                raise ForwardSlotError(
+                    f"slot '{slot}': input_schema is only allowed on forward slots",
+                    code="forward_slot_invalid",
+                )
+            # D-05 structure-only: dict-or-loud, the schema's CONTENT is not
+            # validated here (server DEFERRED D-05/D-09 → T-247).
+            if not isinstance(raw_schema, dict):
+                raise ForwardSlotError(
+                    f"slot '{slot}': input_schema must be an object,"
+                    f" got {type(raw_schema).__name__}",
+                    code="forward_slot_invalid",
+                )
     else:
-        raise ValueError("forward_slots must be a mapping or a list of objects")
-    for raw_slot, entry in items:
-        if raw_slot is None:
-            raise ValueError("forward_slots entries require a slot")
-        slot = normalize_forward_slot(raw_slot)
-        if isinstance(entry, dict):
-            label = entry.get("label")
-            description = entry.get("description")
-        else:
-            label = None
-            description = entry if isinstance(entry, str) else None
-        label_value = label.strip() if isinstance(label, str) else None
-        description_value = description.strip() if isinstance(description, str) else None
-        rows.append({
-            "slot": slot,
-            "label": label_value or None,
-            "description": description_value or None,
-        })
-    return rows
+        raw_label = None
+        raw_description = entry if isinstance(entry, str) else None
+        slot_type = SLOT_TYPE_FORWARD
+        value = None
+        ref = None
+        raw_schema = None
+    ref_slot, ref_field = ref if ref is not None else (None, None)
+    label_value = raw_label.strip() if isinstance(raw_label, str) else None
+    description_value = (
+        raw_description.strip() if isinstance(raw_description, str) else None
+    )
+    return {
+        "slot": slot,
+        "label": label_value or None,
+        "description": description_value or None,
+        "type": slot_type,
+        "value": value,
+        "ref_slot": ref_slot,
+        "ref_field": ref_field,
+        "input_schema": raw_schema,
+    }
+
+
+def _crosscheck_forward_slot_refs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Dedupe last-wins + ref-target check across one declaration (in-memory).
+
+    Mirror of the server's phase A2 (core/forward.py:446-460): every
+    ``ref_slot`` must exist in the same declaration and target a
+    ``forward`` slot; refs are checked against the LAST-WINS type map,
+    per-row over ALL built rows (duplicate occurrences included). Returns
+    deduped rows: one per slot, first-occurrence position, last value wins
+    (server upsert mirror, core/forward.py:483-488 — Decision A3). Raises
+    ``ValueError`` (via ``ForwardSlotError``) loud.
+    """
+    type_map: dict[str, str] = {row["slot"]: row["type"] for row in rows}
+    for row in rows:
+        if row["ref_slot"] is None:
+            continue
+        if type_map.get(row["ref_slot"]) != SLOT_TYPE_FORWARD:
+            raise ForwardSlotError(
+                f"slot '{row['slot']}': ref_slot '{row['ref_slot']}' must"
+                " reference a forward slot declared in the same request",
+                code="forward_slot_invalid",
+            )
+    # Dedupe last-wins (server upsert mirror): one emitted row per slot,
+    # first-occurrence position, last value wins.
+    last: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        if row["slot"] not in last:
+            order.append(row["slot"])
+        last[row["slot"]] = row
+    return [last[slot] for slot in order]
+
+
+def _extract_forward_slots_block(text: str) -> str | None:
+    """Text-based extraction of a top-level ``forward_slots`` block.
+
+    Returns the block from the ``forward_slots:`` key line through the line
+    before the next top-level key (``^[A-Za-z_][A-Za-z0-9_-]*\\s*:(\\s|$)``
+    at column 0) or EOF; ``None`` when the key is absent. Col-0 ``- ``
+    list items belong to the block. Pure text scan — never raises, never
+    modifies. Caller applies the YAML round-trip pin (design §2.3 step 5).
+    """
+    key_line = re.compile(r"^forward_slots\s*:(\s|$)")
+    boundary = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*\s*:(\s|$)")
+    lines = text.splitlines(keepends=True)
+    start = None
+    for idx, line in enumerate(lines):
+        if key_line.match(line):
+            start = idx
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for idx in range(start + 1, len(lines)):
+        if boundary.match(lines[idx]):
+            end = idx
+            break
+    return "".join(lines[start:end])
+
+
+def _heal_forward_slots_section(tmp: Path, previous_text: str | None) -> None:
+    """C3 Option A: restore the forward_slots section missing from the source.
+
+    Source-wins rule (design §2.3 guard matrix): a source whose parsed dict
+    carries a non-``None`` ``forward_slots`` (non-empty OR explicit empty
+    ``[]``/``{}``) is authoritative — no write. Only when the section is
+    ABSENT and the previous active file carried one, the previous section
+    is validated via the shared row pipeline (``_forward_slot_items`` →
+    ``_build_forward_slot_row`` → ``_crosscheck_forward_slot_refs``), its
+    text extracted (``_extract_forward_slots_block`` + YAML round-trip pin,
+    ``yaml.safe_dump`` fallback) and appended at EOF with the join rule
+    ``text.rstrip("\\n") + "\\n\\n" + block.rstrip("\\n") + "\\n"``. Never
+    raises (warn-and-skip over ``(OSError, yaml.YAMLError, ValueError)``,
+    logger ``relay.node_config`` — same channel as ensure_node_cli_stamp,
+    node_config.py:901-904); never creates a section.
+    """
+    if previous_text is None:
+        return
+    try:
+        if not tmp.exists():
+            return
+        tmp_text = tmp.read_text(encoding="utf-8")
+        doc = yaml.safe_load(tmp_text)
+        # Source wins: a source that carries the section (non-empty OR the
+        # explicit []/{} removal marker) is authoritative — A6 includes
+        # explicit ``forward_slots: null`` in the HEAL branch (absent-like).
+        if not isinstance(doc, dict) or doc.get("forward_slots") is not None:
+            return
+        previous_doc = yaml.safe_load(previous_text)
+        if not isinstance(previous_doc, dict) or previous_doc.get("forward_slots") is None:
+            return
+        previous_section = previous_doc.get("forward_slots")
+        # Step 4: validate the previous section through the shared row
+        # pipeline, so a restored section is guaranteed parser-readable.
+        rows = [
+            _build_forward_slot_row(raw_slot, entry)
+            for raw_slot, entry in _forward_slot_items(previous_section)
+        ]
+        _crosscheck_forward_slot_refs(rows)
+        # Step 5: extract the block text with the YAML round-trip pin;
+        # a pin failure (e.g. duplicate top-level keys) falls back to a
+        # normalized, data-preserving safe_dump block. An absent block
+        # (extractor None → "") can never pin — it goes to the fallback.
+        block = _extract_forward_slots_block(previous_text) or ""
+        pinned = False
+        try:
+            parsed_block = yaml.safe_load(block)
+            pinned = (
+                isinstance(parsed_block, dict)
+                and parsed_block.get("forward_slots") == previous_section
+            )
+        except yaml.YAMLError:
+            pinned = False
+        if not pinned:
+            block = yaml.safe_dump(
+                {"forward_slots": previous_section},
+                sort_keys=False,
+                allow_unicode=True,
+                default_flow_style=False,
+            )
+        # Step 6: single EOF insertion into tmp — the publish os.replace
+        # below stays the ONLY write transaction.
+        new_text = tmp_text.rstrip("\n") + "\n\n" + block.rstrip("\n") + "\n"
+        tmp.write_text(new_text, encoding="utf-8")
+    except (OSError, yaml.YAMLError, ValueError) as exc:
+        __import__("logging").getLogger("relay.node_config").warning(
+            "could not restore forward_slots section in %s: %s", tmp, exc
+        )
 
 
 def load_active_status() -> str | None:

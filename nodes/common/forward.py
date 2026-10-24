@@ -20,6 +20,16 @@ FORWARD_CAPABILITY: Final[str] = "forward"
 SLOT_MAX_CHARS: Final[int] = 64
 _SLOT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
 
+# T-235 C1: slot-type registry — exact client mirror of the server's
+# core/forward.py:35-41 (T-245; server is the source of truth).
+SLOT_TYPE_FORWARD: Final[str] = "forward"
+SLOT_TYPE_TEXT: Final[str] = "text"
+SLOT_TYPE_BOOL: Final[str] = "bool"
+SLOT_TYPES: Final[frozenset[str]] = frozenset(
+    {SLOT_TYPE_FORWARD, SLOT_TYPE_TEXT, SLOT_TYPE_BOOL}
+)
+DEFAULT_SLOT_TYPE: Final[str] = SLOT_TYPE_FORWARD
+
 # Actionable suggestions for the relay's forward-error codes (design.md §6).
 # Keys are the exact codes from the deployed relay (api/v2/scheduler.py:70-72,
 # core/forward.py); values are single-line operator guidance, docs-facing.
@@ -48,10 +58,10 @@ FORWARD_ERROR_HINTS: Final[dict[str, str]] = {
 class ForwardSlotError(ValueError):
     """Client-side forward-slot validation failure (server-mirrored rules)."""
 
-    def __init__(self, message: str) -> None:
-        self.code = "forward_mapping_invalid"
+    def __init__(self, message: str, code: str = "forward_mapping_invalid") -> None:
+        self.code = code
         self.message = message
-        super().__init__(f"{self.code}: {message}")
+        super().__init__(f"{code}: {message}")
 
 
 def normalize_forward_slot(value: Any) -> str:
@@ -116,3 +126,118 @@ def forward_hint(code: str | None) -> str | None:
     if not isinstance(code, str):
         return None
     return FORWARD_ERROR_HINTS.get(code)
+
+
+def normalize_slot_type(value: Any) -> str:
+    """Resolve the declared slot type against the client registry (T-235 C1).
+
+    Client mirror of the server's ``core/forward.py::normalize_slot_type``
+    (core/forward.py:90-119): ``None``/absent → ``DEFAULT_SLOT_TYPE``
+    (Bestandsschutz: old declarations carry no type); explicit values are
+    matched EXACTLY (registry match after ``str``-strip, NO case-folding —
+    "Forward"/"TEXT" are errors); bools and non-str values are mis-typed
+    declarations. Raises ``ForwardSlotError`` (code ``forward_slot_invalid``).
+    """
+    def _invalid(msg: str) -> ForwardSlotError:
+        return ForwardSlotError(msg, code="forward_slot_invalid")
+
+    if value is None:
+        return DEFAULT_SLOT_TYPE
+    # Bools are an int subclass and must never coerce; anything non-str
+    # is a mis-typed declaration (loud, node-owned metadata error).
+    if isinstance(value, bool) or not isinstance(value, str):
+        raise _invalid(f"slot type must be a string, got {type(value).__name__}")
+    slot_type = value.strip()
+    if not slot_type:
+        raise _invalid("slot type must not be empty when declared")
+    if slot_type not in SLOT_TYPES:
+        # Exact registry match — no case-folding ("Forward"/"TEXT" are errors).
+        raise _invalid(
+            f"unknown slot type '{slot_type}'"
+            f" (known: {', '.join(sorted(SLOT_TYPES))})"
+        )
+    return slot_type
+
+
+def normalize_slot_value(slot_type: str, value: Any) -> str | bool | None:
+    """Validate the typed ``value`` field of a declaration (T-235 C1).
+
+    Client mirror of the server's ``core/forward.py::normalize_slot_value``
+    (core/forward.py:122-158): ``None`` → ``None`` for every type; ``text``
+    → ``value`` must be ``str``; ``bool`` → a REAL bool ("true"/``1``/``0``
+    are errors — bools are an int subclass and never coerce); ``type:
+    forward`` FORBIDS any non-``None`` value. Returns the native value
+    unchanged. Raises ``ForwardSlotError`` (code ``forward_slot_invalid``).
+    """
+    def _invalid(msg: str) -> ForwardSlotError:
+        return ForwardSlotError(msg, code="forward_slot_invalid")
+
+    if value is None:
+        return None
+    if slot_type == SLOT_TYPE_TEXT:
+        if not isinstance(value, str):
+            raise _invalid(
+                f"text slot value must be a string, got {type(value).__name__}"
+            )
+        return value
+    if slot_type == SLOT_TYPE_BOOL:
+        # Bools are an int subclass: "true" and 1 must never coerce.
+        if not isinstance(value, bool):
+            raise _invalid(
+                f"bool slot value must be a real bool, got {type(value).__name__}"
+            )
+        return value
+    # slot_type == SLOT_TYPE_FORWARD — a value is forbidden there (D-02):
+    # the routing target lives in forward_mappings, not on the slot row.
+    raise _invalid(
+        "forward slots must not carry a 'value'"
+        " — the routing target lives in forward_mappings"
+    )
+
+
+def normalize_slot_ref(entry: Mapping[str, Any], slot_type: str) -> tuple[str, str] | None:
+    """Normalize ``ref_slot``/``ref_field`` of a declaration (T-235 C1).
+
+    Client mirror of the server's ``core/forward.py::normalize_slot_ref``
+    (core/forward.py:161-204): a ref is legal ONLY on value slots
+    (``text``/``bool``) and must be given WHOLE (``ref_slot`` XOR
+    ``ref_field`` → error; a non-``str`` ``ref_field`` counts as absent);
+    on ``type: forward`` any ref is an error. ``ref_slot`` goes through the
+    ``normalize_forward_slot`` charset/length rules with the error code
+    REMAPPED to ``forward_slot_invalid``. Whether ``ref_field`` exists
+    inside the referenced slot's ``input_schema`` is NOT validated here
+    (server DEFERRED D-05/D-09 → T-247). Returns ``(ref_slot, ref_field)``
+    or ``None``. Raises ``ForwardSlotError`` (code ``forward_slot_invalid``).
+    """
+    def _invalid(msg: str) -> ForwardSlotError:
+        return ForwardSlotError(msg, code="forward_slot_invalid")
+
+    raw_slot = entry.get("ref_slot")
+    raw_field = entry.get("ref_field")
+    if slot_type == SLOT_TYPE_FORWARD:
+        # Routing handles carry no refs — the target lives in forward_mappings.
+        if raw_slot is not None or raw_field is not None:
+            raise _invalid(
+                "forward slots must not carry a ref"
+                " — the routing target lives in forward_mappings"
+            )
+        return None
+    # Value slots accept a ref, but only as a WHOLE pair (no half refs);
+    # ref_slot goes through normalize_forward_slot (int coercion allowed
+    # there) and a non-str ref_field counts as absent — the pair is half.
+    has_slot = raw_slot is not None
+    has_field = isinstance(raw_field, str)
+    if has_slot != has_field:
+        raise _invalid("a ref must declare both ref_slot and ref_field together")
+    if not has_slot:
+        return None
+    try:
+        ref_slot = normalize_forward_slot(raw_slot)
+    except ForwardSlotError as exc:
+        # Same charset/length rules as normalize_forward_slot, remapped to
+        # the declaration error code (client mirror of server :198-203).
+        raise ForwardSlotError(exc.message, code="forward_slot_invalid") from exc
+    # has_slot == has_field == True here — raw_field IS a str; the
+    # conditional keeps the frozen ``tuple[str, str]`` return type honest.
+    ref_field = raw_field if isinstance(raw_field, str) else ""
+    return (ref_slot, ref_field)
