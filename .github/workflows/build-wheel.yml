@@ -27,7 +27,40 @@ permissions:
   contents: write
 
 jobs:
+  # T-242 (audit F7): pytest + ruff gate BEFORE any build/publish — a red
+  # suite must no longer produce a wheel. Ruff runs an explicit,
+  # deterministic select that is green on the current tree; the broader
+  # lint debt (84 findings under ruff 0.16's expanded default select) is
+  # a separate task and must not turn the pipeline red.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --quiet .
+          python -m pip install --quiet pytest ruff
+
+      - name: Test gate (pytest)
+        run: python -m pytest -q
+
+      - name: Lint gate (high-signal ruff select — see T-242)
+        run: python -m ruff check --select E9,F821,F811 .
+
   build-wheel:
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}

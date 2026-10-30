@@ -59,7 +59,7 @@ def test_t186_stream_timeout_contract(isolated_relay_dir, monkeypatch):
 
         async def aiter_lines(self):  # pragma: no cover — never reached
             raise RuntimeError("probe-end")
-            yield ""  # noqa: unreachable — generator marker
+            yield ""  # generator marker (line is unreachable — noqa removed)
 
     class FakeStreamCM:
         def __init__(self, **kwargs) -> None:

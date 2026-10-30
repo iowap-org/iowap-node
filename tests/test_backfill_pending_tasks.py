@@ -41,7 +41,7 @@ class FakeResp:
 
     async def aiter_lines(self):  # pragma: no cover — generator marker
         raise RuntimeError("probe-end")
-        yield ""  # noqa: unreachable - generator marker
+        yield ""  # generator marker (line is unreachable — noqa removed)
 
 
 class FakeStreamCM:
