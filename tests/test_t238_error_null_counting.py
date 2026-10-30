@@ -49,6 +49,11 @@ def rh_ok(handler, stage, *, context=None, timeout=None):
     return {"status": "completed", "result": {"echo": 1}, "error": None}
 
 
+def _fake_complete(*_a, **_k):
+    """Complete-Endpoint: always accepted (counting is under test, not transport)."""
+    return {"status": "ok"}
+
+
 # --- node-cli daemon ----------------------------------------------------------
 
 
@@ -57,7 +62,7 @@ def test_cli_completed_with_null_error_counts_as_completed(client, monkeypatch):
     tasks_failed/_failed_tasks bump (the stage-3 flow stays alive)."""
     daemon = node_cli.Daemon(client, dict(CFG))
     monkeypatch.setattr(node_cli, "run_handler", rh_ok)
-    daemon.client.complete = lambda *_a, **_k: {"status": "ok"}
+    daemon.client.complete = _fake_complete
 
     daemon._run_stage(dict(CAP), dict(STAGE))
 
@@ -70,7 +75,7 @@ def test_cli_non_null_error_still_counts_as_failure(client, monkeypatch):
     """Contract lock: real errors (non-null, flat and envelope form) keep
     incrementing tasks_failed and the per-task budget."""
     daemon = node_cli.Daemon(client, dict(CFG))
-    daemon.client.complete = lambda *_a, **_k: {"status": "ok"}
+    daemon.client.complete = _fake_complete
 
     cases = [
         {"status": "completed", "result": {}, "error": "boom"},
@@ -92,7 +97,7 @@ def test_cli_non_null_error_still_counts_as_failure(client, monkeypatch):
 def test_sse_completed_with_null_error_counts_as_completed(client, monkeypatch):
     daemon = node_daemon.SseDaemon(client, dict(CFG))
     monkeypatch.setattr(node_daemon, "run_handler", rh_ok)
-    daemon.client.complete = lambda *_a, **_k: {"status": "ok"}
+    daemon.client.complete = _fake_complete
 
     daemon._run_stage(dict(CAP), dict(STAGE))
 
@@ -103,7 +108,7 @@ def test_sse_completed_with_null_error_counts_as_completed(client, monkeypatch):
 
 def test_sse_non_null_error_still_counts_as_failure(client, monkeypatch):
     daemon = node_daemon.SseDaemon(client, dict(CFG))
-    daemon.client.complete = lambda *_a, **_k: {"status": "ok"}
+    daemon.client.complete = _fake_complete
 
     cases = [
         {"status": "completed", "result": {}, "error": "boom"},

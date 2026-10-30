@@ -115,7 +115,7 @@ def test_cli_daemon_heartbeat_failure_is_survivable(
 
     def flaky_loader():
         loader_calls.append(1)
-        if loader_calls[0] == 1:
+        if len(loader_calls) == 1:
             # First tick declares a slot — the heartbeat fires with it.
             return [{"slot": "1", "label": "ok-once"}]
         raise ValueError("bad forward_slots")
@@ -137,7 +137,6 @@ def test_cli_daemon_heartbeat_failure_is_survivable(
     thread.join(timeout=5)
     assert not thread.is_alive()
 
-    assert loader_calls[0] == 1  # first tick ran through
     assert heartbeat_calls == [1]  # one real heartbeat pass happened
     assert len(loader_calls) >= 3, (
         "heartbeat loop died at the first broken loader call instead of "
