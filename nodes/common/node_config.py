@@ -481,7 +481,10 @@ def validate_profile(
     """Validate a profile and return the normalized capabilities list.
 
     Accepts either a path to a YAML file or an already-parsed dict.
-    Raises :class:`CapabilityValidationError` on any problem.
+    Raises :class:`CapabilityValidationError` on any problem — including
+    a declared ``forward_slots`` section the daemon's row pipeline
+    cannot parse (T-239: fail-fast at validate/publish time instead of
+    the first heartbeat tick).
     """
     if isinstance(source, dict):
         # Schema validation first
@@ -490,6 +493,11 @@ def validate_profile(
             raise CapabilityValidationError(
                 "schema validation failed:\n  " + "\n  ".join(schema_errors)
             )
+        if source.get("forward_slots") is not None:
+            # T-239: the source's own forward_slots declaration is
+            # validated through the same row pipeline the daemon
+            # heartbeat uses.
+            _validate_forward_slots_section(source["forward_slots"])
         if "capabilities" not in source:
             return []
         return _normalize_caps_list(source["capabilities"], file=None)
@@ -530,6 +538,12 @@ def validate_profile(
             file=file_label,
         )
 
+    if parsed.get("forward_slots") is not None:
+        # T-239: the source's own forward_slots declaration is validated
+        # through the same row pipeline the daemon heartbeat uses — a
+        # declaration the daemon cannot parse never reaches the active
+        # file ("publish OK" followed by silent nodes is fixed).
+        _validate_forward_slots_section(parsed["forward_slots"], file_label)
     if "capabilities" not in parsed:
         return []
     return _normalize_caps_list(parsed["capabilities"], file=file_label)
@@ -864,6 +878,43 @@ def _crosscheck_forward_slot_refs(rows: list[dict[str, Any]]) -> list[dict[str, 
             order.append(row["slot"])
         last[row["slot"]] = row
     return [last[slot] for slot in order]
+
+
+def _validate_forward_slots_section(section: Any, file_label: str | None = None) -> None:
+    """Run the load_forward_slots row pipeline over ONE declaration section.
+
+    T-239 (audit F3): ``validate_profile`` used to leave ``forward_slots``
+    unchecked (schema root ``additionalProperties: true``) and the publish
+    heal only validated the PREVIOUS block — the first checker for the
+    source section was ``load_forward_slots()`` in the daemon heartbeat.
+    The result: ``capabilities publish`` said OK, then every heartbeat
+    tick died BEFORE the POST and the node sat silent at the relay.
+    Now the same row pipeline runs at validate/publish time — a
+    declaration the daemon cannot parse never reaches the active file.
+
+    Raises ``CapabilityValidationError`` (wrapping the row pipeline's
+    ``ValueError``/``ForwardSlotError``). Callers that want raw errors
+    keep using the pipeline directly (load_forward_slots keeps its
+    ``ValueError`` contract, pinned by test_t235).
+
+    TODO (T-239, intentionally NOT implemented): a degradation path —
+    keep heartbeating with the LAST VALID slot list plus a warning when
+    the new declaration is invalid. That needs a last-known-good slot
+    cache next to the active file and a policy answer for "profile says
+    X, node sends Y-1" at the replace-based server; fail-fast at publish
+    plus the T-237 status-file error surface is the cheaper honest
+    contract for now.
+    """
+    try:
+        rows = [
+            _build_forward_slot_row(raw_slot, entry)
+            for raw_slot, entry in _forward_slot_items(section)
+        ]
+        _crosscheck_forward_slot_refs(rows)
+    except ValueError as exc:
+        raise CapabilityValidationError(
+            f"forward_slots: {exc}", file=file_label
+        ) from exc
 
 
 def _extract_forward_slots_block(text: str) -> str | None:
