@@ -671,14 +671,17 @@ def test_sse_daemon_heartbeat_transports_typed_rows(relay_home, monkeypatch):
     assert seen == [[TYPED_TEXT_ROW]]
 
 
-def test_heartbeat_omits_forward_slots_key_when_empty(relay_home):
-    """C4 guard: empty declaration → key absent; non-empty → verbatim."""
+def test_heartbeat_carries_forward_slots_when_loaded(relay_home):
+    """C4 → updated by T-240: a LOADED EMPTY declaration now ships as an
+    explicit ``[]`` (server treats an empty list as 'clear the rows');
+    non-empty keeps shipping the rows verbatim. Before T-240 the
+    truthiness gate dropped the empty key, so stale server rows kept
+    routing to a target the node no longer serves."""
     client = RelayClient(dict(META), dict(CFG))
     client.forward_slots = []
     body = client._build_heartbeat_payload([], {})
-    assert "forward_slots" not in body
+    assert body["forward_slots"] == []
     row = dict(TYPED_TEXT_ROW)
     client.forward_slots = [row]
     body2 = client._build_heartbeat_payload([], {})
-    assert body2["forward_slots"] is not None
     assert body2["forward_slots"] == [row]
