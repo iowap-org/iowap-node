@@ -47,11 +47,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install package + test deps
+      - name: Seed sandbox ~/.relay (suite local-creds convention)
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install --quiet .
-          python -m pip install --quiet pytest ruff
+          # RelayClient.__init__ loads the runtime token from $HOME/.relay
+          # (otherwise it attempts live recovery). The suite has always run
+          # against a seeded ~/.relay; CI seeds the same minimal fake -
+          # nothing here dials a real relay.
+          mkdir -p "$HOME/.relay"
+          printf '{"token": "tp_ci_seed", "expires_at": null, "refreshed_at": null}\n' > "$HOME/.relay/iowap-agent.token"
+          printf '{"node_id": "CISEED", "node_name": "ci-seed", "registration_secret": "rs_ciseed", "capabilities": [], "base_url": "http://192.0.2.1:8788"}\n' > "$HOME/.relay/iowap-agent.json"
 
       - name: Test gate (pytest)
         run: python -m pytest -q
