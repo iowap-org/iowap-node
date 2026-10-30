@@ -4,28 +4,35 @@ Scripts talk exclusively to the local node-cli (subprocess contract,
 board decision ①): token, ladder negotiation and the transfer formats
 stay inside the CLI process. Scripts see only a path in / a path out.
 
-FROZEN CONTRACT (Phase 1, T-179)
-================================
-Every public signature in this module is immutable across Phase 2
-(scaffold: test stubs + parser boilerplate) and Phase 3 (integrate:
-implementation). Specifically FROZEN:
+STATUS: fully implemented (T-179 phases 1-3 complete; T-241 docs pass)
+=====================================================================
+The phase-2 stubs are long gone — this module is the phase-3 state:
 
-* parameter names + order (the Phase 2/3 tests call them positionally
-  and by keyword — both must remain stable),
-* return types (``int`` exit codes; ``0`` ok / ``1`` error / ``2`` usage),
-* stdout contracts (exactly ONE compact JSON line each, see cmd_put/cmd_get),
-* the error message strings of ``decide_mode`` (Task 2b needs them
-  byte-identical to ``cli_file._choose_mode``).
+* ``cmd_put``: inline / artifact / bridge. Bridge is the ephemeral
+  serve handoff (T-166, F5/F6/F8): serve-manifest probe →
+  ``stage_file`` (MOVE semantics — the source file is moved into the
+  serve dir) → ``register_temp_route("/download/{transfer_id}")``; a
+  registration failure discards the staged file (no stale rest, F6).
+* ``cmd_get``: inline / artifact / bridge. Bridge pulls through the
+  relay proxy (node_serve storage_ref, auth header, streamed in
+  64 KiB chunks); the receiver NEVER unregisters (not the owner — F7).
+* ``decide_mode``: the shared ladder decision point
+  (``cli_file._choose_mode`` routes through it).
+
+Stability notes (replacing the old phase-1 freeze header — those
+clauses described a state that no longer exists):
+
+* parameter names + order, return types (``int`` exit codes:
+  0 ok / 1 error / 2 usage) and the ONE-compact-JSON-line stdout
+  contract stay stable;
+* the ``decide_mode`` error message strings stay byte-identical to
+  ``cli_file._choose_mode`` (test-enforced, not phase-labelled).
 
 House convention (like cli_file/cli_task, T-117 split): CLI handlers are
 ``(client, args) -> int`` and get the ``with_client(...)`` decorator at
 parser registration time in ``node_cli.py``. This module does NOT import
 ``node_cli`` (no circular import; the RelayClient monkeypatch stays
 functional).
-
-Phase 1 delivers only signatures + contract documentation; the bodies
-are implemented in Phase 3 (Phase 2 produces ``NotImplementedError``
-test stubs that are already prepared here).
 """
 
 from __future__ import annotations
@@ -193,9 +200,14 @@ def cmd_put(
     * artifact → ``client.upload_artifact(path, name=name or path.name)``;
       a missing ``artifact_id`` in the response → stderr + ``return 1``;
       otherwise ``make_envelope(src="artifact", ..., artifact_id=aid)``.
-    * bridge → ``raise NotImplementedError("bridge-put follows in Task
-      3")`` (deliberate MVP boundary — the envelope can carry bridge, the
-      channel-open flow cannot; see plan T-179).
+    * bridge → ephemeral serve handoff (T-166, phase 3): serve-manifest
+      probe (not reachable → stderr + ``return 1``, artifact fallback
+      hint) → ``stage_file(path, max_downloads=…)`` — MOVE semantics,
+      the source file is moved into the serve dir — →
+      ``register_temp_route("/download/{transfer_id}")``; registration
+      failure discards the staged file (F6: no stale rest) → stderr +
+      ``return 1``. The envelope carries the ``node_serve`` storage_ref
+      + sha256.
     * stdout: EXACTLY ONE line — compact JSON of the envelope
       (``envelope.dump``) + ``"\n"``. ``out=None`` → resolve
       ``sys.stdout`` at CALL time (not import time!) so that pytest-capsys
@@ -344,9 +356,13 @@ def cmd_get(
       ``target.write_bytes(ref)``.
     * artifact → ``target = client.download_artifact(ref, output or
       out_dir / filename)`` (RelayClient takes care of the streaming).
-    * bridge  → stderr ``"hp get: bridge resolution not supported by
-      this node-cli version"`` + ``return 1`` (MVP boundary; the exact
-      message string is FROZEN — plan T-179 Task 3).
+    * bridge  → pull through the relay proxy (phase 3): the
+      ``storage_ref`` must be a ``node_serve`` ref (``node_id``/``path``
+      — missing fields → stderr + ``return 1``); the file streams
+      (64 KiB chunks) from ``file_serve.proxy_url(...)`` into
+      ``target``; a failed pull removes the partial target → stderr +
+      ``return 1``. The receiver NEVER unregisters the route (not the
+      owner — F7; the sender's exhaustion/TTL ends the route).
     * sha256 verification when the envelope carries one (inline always
       does): mismatch → stderr
       ``"hp get: sha256 mismatch ({digest} != {expected})"`` + ``return 1``.

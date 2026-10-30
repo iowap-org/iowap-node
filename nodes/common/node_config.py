@@ -465,8 +465,8 @@ def _normalize_caps_list(
         if cap["name"] == FORWARD_CAPABILITY:
             raise CapabilityValidationError(
                 "'forward' is the relay's forward-routing pseudo-capability and must not be a node "
-                "capability — it is never advertised (submit with --forward-slot instead; see "
-                "the IOWAP docs, concepts/forward-routing.md)",
+                "capability — it is never advertised (submit with --forward-slot instead; see the "
+                "live docs: /relay/v2/docs/concepts/forward-routing)",
                 file=file,
                 capability=cap["name"],
             )

@@ -105,6 +105,46 @@ node-cli bridge upload <file>      # Upload via bridge route
 node-cli bridge download <url>     # Download via bridge route
 ```
 
+## Forward Routing
+
+A node can offer **forward slots**: submitters address a slot instead of
+a concrete capability, and the relay resolves `(this node, slot)` →
+target capability at submit time. Submission forces the relay's
+`forward` pseudo-capability (the slot rides inside the payload):
+
+```bash
+node-cli task submit --stage 'probe.echo:{"operation":"status"}' --forward-slot 1
+```
+
+Slots are declared in the active profile (`~/.relay/node.yaml`):
+a `forward` slot takes a target capability via the relay's forward
+mappings; `text`/`bool` slots carry typed values or references —
+e.g. feeding a prompt into another node's slot:
+
+```yaml
+forward_slots:
+  "1":
+    type: forward
+    label: Wartungsslot
+  "2":
+    type: text
+    label: Instruktprompt
+    value: "Prüfe …"
+```
+
+- `forward` is never a real capability and never advertised by the node —
+  it exists for submission only (a `capability: forward` block in a
+  profile is refused at `node-cli capabilities validate|publish`).
+- Declared slots are transported with every daemon heartbeat
+  (T-233/T-240): removing slots and heartbeating with the emptied
+  declaration clears the server-side rows (empty list = delete all).
+- The declaration is validated up front (T-239): a malformed
+  `forward_slots` block fails `node-cli capabilities publish` instead of
+  leaving the node silent at the relay.
+
+Docs: live on your relay at `/relay/v2/docs/concepts/forward-routing` —
+[concepts/forward-routing.md](https://github.com/iowap-org/iowap-docs/blob/main/concepts/forward-routing.md).
+
 ## Docker
 
 A base Docker image is available for containerized nodes:

@@ -7,7 +7,9 @@ well-defined environment, feeds the stage ``payload`` as JSON on stdin,
 captures stdout/stderr, enforces a timeout, and returns a result dict
 ready to be POSTed to the ``/complete`` endpoint.
 
-Contract (see NODE_CLI_SPEC.md §4 and docs/node/capabilities.md):
+Contract (docs: /relay/v2/docs/node/handlers/contract — the
+handler-primitive reference; /relay/v2/docs/node/capabilities —
+capability declaration reference):
 
 * Environment variables set before execution::
 
