@@ -203,7 +203,20 @@ class Daemon:
     # -- status file ---------------------------------------------------------
 
     def _write_status(self, error: str | None = None) -> None:
-        caps = load_active_profile()
+        # T-237: the profile load used to be the first unguarded statement —
+        # a broken active profile raised CapabilityValidationError straight
+        # into the heartbeat thread (the call site sits OUTSIDE the loop's
+        # try) and out of the startup path. The thread died silently, the
+        # process lived on, the node went offline at the relay and the
+        # status file kept reporting the stale last tick. Now: degrade —
+        # empty capabilities + the profile error in the status snapshot.
+        profile_error: str | None = None
+        try:
+            caps = load_active_profile()
+        except Exception as exc:
+            log.exception("active profile load failed while writing status")
+            caps = []
+            profile_error = f"active profile invalid: {exc}"
         # T-108: loop detection — when the daemon is stuck in an auth
         # error loop (backoff > 0 + 401/403), we enrich the error string
         # and mark the status as degraded so that `node info`/dashboard
@@ -213,6 +226,8 @@ class Daemon:
         auth_loop = backoff > 0 and "401" in (error or "")
         if auth_loop:
             error = (error or "") + " | AUTH-LOOP: token invalid — check the token file or restart the daemon"
+        if profile_error:
+            error = f"{error} | {profile_error}" if error else profile_error
         status = {
             "pid": os.getpid(),
             "node_id": self.client.meta.get("node_id"),
@@ -263,7 +278,13 @@ class Daemon:
             except Exception as exc:  # noqa: BLE001 — daemon must survive
                 error = str(exc)
                 log.error("heartbeat error: %s", exc)
-            self._write_status(error=error)
+            try:
+                # T-237: the status snapshot itself must never take this
+                # thread down — a failing write is logged with traceback
+                # and the loop continues with the next tick.
+                self._write_status(error=error)
+            except Exception:
+                log.exception("status file write failed")
             # T-108: back off after repeated auth failures so the daemon
             # does not hammer every ~8s. Immediately 0 after success.
             sleep_interval = interval + self.client._current_backoff()
@@ -454,7 +475,12 @@ class Daemon:
             log.info("startup: registration secret refreshed before connections")
         except Exception as exc:  # noqa: BLE001 — startup must survive
             log.warning("startup rs refresh failed: %s", exc)
-        self._write_status()
+        try:
+            # T-237: the startup snapshot must not abort the daemon start
+            # (a broken active profile used to raise through here).
+            self._write_status()
+        except Exception:
+            log.exception("startup status write failed")
         self._start_heartbeat_thread()
         self._start_probe_thread()
         # T-166 (F1): ephemeral file serve inside the daemon — the CLI
@@ -483,7 +509,10 @@ class Daemon:
             self._stop_event.set()
             if self._hb_thread and self._hb_thread.is_alive():
                 self._hb_thread.join(timeout=5)
-            self._write_status()
+            try:
+                self._write_status()
+            except Exception:
+                log.exception("final status write failed")
             log.info("daemon stopped")
 
 
