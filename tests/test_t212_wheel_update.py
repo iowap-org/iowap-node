@@ -188,9 +188,10 @@ def test_apply_success_path(monkeypatch, tmp_path):
     assert result["restarted"] is True
     assert result["before_version"] == "2.3.8"
     assert result["after_version"] == "2.4.0"
-    # cmd order: pip install, then systemctl restart
+    # cmd order (T-243 F8): pip install → import smoke → systemctl restart
     assert "pip" in calls[0] and "install" in calls[0]
-    assert calls[1][:3] == ["systemctl", "--user", "restart"]
+    assert calls[1][-1] == "import nodes.common.node_cli, nodes.common.node_daemon"
+    assert calls[2][:3] == ["systemctl", "--user", "restart"]
     wheel = tmp_path / "iowap_node-2.4.0-py3-none-any.whl"
     assert wheel.read_bytes() == b"wheel-bytes"
 
@@ -395,7 +396,7 @@ def test_apply_restart_command_replaces_systemctl(monkeypatch, tmp_path):
     )
     assert result["success"] is True
     assert result["restarted"] is True
-    assert calls[1] == ["/bin/launchctl", "kickstart", "-k", "gui/501/com.iowap.node"]
+    assert calls[2] == ["/bin/launchctl", "kickstart", "-k", "gui/501/com.iowap.node"]
 
 
 def test_apply_restart_command_from_env(monkeypatch, tmp_path):
@@ -427,7 +428,7 @@ def test_apply_restart_command_from_env(monkeypatch, tmp_path):
     monkeypatch.setattr(node_utils, "RESTART_COMMAND", "/bin/true {unit}")
     result = apply_wheel_update(service_unit="env.service", wheel_dir=tmp_path)
     assert result["success"] is True
-    assert calls[1] == ["/bin/true", "env.service"]
+    assert calls[2] == ["/bin/true", "env.service"]
 
 
 def test_apply_cli_restart_command_flag(monkeypatch, capsys, tmp_path):
@@ -470,7 +471,7 @@ def test_apply_cli_restart_command_flag(monkeypatch, capsys, tmp_path):
     # T-229: the restart hook lives in the node block (source=github path).
     assert out["node"]["restarted"] is True
     assert out["node"]["source"] == "github"
-    assert calls[1] == ["/bin/true", "flag.service"]
+    assert calls[2] == ["/bin/true", "flag.service"]
 
 
 def test_apply_explicit_restart_command_overrides_env(monkeypatch, tmp_path):
@@ -504,4 +505,5 @@ def test_apply_explicit_restart_command_overrides_env(monkeypatch, tmp_path):
         restart_command="/bin/cli-cmd {unit}",
     )
     assert result["success"] is True
-    assert calls[1] == ["/bin/cli-cmd", "win.service"]
+    assert calls[1][-1] == "import nodes.common.node_cli, nodes.common.node_daemon"
+    assert calls[2] == ["/bin/cli-cmd", "win.service"]

@@ -480,9 +480,19 @@ class RelayClient:
                 r = self._get(path, timeout=timeout)
         return r
 
-    def _post_with_retry(
+    def _post_with_auth_retry(
         self, path: str, body: dict[str, Any] | None = None, *, timeout: float | None = None
     ) -> httpx.Response:
+        """POST + a single auth replay on 401/403 (token refresh).
+
+        T-243 (F14): the predecessor NAME suggested network-retry
+        semantics — this is NO network retry. Everything issued through
+        here (heartbeat, claim, complete, submit, route registration) is
+        NOT idempotent: a transport-level replay could double-execute a
+        task. The only repeated request is the auth one — 401/403
+        refreshes the token once and repeats exactly once with the fresh
+        token.
+        """
         r = self._post(path, body, timeout=timeout)
         if r.status_code in (401, 403):
             log.warning("auth error %s on %s, refreshing token", r.status_code, path)
@@ -868,7 +878,7 @@ class RelayClient:
         if forward_slots is not None:
             self.forward_slots = list(forward_slots)
         body = self._build_heartbeat_payload(caps, in_flight)
-        r = self._post_with_retry(
+        r = self._post_with_auth_retry(
             # T-176: post to /worker-heartbeat (replace mode). The regular
             # /heartbeat endpoint merges capabilities union-only on the
             # server (core/discovery.py), so capabilities removed from the
@@ -888,7 +898,7 @@ class RelayClient:
         # decided locally, no HTTP against a token that is about to rotate.
         if not self._maintenance_gate.is_set():
             return None
-        r = self._post_with_retry(
+        r = self._post_with_auth_retry(
             "/relay/v2/scheduler/claim",
             {"capability": capability},
         )
@@ -901,7 +911,7 @@ class RelayClient:
         return data["stage"]
 
     def complete(self, task_id: str, stage_id: str, result: dict[str, Any]) -> dict[str, Any]:
-        r = self._post_with_retry(
+        r = self._post_with_auth_retry(
             f"/relay/v2/scheduler/stages/{stage_id}/complete",
             {"node_id": self.meta["node_id"], "task_id": task_id, "result": result},
             timeout=self.cfg.get("task_timeout", 600),
@@ -940,7 +950,7 @@ class RelayClient:
         }
         if owner_node_id:
             body["owner_node_id"] = owner_node_id
-        r = self._post_with_retry("/relay/v2/scheduler/task-simple", body)
+        r = self._post_with_auth_retry("/relay/v2/scheduler/task-simple", body)
         r.raise_for_status()
         return r.json()
 
@@ -977,7 +987,7 @@ class RelayClient:
 
     def add_task_note(self, task_id: str, message: str, kind: str = "info") -> dict[str, Any]:
         """Append a note to a task (T-052 mini-chat; T-154 kind drives Long-Run)."""
-        r = self._post_with_retry(
+        r = self._post_with_auth_retry(
             f"/relay/v2/scheduler/tasks/{task_id}/notes",
             {"message": message, "kind": kind},
         )
@@ -1014,7 +1024,7 @@ class RelayClient:
             "channel_id": channel_id,
             "description": description,
         }
-        r = self._post_with_retry(
+        r = self._post_with_auth_retry(
             "/relay/v2/dashboard/api/node-routes/register", body
         )
         r.raise_for_status()

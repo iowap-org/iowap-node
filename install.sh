@@ -136,7 +136,7 @@ if [ "$MODE" != "update" ]; then
     ask RELAY_CHOICE "Relay: [u]rl or [d]iscover (mDNS)? (u/d)" "u"
     case "$RELAY_CHOICE" in
       d|D|discover) RELAY_DISCOVER=1 ;;
-      *) ask RELAY_URL "Relay URL (e.g. http://192.168.2.60:8788):" ""
+      *) ask RELAY_URL "Relay URL (e.g. http://192.0.2.60:8788):" ""
          RELAY_DISCOVER=0 ;;
     esac
   else

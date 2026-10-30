@@ -533,12 +533,39 @@ class EphemeralServeHandler(BaseHTTPRequestHandler):
         transfer_id = m.group(1)
         staged = SERVE_DIR / transfer_id
         manifest_file = Path(str(staged) + ".json")
+        # T-243 (F12, audit): the download ALLOWANCE is reserved atomically
+        # BEFORE streaming — the old flow counted only AFTER the send, so
+        # N racing readers each streamed a single-download transfer. The
+        # reservation is written under the same lock that guards the
+        # manifest; the abort path below rolls it back (F6: an aborted
+        # download does not count, a retry stays possible until the TTL).
+        reserved_downloads: int | None = None
         with _transfer_lock:
             try:
                 fh = staged.open("rb")
             except OSError:
                 self._send_json(404, b'{"error": "unknown transfer"}')
                 return
+            try:
+                data = json.loads(manifest_file.read_text())
+            except (OSError, ValueError):
+                # A parallel request has already exhausted it — nothing left.
+                fh.close()
+                self._send_json(404, b'{"error": "unknown transfer"}')
+                return
+            downloads = int(data.get("downloads", 0))
+            max_downloads = int(data.get("max_downloads", 1))
+            if downloads >= max_downloads:
+                # Refused at admission: a previous (parallel) reader
+                # consumed the allowance — do not stream.
+                fh.close()
+                self._send_json(404, b'{"error": "download allowance exhausted"}')
+                return
+            reserved_downloads = downloads + 1
+            data["downloads"] = reserved_downloads
+            tmp = Path(str(manifest_file) + ".tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, manifest_file)
             size = staged.stat().st_size
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
@@ -549,32 +576,54 @@ class EphemeralServeHandler(BaseHTTPRequestHandler):
                 shutil.copyfileobj(fh, self.wfile, length=64 * 1024)
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-            # Aborted download does NOT count (F6 — retry possible until the TTL).
+            # Aborted download does NOT count (F6 — retry possible until the
+            # TTL): roll the pre-stream reservation back (T-243 F12).
             log.warning("transfer %s aborted mid-stream: %s", transfer_id, exc)
+            self._rollback_reservation(transfer_id, manifest_file)
             return
-        self._record_download(transfer_id, staged, manifest_file)
+        self._finish_download(transfer_id, staged, manifest_file, reserved_downloads)
 
-    def _record_download(
-        self, transfer_id: str, staged: Path, manifest_file: Path
-    ) -> None:
-        """Count the download; at ``max_downloads`` clean up + fire the hook (F6)."""
+    def _rollback_reservation(self, transfer_id: str, manifest_file: Path) -> None:
+        """F12: return one reserved-but-aborted download to the allowance.
+
+        Best effort under the lock; bounded at 0. A crashed manifest
+        (already cleaned up by a racing reader) is tolerated — nothing to
+        roll back.
+        """
         with _transfer_lock:
             try:
                 data = json.loads(manifest_file.read_text())
             except (OSError, ValueError):
-                # A parallel request has already exhausted it — nothing left to count.
                 return
-            downloads = int(data.get("downloads", 0)) + 1
-            max_downloads = int(data.get("max_downloads", 1))
-            if downloads >= max_downloads:
+            downloads = max(0, int(data.get("downloads", 0)) - 1)
+            data["downloads"] = downloads
+            tmp = Path(str(manifest_file) + ".tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, manifest_file)
+
+    def _finish_download(
+        self,
+        transfer_id: str,
+        staged: Path,
+        manifest_file: Path,
+        reserved_downloads: int,
+    ) -> None:
+        """Complete a PRE-RESERVED download (T-243 F12, replaces F6's
+        _record_download): the manifest already counts this download.
+        At ``max_downloads`` clean up + fire the hook."""
+        max_downloads = 1
+        with _transfer_lock:
+            try:
+                data = json.loads(manifest_file.read_text())
+                max_downloads = int(data.get("max_downloads", 1))
+            except (OSError, ValueError):
+                # A racing reader already handled it.
+                return
+            if reserved_downloads >= max_downloads:
                 staged.unlink(missing_ok=True)
                 manifest_file.unlink(missing_ok=True)
                 exhausted = True
             else:
-                data["downloads"] = downloads
-                tmp = Path(str(manifest_file) + ".tmp")
-                tmp.write_text(json.dumps(data))
-                os.replace(tmp, manifest_file)
                 exhausted = False
         if exhausted:
             hook = _ON_EXHAUSTED

@@ -58,7 +58,7 @@ def _args(stage: str, forward_slot: Any = None, **overrides: Any) -> argparse.Na
 def _submit_via_fake_relay(
     cap: str, payload: dict[str, Any], **kwargs: Any
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """submit_simple_task against a patched _post_with_retry; capture the wire body."""
+    """submit_simple_task against a patched _post_with_auth_retry; capture the wire body."""
     captured: dict[str, Any] = {}
 
     def fake_post(path: str, body: dict[str, Any], **_kw: Any) -> httpx.Response:
@@ -70,7 +70,7 @@ def _submit_via_fake_relay(
             request=httpx.Request("POST", "http://relay.test:8788" + path),
         )
 
-    with patch.object(RelayClient, "_post_with_retry", side_effect=fake_post):
+    with patch.object(RelayClient, "_post_with_auth_retry", side_effect=fake_post):
         client = RelayClient(dict(META), dict(CFG))
         resp = client.submit_simple_task(cap, payload, **kwargs)
     return resp, captured

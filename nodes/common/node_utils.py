@@ -71,10 +71,17 @@ def load_json(path: Path, default=None):
 
 def write_json_atomic(path: Path, data: dict):
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, default=str))
-    os.chmod(tmp, 0o600)
+    # T-243 (F9): the 0600 mode is set AT CREATION (os.open), not by a
+    # later chmod — write_text published the file through a crash window
+    # with umask-default permissions.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2, default=str))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     tmp.replace(path)
-    os.chmod(path, 0o600)
 
 
 def load_config() -> dict:
@@ -143,20 +150,28 @@ def save_token(
     credential. Writing is atomic (tmp file + rename) so a crash
     mid-write never leaves a truncated token file. The file is chmod
     0o600 so other local users cannot read the token (security
-    hardening, T-171).
+    hardening, T-171). Since T-243 (F9) the mode is set AT CREATION
+    (``os.open``); an intermediate chmod is no longer part of the flow.
     """
     if refreshed_at is None:
         refreshed_at = _utcnow_str()
     tmp = TOKEN_PATH.with_suffix(TOKEN_PATH.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(
-            {"token": token, "expires_at": expires_at, "refreshed_at": refreshed_at}
-        )
-        + "\n"
-    )
-    os.chmod(tmp, 0o600)
+    # T-243 (F9): mode AT CREATION — the write_text+chmod sequence below
+    # kept a umask-default-permission plaintext token file in the crash
+    # window between write and chmod.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(
+                json.dumps(
+                    {"token": token, "expires_at": expires_at, "refreshed_at": refreshed_at}
+                )
+                + "\n"
+            )
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     tmp.replace(TOKEN_PATH)
-    os.chmod(TOKEN_PATH, 0o600)
     # Migrate: remove legacy token file after successful write
     if LEGACY_TOKEN_PATH.exists() and LEGACY_TOKEN_PATH != TOKEN_PATH:
         LEGACY_TOKEN_PATH.unlink(missing_ok=True)
@@ -411,6 +426,25 @@ def apply_wheel_update(
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         tail = (getattr(exc, "stderr", "") or "").strip().splitlines()[-3:]
         result["message"] = f"pip install failed: {exc}" + (f" | {tail}" if tail else "")
+        return result
+    # T-243 (F8): the pip call above is deliberately --no-deps (protect
+    # the venv from dependency churn) — so a wheel that introduces a NEW
+    # dependency would pass "pip ok" and crash the daemon at the restart.
+    # Import-smoke the freshly installed tree with the TARGET interpreter
+    # BEFORE the restart; a failed smoke = honest failure (no restart,
+    # no success claim).
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import nodes.common.node_cli, nodes.common.node_daemon",
+            ],
+            capture_output=True, text=True, timeout=120.0, check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        err_tail = (getattr(exc, "stderr", "") or "").strip().splitlines()[-1]
+        result["message"] = f"import smoke failed after install: {err_tail}"
         return result
     after = get_local_wheel_version()
     result["after_version"] = after

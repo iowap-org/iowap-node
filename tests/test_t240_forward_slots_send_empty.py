@@ -61,7 +61,7 @@ def capture_post(client, monkeypatch) -> dict:
         captured["body"] = body
         return FakeResp({"status": "ok"})
 
-    monkeypatch.setattr(client, "_post_with_retry", fake_post)
+    monkeypatch.setattr(client, "_post_with_auth_retry", fake_post)
     return captured
 
 

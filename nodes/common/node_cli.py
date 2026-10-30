@@ -17,6 +17,8 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
 
     Handler primitives (T-179):
         node-cli hp put <path> --cap <capability> [--name <name>]
+            — the bridge rung moves the file into the serve dir and
+              deletes it after transfer
         node-cli hp get [--file <envelope.json>] [--output <path>] [--out-dir <dir>]
 
     Capability profile management:
@@ -1190,9 +1192,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_hp_sub = p_hp.add_subparsers(dest="hp_cmd", required=True, metavar="<action>")
 
     p_hp_put = p_hp_sub.add_parser(
-        "put", help="Wrap a local file as an envelope (ladder-negotiated)."
+        "put",
+        help="Wrap a local file as an envelope (ladder-negotiated; the "
+        "bridge rung moves the file into the serve dir and deletes it "
+        "after transfer).",
     )
-    p_hp_put.add_argument("path", help="Path to the local file to wrap.")
+    p_hp_put.add_argument(
+        "path",
+        help="Path to the local file to wrap (the bridge rung moves the "
+        "file into the serve dir — the source is gone after a successful "
+        "bridge put).",
+    )
     p_hp_put.add_argument(
         "--cap", required=True, help="Receiving capability (decides upload modes)."
     )
