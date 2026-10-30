@@ -348,7 +348,10 @@ class RelayClient:
     def __init__(self, meta: dict[str, Any], cfg: dict[str, Any]) -> None:
         self.meta = meta
         self.cfg = cfg
-        self.forward_slots: list[dict[str, Any]] = []
+        # T-240: ``None`` = "no loader success yet" — the heartbeat omits
+        # the field until the daemons pass the loaded row list (which may
+        # be an explicit empty list = "I no longer serve any slots").
+        self.forward_slots: list[dict[str, Any]] | None = None
         self.base_url = _base_url(meta, cfg)
         # TLS (T-111): optional CA cert path for nodes connecting over https
         # to a relay using a private/self-signed CA. When set, httpx verifies
@@ -845,7 +848,13 @@ class RelayClient:
         # T-Forward-2: node-declared forward slots from node.yaml.
         # Optional; when present the server replaces its declaration rows
         # for this node (replace_forward_slots).
-        if self.forward_slots:
+        # T-240: send the field whenever a loader SUCCEEDED — even with
+        # an EMPTY list (explicit clear; the server treats an empty list
+        # as "delete all rows"). The old truthiness check silently kept
+        # stale server rows, so forward kept routing to a target the
+        # node no longer serves. ``None`` (never loaded) still omits the
+        # field — the legacy wire shape of callers without loader info.
+        if self.forward_slots is not None:
             body["forward_slots"] = self.forward_slots
 
         return body
