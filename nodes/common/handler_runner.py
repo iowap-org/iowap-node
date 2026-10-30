@@ -25,10 +25,12 @@ Contract (see NODE_CLI_SPEC.md §4 and docs/node/capabilities.md):
   via ``config.envelope_request_mirror: true`` (rollback lever).
 * Stdout: on exit 0 MUST be valid JSON — normalized to the Response
   Envelope (T-005b): a conforming ``{"status": "completed", "result":
-  {...}, "error": null}`` passes through verbatim, ``status: "error"``
-  fails the stage fail-fast via its ``error`` message, and bare result
-  dicts are wrapped into the envelope (without an ``error`` key — the
-  daemon counts failures via ``"error" in result`` key presence).
+  {...}}`` passes through verbatim, INCLUDING ``"error": null`` (T-238:
+  the daemons count a failure only when the error VALUE is non-null —
+  ``result.get("error") is not None`` — so ``error: null`` completes
+  the stage); ``status: "error"`` fails the stage fail-fast via its
+  ``error`` message, and bare result dicts are wrapped into the
+  envelope (without an ``error`` key).
 * Stderr: captured and included in the error result on non-zero exit.
   On exit 0 it is attached to the result under ``_handler.stderr`` for
   debugging but is never interpreted as the result.
@@ -238,17 +240,19 @@ def _normalize_result(stdout_text: str) -> dict[str, Any]:
       object; ``error`` must be None if the key exists. Passed through
       verbatim (conforming handlers are never rewritten). Note the
       verified live shape omits ``error`` entirely on success — the
-      normalize layer does NOT inject ``error: None`` because the daemon
-      counts failures via ``"error" in result`` (key presence).
+      normalize layer does NOT inject ``error: None``. Since T-238 the
+      daemon failure counting is VALUE-based
+      (``result.get("error") is not None``): a conforming completed
+      envelope with ``"error": null`` counts as completed.
     - ``status == "error"``: pass through verbatim — the daemon's
-      ``"error" in result`` check then fails the stage (fail-fast,
+      non-null-error check (T-238) then fails the stage (fail-fast,
       retry budget applies, no exit-code guessing).
     - Any other ``status`` value: error result.
-    - Bare dict (no ``status``) WITH ``error`` key: pass through
-      unchanged (legacy error convention, D3).
+    - Bare dict (no ``status``) WITH a NON-NULL ``error`` value: pass
+      through unchanged (legacy error convention, D3).
     - Bare dict otherwise: wrapped as ``{"status": "completed",
       "result": <d>}`` — deliberately WITHOUT an ``error`` key (daemon
-      failure counting is key-presence-based; D4/D10 with the verified
+      failure counting is value-based; D4/D10 with the verified
       daemon read).
     - Non-object JSON: error result (bare scalars were always ambiguous;
       the contract requires an object).

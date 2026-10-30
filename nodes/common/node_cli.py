@@ -354,7 +354,13 @@ class Daemon:
             try:
                 self.client.complete(str(task_id), str(stage_id), result)
                 with self._lock:
-                    if "error" in result:
+                    # T-238: count by error VALUE, not key presence —
+                    # handler_runner passes conforming completed envelopes
+                    # with "error": null through verbatim; null is not a
+                    # failure (it used to bump tasks_failed/_failed_tasks
+                    # and starve later stages of a multi-stage task via the
+                    # max_retries skip).
+                    if result.get("error") is not None:
                         self.tasks_failed += 1
                         # T-060: count handler-reported errors so the
                         # claim loop can stop reclaiming this task.

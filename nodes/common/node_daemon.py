@@ -773,7 +773,9 @@ class SseDaemon:
             try:
                 self.client.complete(str(task_id), str(stage_id), result)
                 with self._lock:
-                    if "error" in result:
+                    # T-238: count by error VALUE, not key presence — see
+                    # node_cli._run_stage.
+                    if result.get("error") is not None:
                         self.tasks_failed += 1
                         if task_id is not None:
                             self._failed_tasks[str(task_id)] = (
