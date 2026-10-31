@@ -138,6 +138,7 @@ jobs:
         env:
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
         run: |
+          set -euo pipefail
           if [ -z "$PYPI_TOKEN" ]; then
             echo "PYPI_TOKEN secret not set — skipping publish (release asset is still on GitHub)"
             exit 0
