@@ -29,6 +29,12 @@ CgroupSample = tuple[str, float] | None
 
 def _with_cgroup_samples(samples: list, loadavg: float = 0.0, cpu: int = 2):
     """Drive _build_heartbeat_payload through N calls with staged cgroup reads."""
+    # Hermetic (T-242 CI finding): _measure_load_pct keeps its prev-sample
+    # in the MODULE-GLOBAL _CGROUP_PREV — earlier tests' real cgroup reads
+    # leak into this test. On a long-uptime host the leaked monotonic
+    # makes 'now > prev[0]' false (invisible locally); on a fresh CI
+    # runner the leak diffs and shifts the load_source. Clear it.
+    relay_client._CGROUP_PREV.clear()
     client = RelayClient(dict(META), dict(CFG))
     seq = iter(samples)
     with patch.object(relay_client, "_read_cgroup_cpu_usage", side_effect=lambda: next(seq)), \

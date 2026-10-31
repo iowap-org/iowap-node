@@ -43,7 +43,7 @@ def test_workflow_has_test_job_gating_the_build():
     # The suite needs its deps: the package + pytest + ruff must be
     # installed BEFORE the pytest step runs (a lost install step = the
     # gate fails 'No module named pytest' — T-242 live-run finding).
-    assert any("pip install" in s and "." in s.split("pip install")[-1] for s in steps), (
+    assert any("pip install --quiet ." in s or "pip install ." in s for s in steps), (
         "the test job must install the package before pytest"
     )
     assert "pytest" in joined
