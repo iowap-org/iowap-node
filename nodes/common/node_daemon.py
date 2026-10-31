@@ -205,6 +205,26 @@ _SSE_STREAM_TIMEOUT = httpx.Timeout(
     pool=5.0,
 )
 
+
+def _sse_stream_timeout() -> httpx.Timeout:
+    """Build the SSE stream timeout at CALL time (T-242 CI finding).
+
+    The import-time ``_SSE_STREAM_TIMEOUT`` snapshot baked ``read=60`` in;
+    retuning ``_SSE_READ_TIMEOUT`` (ops env, tests monkeypatch it to 0.3
+    in the behavioral proof) stayed inert — the silent-stream test then
+    ended only via the outer wait_for CANCELLATION, which deadlocks the
+    httpx/anyio teardown on Python 3.12 (aclose after cancel never
+    unwinds; the CI 3.12 leg hung forever). Same values, rebuilt per
+    attempt — and a read timeout ENDS the stream cleanly instead of a
+    cancel hanging the pool close.
+    """
+    return httpx.Timeout(
+        connect=_SSE_CONNECT_TIMEOUT,
+        write=5.0,
+        read=_SSE_READ_TIMEOUT,
+        pool=5.0,
+    )
+
 # T-179 Task 5: the relay's 404 detail when a stage is already completed
 # (iowap-server api/v2/scheduler.py, complete endpoint).
 _ALREADY_COMPLETED_DETAIL = "not claimed by this node, or not in claimed status"
@@ -537,7 +557,7 @@ class SseDaemon:
         headers: dict[str, str],
     ) -> None:
         async with http.stream(
-            "GET", url, headers=headers, timeout=_SSE_STREAM_TIMEOUT
+            "GET", url, headers=headers, timeout=_sse_stream_timeout()
         ) as resp:
             resp.raise_for_status()
             log.info("SSE connected to %s", url)

@@ -95,8 +95,16 @@ def test_t186_silent_stream_ends_with_read_timeout(isolated_relay_dir, monkeypat
             lambda r, w: None, host="127.0.0.1", port=0
         )
         port = server.sockets[0].getsockname()[1]
+        outcome: Exception | None = None
         try:
-            async with httpx.AsyncClient() as http:
+            # T-242 CI finding: the httpx client must be CLOSED BEFORE the
+            # server's wait_closed() — since Python 3.12 wait_closed waits
+            # for the open client connection to drain, and the silent SSE
+            # connection never drains by itself (the old order hung the
+            # CI 3.12 leg forever; the 10s wait_for bounds the stream, not
+            # the teardown).
+            http = httpx.AsyncClient()
+            try:
                 try:
                     await asyncio.wait_for(
                         daemon._consume_stream(
@@ -105,15 +113,30 @@ def test_t186_silent_stream_ends_with_read_timeout(isolated_relay_dir, monkeypat
                         timeout=10.0,
                     )
                 except Exception as exc:  # noqa: BLE001 — expected path
-                    return exc
-                return None  # stream "completed" without timeout = zombie
+                    outcome = exc
+            finally:
+                await http.aclose()
         finally:
             server.close()
-            await server.wait_closed()
+            # T-242 finding: since Python 3.12 wait_closed() waits for ALL
+            # transports — the silent handler never closes its writer, so
+            # the drained connection would block forever; bound the drain.
+            # The test's assertion is about the STREAM ending (outcome),
+            # not client teardown.
+            try:
+                await asyncio.wait_for(server.wait_closed(), timeout=3.0)
+            except (asyncio.TimeoutError, TimeoutError):
+                pass
+        return outcome
 
     outcome = asyncio.run(scenario())
     assert outcome is not None, (
         "silent stream never ended — zombie connection (timeout=None)"
     )
-    # httpx ≥0.28 raises plain TimeoutError; older versions ReadTimeout.
-    assert isinstance(outcome, (httpx.ReadTimeout, TimeoutError)), outcome
+    # T-242 sharpened: the read timeout itself (0.3 via the retuned
+    # _SSE_READ_TIMEOUT) must end the silent stream — NOT the outer
+    # wait_for(10s) cancellation (the cancel of a silent aiter_lines
+    # deadlocks the httpx/anyio close on Python 3.12; it also masked this
+    # test's intent: a wait_for TimeoutError proved nothing about the
+    # read budget).
+    assert isinstance(outcome, httpx.ReadTimeout), outcome
