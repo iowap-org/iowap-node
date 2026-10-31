@@ -735,6 +735,14 @@ def load_active_profile() -> list[dict[str, Any]]:
     return _active_cache.get()
 
 
+# N3 (audit 2026-10-31, F3 degradation): last valid forward-slot
+# declaration per active-path — written on each successful parse, used
+# to warn + carry rows when the active declaration breaks (T-240: the
+# client already holds/resends the carried rows). Not thread-contended
+# beyond the heartbeat thread; dict ops are GIL-atomic.
+_LAST_VALID_FORWARD_SLOTS: dict[str, list[dict[str, Any]]] = {}
+
+
 def load_forward_slots() -> list[dict[str, Any]]:
     """Read the node's declared forward slots (T-Forward-2, typed — T-235).
 
@@ -745,21 +753,53 @@ def load_forward_slots() -> list[dict[str, Any]]:
     ``None``), ``value`` (native str/bool/None), ``ref_slot``, ``ref_field``
     and ``input_schema`` (dict, forward slots only). label/description are
     stripped (empty → ``None``); the empty list means "no declared slots".
-    Malformed rows raise ``ValueError`` so operator mistakes are loud.
+
+    Malformed rows raise ``ValueError`` so operator mistakes are loud —
+    with one degradation (N3, audit 2026-10-31): when a previously loaded
+    VALID declaration exists for this active path, the loader warns and
+    re-serves that last valid list instead of raising. The heartbeat keeps
+    flowing with carried rows (the client holds them since T-240) and the
+    warning names the broken declaration; publish-time validation (T-239)
+    keeps using the row pipeline directly and is unaffected by the
+    fallback. A removed/absent section carries nothing forward: a later
+    broken declaration is loud again, never a stale resurrection.
     """
     path = ACTIVE_PATH
     if not path.exists():
+        _LAST_VALID_FORWARD_SLOTS.pop(str(path), None)
         return []
     raw = path.read_text(encoding="utf-8")
     parsed = yaml.safe_load(raw)
     if not isinstance(parsed, dict):
+        _LAST_VALID_FORWARD_SLOTS.pop(str(path), None)
         return []
     section = parsed.get("forward_slots")
     if section is None:
+        # No declaration here: nothing to carry forward — a later broken
+        # declaration has no fallback (loud, as before N3).
+        _LAST_VALID_FORWARD_SLOTS.pop(str(path), None)
         return []
-    items = _forward_slot_items(section)
-    rows = [_build_forward_slot_row(raw_slot, entry) for raw_slot, entry in items]
-    return _crosscheck_forward_slot_refs(rows)
+    try:
+        items = _forward_slot_items(section)
+        rows = [_build_forward_slot_row(raw_slot, entry) for raw_slot, entry in items]
+        rows = _crosscheck_forward_slot_refs(rows)
+    except ValueError as exc:
+        fallback = _LAST_VALID_FORWARD_SLOTS.get(str(path))
+        if fallback is None:
+            raise
+        # N3 (audit 2026-10-31, F3 degradation): a broken active-file
+        # declaration no longer starves the heartbeat silently — warn and
+        # keep serving the last valid list (client carry since T-240).
+        __import__("logging").getLogger("relay.node_config").warning(
+            "forward_slots: declaration in %s unreadable (%s) — falling"
+            " back to the last valid declaration (%d rows)",
+            path,
+            exc,
+            len(fallback),
+        )
+        return [dict(row) for row in fallback]
+    _LAST_VALID_FORWARD_SLOTS[str(path)] = [dict(row) for row in rows]
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -897,13 +937,15 @@ def _validate_forward_slots_section(section: Any, file_label: str | None = None)
     keep using the pipeline directly (load_forward_slots keeps its
     ``ValueError`` contract, pinned by test_t235).
 
-    TODO (T-239, intentionally NOT implemented): a degradation path —
-    keep heartbeating with the LAST VALID slot list plus a warning when
-    the new declaration is invalid. That needs a last-known-good slot
-    cache next to the active file and a policy answer for "profile says
-    X, node sends Y-1" at the replace-based server; fail-fast at publish
-    plus the T-237 status-file error surface is the cheaper honest
-    contract for now.
+    N3 (audit 2026-10-31): the loader-level slice of the degradation path
+    (the T-239 TODO) is now implemented in ``load_forward_slots`` — a
+    broken active-file declaration with a previously loaded valid list
+    warns and keeps serving that list (the client carries rows since
+    T-240). This check stays fail-fast (T-239): a declaration the daemon
+    cannot parse never reaches the active file through publish. The
+    remaining policy question ("profile says X, node sends Y-1" at the
+    replace-based server) is answered loudly by the fallback warning; the
+    server replace simply re-applies the carried rows.
     """
     try:
         rows = [
