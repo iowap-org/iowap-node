@@ -164,7 +164,14 @@ def test_daemon_hook_unregisters_after_exhausted_transfer(
             time.sleep(0.01)
         assert not staged.exists()
         assert not manifest_file.exists()
-        # Hook-Kette: Daemon hat unregister_temp_route am Client aufgerufen.
+        # Hook-Kette: poll-synchronize on the mock itself — the hook fires
+        # AFTER the cleanup unlink, so the file-poll above can win the
+        # race (the pre-fix flake: 0 calls seen at assert time).
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if daemon.client.unregister_temp_route.call_count >= 1:
+                break
+            time.sleep(0.01)
         daemon.client.unregister_temp_route.assert_called_once_with(
             f"/download/{'b' * 22}", method="POST"
         )
