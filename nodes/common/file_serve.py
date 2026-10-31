@@ -567,19 +567,30 @@ class EphemeralServeHandler(BaseHTTPRequestHandler):
             tmp.write_text(json.dumps(data))
             os.replace(tmp, manifest_file)
             size = staged.stat().st_size
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(size))
-        self.end_headers()
+        # N2 (audit 2026-10-31, F12 regression): the header block writes to
+        # wfile TOO — a client that disconnects before the first byte
+        # raises right here, and before the fix that fell OUTSIDE the
+        # abort handler: the reservation stayed consumed and the retry
+        # ran into 404 "download allowance exhausted" without a byte.
+        # One handler covers the pre-header and the mid-stream abort.
         try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
             with fh:
                 shutil.copyfileobj(fh, self.wfile, length=64 * 1024)
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             # Aborted download does NOT count (F6 — retry possible until the
-            # TTL): roll the pre-stream reservation back (T-243 F12).
-            log.warning("transfer %s aborted mid-stream: %s", transfer_id, exc)
+            # TTL): roll the pre-stream reservation back (T-243 F12,
+            # pre-header aborts included — N2). Closing fh here is a no-op
+            # after the with-block and closes the pre-header abort case.
+            log.warning(
+                "transfer %s aborted before/during send: %s", transfer_id, exc
+            )
             self._rollback_reservation(transfer_id, manifest_file)
+            fh.close()
             return
         self._finish_download(transfer_id, staged, manifest_file, reserved_downloads)
 
