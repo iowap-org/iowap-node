@@ -136,6 +136,7 @@ jobs:
 
       - name: Publish to PyPI
         env:
+          VER: ${{ needs.build-wheel.outputs.version }}
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
         run: |
           set -euo pipefail
@@ -149,9 +150,8 @@ jobs:
           # push of an already-published version is a skip, not an error path.
           # (Twine's "File already exists" lands on stderr — versions-dependent —
           # which defeated the old tee/grep fallback: SF14.)
-          PKG=$(python -c "import re,glob; print(re.match(r'iowap_node-([0-9.]+)-', glob.glob('dist/*.whl')[0]).group(1))")
-          if curl -sf "https://pypi.org/pypi/iowap-node/json" | python -c "import sys,json; sys.exit(0 if '$PKG' in json.load(sys.stdin)['releases'] else 1)"; then
-            echo "Version $PKG already on PyPI — skipping publish (idempotent)"
+          if curl -sf "https://pypi.org/pypi/iowap-node/json" | python -c "import sys,json; sys.exit(0 if '${VER}' in json.load(sys.stdin)['releases'] else 1)"; then
+            echo "Version $VER already on PyPI — skipping publish (idempotent)"
             exit 0
           fi
           # SF14: capture stderr too — twine failure text lands on stderr, so
