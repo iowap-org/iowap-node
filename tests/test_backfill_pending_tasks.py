@@ -75,6 +75,8 @@ def make_daemon(cfg: dict | None = None) -> SseDaemon:
     d._stop_event = threading.Event()
     d._backfill_thread = None
     d._backfill_armed = threading.Event()
+    # T-244: the stage runner wakes the sweep after a completed stage.
+    d._claim_wake = threading.Event()
     return d
 
 

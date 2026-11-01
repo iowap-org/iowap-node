@@ -186,6 +186,10 @@ class Daemon:
         # ``error`` result or an exception). Mirrors the server-side
         # retry_count guard so both sides converge on the same budget.
         self._failed_tasks: dict[str, int] = {}
+        # T-244: set by the stage runner when a stage completes — the
+        # claim loop wakes immediately instead of sitting out the full
+        # claim interval while queued work may be waiting.
+        self._claim_wake = threading.Event()
 
     # -- signal handling -----------------------------------------------------
 
@@ -414,6 +418,9 @@ class Daemon:
         finally:
             with self._lock:
                 self.in_flight[name] = max(0, self.in_flight.get(name, 1) - 1)
+            # T-244: the completed stage may leave queued work behind —
+            # wake the claim loop immediately (the loop clears the event).
+            self._claim_wake.set()
 
     def _claim_loop(self) -> None:
         interval = self.cfg["claim_interval"]
@@ -462,7 +469,11 @@ class Daemon:
             for _ in range(max(1, int(sleep_interval))):
                 if self._stop_event.is_set():
                     return
-                time.sleep(1)
+                # T-244: wake-aware slices — a completed stage (or any
+                # external signal) shortens the wait to a re-check.
+                if self._claim_wake.wait(1):
+                    self._claim_wake.clear()
+                    break
 
     # -- lifecycle ----------------------------------------------------------
 

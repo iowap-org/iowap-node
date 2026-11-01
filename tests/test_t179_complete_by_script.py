@@ -46,6 +46,11 @@ def daemon() -> node_daemon.SseDaemon:
     d._started_at = datetime.now(UTC)
     d._lock = threading.Lock()
     d._stop_event = threading.Event()
+    # T-244: the stage runner wakes the sweep after a completed stage;
+    # both _backfill_armed (unset) and _claim_wake keep the dummy free
+    # of fallback-thread side effects.
+    d._backfill_armed = threading.Event()
+    d._claim_wake = threading.Event()
     return d
 
 

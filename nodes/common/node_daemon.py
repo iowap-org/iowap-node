@@ -289,6 +289,10 @@ class SseDaemon:
         # ticker is armed only from the SSE thread.
         self._backfill_thread: threading.Thread | None = None
         self._backfill_armed = threading.Event()
+        # T-244: set by the stage runner when a stage completes — the
+        # backfill sweep runs immediately instead of on the next tick
+        # (queued work must not wait out the sweep interval).
+        self._claim_wake = threading.Event()
 
     # -- signal handling ---------------------------------------------------
 
@@ -708,20 +712,58 @@ class SseDaemon:
         stream is up, ``task_created`` events normally trigger claims;
         the ticker only rescues tasks that were missed (claim race,
         event hole, dropped event). Stops with the daemon.
+        T-244: additionally wakes early whenever a stage completes —
+        the completed stage may leave queued work behind.
         """
         interval = _backfill_interval(self.cfg)
         while not self._stop_event.is_set():
-            # Sleep in small slices so shutdown stays responsive.
+            # Sleep in wake-aware slices so shutdown stays responsive
+            # and a completed stage triggers the sweep instantly.
             for _ in range(max(1, interval)):
                 if self._stop_event.is_set():
                     return
-                time.sleep(1)
+                if self._claim_wake.wait(1):
+                    self._claim_wake.clear()
+                    break
             if self._stop_event.is_set():
                 return
             try:
                 self._backfill_sweep()
             except Exception as exc:  # noqa: BLE001 — ticker must survive
                 log.warning("backfill sweep failed: %s", exc)
+
+    # -- T-244: post-completion work check --------------------------------
+
+    def _wake_backfill(self) -> None:
+        """Wake the sweep after a completed stage.
+
+        If the backfill ticker thread is running, the event makes it
+        sweep immediately. If the ticker was disabled
+        (``backfill_interval=0``), a one-shot sweep thread takes the
+        check — the post-completion guarantee must not depend on the
+        ticker configuration. Requires an SSE-connect context
+        (``_backfill_armed``): every stage run originates from the
+        stream or the ticker, so a daemon that never connected has
+        nothing to wake.
+        """
+        self._claim_wake.set()
+        if not self._backfill_armed.is_set():
+            return
+        if self._backfill_thread is not None and self._backfill_thread.is_alive():
+            return
+        threading.Thread(
+            target=self._one_shot_sweep,
+            daemon=True,
+            name="post-complete-sweep",
+        ).start()
+
+    def _one_shot_sweep(self) -> None:
+        if self._stop_event.is_set():
+            return
+        try:
+            self._backfill_sweep()
+        except Exception as exc:  # noqa: BLE001 — sweep must survive
+            log.warning("post-complete sweep failed: %s", exc)
 
     def _try_claim_and_run(self, capability: str) -> None:
         max_retries = int(self.cfg.get("max_retries", 2))
@@ -859,6 +901,9 @@ class SseDaemon:
         finally:
             with self._lock:
                 self._in_flight[name] = max(0, self._in_flight.get(name, 1) - 1)
+            # T-244: the completed stage may leave queued work behind —
+            # check immediately instead of waiting for the next tick.
+            self._wake_backfill()
 
     # -- capability helpers ------------------------------------------------
 
