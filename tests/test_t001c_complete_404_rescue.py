@@ -55,8 +55,10 @@ def _daemon(module, clsname: str):
     d._stop_event = threading.Event()
     # T-244: the stage runner sets this after completion; the dummy has
     # no ticker/armed context, so _wake_backfill only sets the event.
+    # T-245: _claim_hint slot.
     d._backfill_armed = threading.Event()
     d._claim_wake = threading.Event()
+    d._claim_hint = None
     return d
 
 

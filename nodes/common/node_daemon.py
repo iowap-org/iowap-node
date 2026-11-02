@@ -293,6 +293,10 @@ class SseDaemon:
         # backfill sweep runs immediately instead of on the next tick
         # (queued work must not wait out the sweep interval).
         self._claim_wake = threading.Event()
+        # T-245: capability hint for the woken sweep (the completed
+        # stage's capability) — None = post-complete sweep claims only
+        # the hint; broadside stays the periodic/fallback path.
+        self._claim_hint: str | None = None
 
     # -- signal handling ---------------------------------------------------
 
@@ -616,7 +620,18 @@ class SseDaemon:
         and is intentional: max_parallel is enforced via ``_in_flight``.
         """
         event_type = event.get("type")
-        payload = event.get("data") or {}
+        # T-245: the server's SSE ``data`` line carries the FULL event
+        # envelope ``{"type", "timestamp", "payload"}`` — the real
+        # payload sits one level deeper. The historical reader passed
+        # the envelope itself down, which killed ``stage_claimed`` (no
+        # capability seen) and capped ``task_created`` cap-blind.
+        data = event.get("data")
+        if isinstance(data, dict) and isinstance(data.get("payload"), dict):
+            payload = data["payload"]
+        elif isinstance(data, dict):
+            payload = data
+        else:
+            payload = {}
         if event_type == "stage_claimed":
             self._handle_stage_claimed(payload)
         elif event_type == "task_created":
@@ -640,8 +655,45 @@ class SseDaemon:
         self._try_claim_and_run(capability)
 
     def _handle_task_created(self, payload: dict[str, Any]) -> None:
-        """A new task was created. Try to claim a stage for each
-        claimable capability this node advertises."""
+        """A new task was created. T-245: with ``capabilities`` in the
+        payload (server-enriched), claim exactly those — only the ones
+        this node advertises, is claimable for, and has capacity on.
+        Broadside stays the fallback for payloads without the field."""
+        wanted = payload.get("capabilities")
+        if isinstance(wanted, list) and wanted:
+            if self._targeted_claim_sweep(wanted):
+                return
+        self._backfill_sweep()
+
+    def _targeted_claim_sweep(self, wanted: list[str]) -> bool:
+        """T-245: one claim attempt per wanted capability that this node
+        advertises, is claimable for, and has capacity on. Returns True
+        if at least one claim was attempted (then the broadside pauses)."""
+        did_any = False
+        for cap_name in wanted:
+            if not isinstance(cap_name, str):
+                continue
+            if not self._advertises_capability(cap_name):
+                continue
+            cap = self._find_capability(cap_name)
+            if cap is None or not cap.get("claimable", False):
+                continue
+            with self._lock:
+                inflight = self._in_flight.get(cap_name, 0)
+            if inflight >= int(cap.get("max_parallel", 1)):
+                continue
+            self._try_claim_and_run(cap_name)
+            did_any = True
+        return did_any
+
+    def _wake_sweep(self) -> None:
+        """The sweep the wake runs: hint-cap first (T-244/245), broadside
+        when no valid hint is set (wake without completion context)."""
+        with self._lock:
+            hint = self._claim_hint
+            self._claim_hint = None
+        if hint and self._targeted_claim_sweep([hint]):
+            return
         self._backfill_sweep()
 
     # -- backfill (T-c51219ee) ----------------------------------------------
@@ -713,7 +765,8 @@ class SseDaemon:
         the ticker only rescues tasks that were missed (claim race,
         event hole, dropped event). Stops with the daemon.
         T-244: additionally wakes early whenever a stage completes —
-        the completed stage may leave queued work behind.
+        T-245: the woken sweep claims the completion hint only; the
+        periodic tick keeps the broadside sweep as the safety net.
         """
         interval = _backfill_interval(self.cfg)
         while not self._stop_event.is_set():
@@ -728,14 +781,20 @@ class SseDaemon:
             if self._stop_event.is_set():
                 return
             try:
-                self._backfill_sweep()
+                self._wake_sweep()
             except Exception as exc:  # noqa: BLE001 — ticker must survive
                 log.warning("backfill sweep failed: %s", exc)
 
     # -- T-244: post-completion work check --------------------------------
 
-    def _wake_backfill(self) -> None:
+    def _wake_backfill(self, cap_hint: str | None = None) -> None:
         """Wake the sweep after a completed stage.
+
+        T-245: ``cap_hint`` is the completed stage's capability — the
+        woken sweep (``_wake_sweep``) claims ONLY the hint, the
+        remaining capabilities arrive via their own ``task_created``
+        events (backlog) or the periodic tick. Broadside happens only
+        when no valid hint is set.
 
         If the backfill ticker thread is running, the event makes it
         sweep immediately. If the ticker was disabled
@@ -747,6 +806,9 @@ class SseDaemon:
         nothing to wake.
         """
         self._claim_wake.set()
+        if cap_hint:
+            with self._lock:
+                self._claim_hint = cap_hint
         if not self._backfill_armed.is_set():
             return
         if self._backfill_thread is not None and self._backfill_thread.is_alive():
@@ -761,7 +823,7 @@ class SseDaemon:
         if self._stop_event.is_set():
             return
         try:
-            self._backfill_sweep()
+            self._wake_sweep()
         except Exception as exc:  # noqa: BLE001 — sweep must survive
             log.warning("post-complete sweep failed: %s", exc)
 
@@ -901,9 +963,9 @@ class SseDaemon:
         finally:
             with self._lock:
                 self._in_flight[name] = max(0, self._in_flight.get(name, 1) - 1)
-            # T-244: the completed stage may leave queued work behind —
-            # check immediately instead of waiting for the next tick.
-            self._wake_backfill()
+            # T-244/T-245: the completed stage may leave queued work
+            # behind — check immediately, hinted to this capability.
+            self._wake_backfill(name)
 
     # -- capability helpers ------------------------------------------------
 
