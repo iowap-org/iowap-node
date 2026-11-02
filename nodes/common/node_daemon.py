@@ -656,13 +656,16 @@ class SseDaemon:
 
     def _handle_task_created(self, payload: dict[str, Any]) -> None:
         """A new task was created. T-245: with ``capabilities`` in the
-        payload (server-enriched), claim exactly those — only the ones
-        this node advertises, is claimable for, and has capacity on.
-        Broadside stays the fallback for payloads without the field."""
+        payload (server-enriched), claim exactly those — the advertised
+        ∩ claimable ∩ capacity subset. IMPORTANT T-246 note: a fully
+        occupied wanted capability is NOT a broadside trigger (the
+        broadside would hammer every capability; remaining stages
+        arrive via their own events or the periodic tick). Broadside
+        happens ONLY for payloads without the field (old server)."""
         wanted = payload.get("capabilities")
         if isinstance(wanted, list) and wanted:
-            if self._targeted_claim_sweep(wanted):
-                return
+            self._targeted_claim_sweep(wanted)
+            return
         self._backfill_sweep()
 
     def _targeted_claim_sweep(self, wanted: list[str]) -> bool:
@@ -687,12 +690,13 @@ class SseDaemon:
         return did_any
 
     def _wake_sweep(self) -> None:
-        """The sweep the wake runs: hint-cap first (T-244/245), broadside
-        when no valid hint is set (wake without completion context)."""
+        """The sweep the wake runs: hint-cap only (T-244/245); broadside
+        when no hint is set (wake without completion context)."""
         with self._lock:
             hint = self._claim_hint
             self._claim_hint = None
-        if hint and self._targeted_claim_sweep([hint]):
+        if hint:
+            self._targeted_claim_sweep([hint])
             return
         self._backfill_sweep()
 
@@ -828,26 +832,57 @@ class SseDaemon:
             log.warning("post-complete sweep failed: %s", exc)
 
     def _try_claim_and_run(self, capability: str) -> None:
+        """T-246: atomic slot reserve BEFORE the claim POST.
+
+        Claim paths run on SEVERAL threads (wake sweeps, one-shot
+        sweeps, SSE backlog) — checking ``in_flight`` separately from
+        the HTTP POST left a race window where two callers both saw a
+        free slot and claimed past ``max_parallel`` (measured live:
+        two hermes-test stages claimed in the same second at
+        max_parallel=1). Reserve = check + increment in one lock
+        section; every non-run exit releases the slot, the run exit
+        releases it in the ``_run_stage`` finally.
+        """
         max_retries = int(self.cfg.get("max_retries", 2))
+        cap = self._find_capability(capability)
+        if cap is None:
+            # T-246: claiming a stage for an unknown capability used to
+            # drop it after the POST (lease waste) — don't claim at all.
+            log.warning("unknown capability %s — no claim attempted", capability)
+            return
+        limit = int(cap.get("max_parallel", 1))
+        with self._lock:
+            inflight = self._in_flight.get(capability, 0)
+            if inflight >= limit:
+                return
+            self._in_flight[capability] = inflight + 1
         try:
             stage = self.client.claim(capability)
         except Exception as exc:  # noqa: BLE001 — never crash the SSE loop
+            with self._lock:
+                self._in_flight[capability] = max(
+                    0, self._in_flight.get(capability, 1) - 1
+                )
             log.error("claim %s failed: %s", capability, exc)
             return
         if stage is None:
+            with self._lock:
+                self._in_flight[capability] = max(
+                    0, self._in_flight.get(capability, 1) - 1
+                )
             return
         task_id = str(stage.get("task_id") or "")
         with self._lock:
             failures = self._failed_tasks.get(task_id, 0)
         if task_id and failures >= max_retries:
+            with self._lock:
+                self._in_flight[capability] = max(
+                    0, self._in_flight.get(capability, 1) - 1
+                )
             log.warning(
                 "skipping stage %s for task %s — %d failures >= max_retries %d",
                 stage.get("stage_id"), task_id, failures, max_retries,
             )
-            return
-        cap = self._find_capability(capability)
-        if cap is None:
-            log.warning("claimed stage for unknown capability %s", capability)
             return
         # T-154: if the capability declares long_run, signal the relay
         # immediately so the stage is switched to `accepted` and the
@@ -870,8 +905,6 @@ class SseDaemon:
         stage_id = stage.get("stage_id")
         task_id = stage.get("task_id")
         log.info("claimed %s stage %s (task %s)", name, stage_id, task_id)
-        with self._lock:
-            self._in_flight[name] = self._in_flight.get(name, 0) + 1
         try:
             context = {
                 "RELAY_STAGE_ID": str(stage_id or ""),
