@@ -69,7 +69,8 @@ def _cmd_capabilities_validate(args) -> int:
     for c in caps:
         print(f"  - {c['name']} v{c['version']} "
               f"auto_publish={c['auto_publish']} claimable={c['claimable']} "
-              f"max_parallel={c['max_parallel']} timeout={c['timeout']}")
+              f"max_parallel={c['max_parallel']} cost={_nc.capability_cost(c)} "
+              f"timeout={c['timeout']}")
     return 0
 
 
@@ -135,7 +136,7 @@ def _cmd_capabilities_diff(args) -> int:
 
 
 def _print_cap_diff(old: dict[str, Any], new: dict[str, Any]) -> None:
-    keys = ("version", "auto_publish", "claimable", "handler", "max_parallel", "timeout")
+    keys = ("version", "auto_publish", "claimable", "handler", "max_parallel", "cost", "timeout")
     for k in keys:
         ov, nv = old.get(k), new.get(k)
         if ov != nv:
@@ -213,6 +214,30 @@ def _cmd_capabilities_info(client: RelayClient, args) -> int:
     desc = cap.get("description")
     if desc:
         print(f"Description: {desc}")
+    # T-247: node-local capacity overlay — the server never sees cost or
+    # budget (the heartbeat payload builder whitelists fields); these
+    # lines reflect THIS node's active profile and its points budget.
+    local = None
+    try:
+        if _nc.ACTIVE_PATH.exists():
+            for c in validate_profile(_nc.ACTIVE_PATH):
+                if c.get("name") == args.name:
+                    local = c
+                    break
+    except CapabilityValidationError:
+        local = None  # broken active profile → degrade, never crash info
+    if local is not None:
+        print(
+            f"Local node:  cost={_nc.capability_cost(local)}"
+            f", max_parallel={int(local.get('max_parallel', 1))}"
+        )
+    else:
+        print("Local node:  (not in this node's active profile)")
+    budget = _nc.load_active_budget()
+    if budget is not None:
+        print(f"Node budget: {budget} points")
+    else:
+        print("Node budget: (unset — points axis off)")
     schema = cap.get("input_schema")
     if schema:
         print("Input Schema:")

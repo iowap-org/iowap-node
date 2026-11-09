@@ -43,6 +43,8 @@ def daemon() -> node_daemon.SseDaemon:
     d.tasks_failed = 0
     d._failed_tasks = {}
     d._in_flight = {}
+    # T-247: the points ledger released by the _run_stage finally.
+    d._in_flight_points = 0
     d._started_at = datetime.now(UTC)
     d._lock = threading.Lock()
     d._stop_event = threading.Event()

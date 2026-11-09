@@ -63,8 +63,10 @@ from nodes.common.node_config import (
     ACTIVE_PATH,  # noqa: F401 — re-exported so the test fixture's cli.ACTIVE_PATH patch keeps working (T-117)
     BASE_DIR,
     PROFILES_DIR,  # noqa: F401 — re-exported for the test fixture's cli.PROFILES_DIR patch
+    capability_cost,
     current_profile_name,
     invalidate_active_cache,
+    load_active_budget,
     load_active_profile,
     load_forward_slots,
 )
@@ -170,6 +172,10 @@ class Daemon:
         self.client = client
         self.cfg = cfg
         self.in_flight: dict[str, int] = {}
+        # T-247: sum of the admission points of the stages running (or
+        # reserving) right now — checked by the claim loop alongside
+        # max_parallel, released in _release_reservation.
+        self.in_flight_points = 0
         self.tasks_completed = 0
         self.tasks_failed = 0
         self.last_heartbeat_status = "unknown"
@@ -335,13 +341,30 @@ class Daemon:
 
     # -- claim/execute/complete loop ----------------------------------------
 
+    def _release_reservation(self, capability: str, cost: int) -> None:
+        """Release an in-flight slot together with its T-247 points.
+
+        Mirror of the SSE daemon's helper. ``cost`` is the admission
+        cost captured by the caller (the same cap dict that was checked
+        in the claim loop, so no repricing skew is possible).
+        """
+        with self._lock:
+            self.in_flight[capability] = max(
+                0, self.in_flight.get(capability, 1) - 1
+            )
+            self.in_flight_points = max(0, self.in_flight_points - cost)
+
     def _run_stage(self, cap: dict[str, Any], stage: dict[str, Any]) -> None:
         name = cap["name"]
         stage_id = stage.get("stage_id")
         task_id = stage.get("task_id")
         log.info("claimed %s stage %s (task %s)", name, stage_id, task_id)
+        # T-247: the run reserves the stage's admission points for its
+        # lifetime (released in the finally via _release_reservation).
+        cost = capability_cost(cap)
         with self._lock:
             self.in_flight[name] = self.in_flight.get(name, 0) + 1
+            self.in_flight_points += cost
         try:
             context = {
                 "RELAY_STAGE_ID": str(stage_id or ""),
@@ -416,8 +439,7 @@ class Daemon:
                     )
             log.error("stage %s execution failed: %s", stage_id, exc)
         finally:
-            with self._lock:
-                self.in_flight[name] = max(0, self.in_flight.get(name, 1) - 1)
+            self._release_reservation(name, cost)
             # T-244: the completed stage may leave queued work behind —
             # wake the claim loop immediately (the loop clears the event).
             self._claim_wake.set()
@@ -434,7 +456,22 @@ class Daemon:
                     name = cap["name"]
                     with self._lock:
                         inflight = self.in_flight.get(name, 0)
+                        running_points = self.in_flight_points
                     if inflight >= int(cap.get("max_parallel", 1)):
+                        continue
+                    # T-247: the points axis alongside max_parallel —
+                    # admit only when the running points plus this
+                    # capability's cost stay at/below the node budget;
+                    # the claim POST is skipped entirely otherwise. No
+                    # budget → axis off (default-off). The loop is
+                    # sequential today (in_flight drains before the
+                    # next check) but the ledger check keeps parity
+                    # with the SSE daemon's atomic reserve.
+                    budget = load_active_budget()
+                    if (
+                        budget is not None
+                        and running_points + capability_cost(cap) > budget
+                    ):
                         continue
                     stage = self.client.claim(name)
                     if stage is None:

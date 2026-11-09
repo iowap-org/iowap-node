@@ -21,6 +21,13 @@ once, and a periodic ticker (``backfill_interval``, default 60s,
 sweep reuses the ``max_parallel``/``_in_flight`` guard from the event
 handler; claims are idempotent (the server grants them atomically).
 
+Capacity points (T-247): claims additionally respect a node-local
+points budget. The T-246 atomic reserve checks BOTH admission axes in
+one lock section before the claim POST — ``running_points + cost <=
+budget`` (points axis) and the ``max_parallel`` in-flight count. A
+top-level ``budget`` in the active YAML opts a node in; without it the
+points axis is off (default-off).
+
 ``node-cli daemon`` remains unchanged; this module is a separate entry
 point (``node-daemon``) that can run side-by-side without affecting the
 existing daemon.
@@ -53,9 +60,11 @@ import httpx
 from nodes.common import file_serve
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
+    capability_cost,
     current_profile_name,
     ensure_node_cli_stamp,
     invalidate_active_cache,
+    load_active_budget,
     load_active_profile,
     load_forward_slots,
 )
@@ -274,6 +283,10 @@ class SseDaemon:
         self.server_probe: dict[str, Any] = {"ok": False, "error": "probe pending"}
         self._probe_thread: threading.Thread | None = None
         self._in_flight: dict[str, int] = {}
+        # T-247: sum of reserved admission points across all in-flight
+        # stages — incremented with the reserve-time cost in the atomic
+        # reserve, decremented on every release (_release_reservation).
+        self._in_flight_points = 0
         self._lock = threading.Lock()
         self._started_at = datetime.now(timezone.utc)
         self.tasks_completed = 0
@@ -831,6 +844,20 @@ class SseDaemon:
         except Exception as exc:  # noqa: BLE001 — sweep must survive
             log.warning("post-complete sweep failed: %s", exc)
 
+    def _release_reservation(self, capability: str, cost: int) -> None:
+        """Release a T-246 slot reserve together with its T-247 points.
+
+        ``cost`` is the reserve-time admission cost of the capability —
+        captured by whoever reserved, so a profile reload between reserve
+        and release (which may reprice the capability) cannot skew the
+        ledger. Floors at 0 like the count release used to.
+        """
+        with self._lock:
+            self._in_flight[capability] = max(
+                0, self._in_flight.get(capability, 1) - 1
+            )
+            self._in_flight_points = max(0, self._in_flight_points - cost)
+
     def _try_claim_and_run(self, capability: str) -> None:
         """T-246: atomic slot reserve BEFORE the claim POST.
 
@@ -842,6 +869,12 @@ class SseDaemon:
         max_parallel=1). Reserve = check + increment in one lock
         section; every non-run exit releases the slot, the run exit
         releases it in the ``_run_stage`` finally.
+
+        T-247: the reserve is the admission gate for BOTH axes —
+        ``in_flight < max_parallel`` AND (when the node declares a
+        ``budget``) ``_in_flight_points + cost <= budget``. The ledger
+        add uses the reserve-time cost so a later profile reload can't
+        corrupt the accounting.
         """
         max_retries = int(self.cfg.get("max_retries", 2))
         cap = self._find_capability(capability)
@@ -851,34 +884,45 @@ class SseDaemon:
             log.warning("unknown capability %s — no claim attempted", capability)
             return
         limit = int(cap.get("max_parallel", 1))
+        # T-247: capture both admission axes BEFORE the lock — neither
+        # read needs it (capability_cost is pure, the budget is a fresh
+        # disk read) and the decision itself stays atomic under the lock.
+        cost = capability_cost(cap)
+        budget = load_active_budget()
         with self._lock:
             inflight = self._in_flight.get(capability, 0)
             if inflight >= limit:
                 return
+            # T-247: the points axis — admit only when the reserved
+            # points plus this capability's cost stay at/below the node
+            # budget. No budget → axis off (default-off). Refusal here
+            # releases nothing (nothing was reserved yet) and skips the
+            # claim POST entirely.
+            if budget is not None and self._in_flight_points + cost > budget:
+                log.info(
+                    "claim %s refused: %d points in use + cost %d exceeds budget %d",
+                    capability,
+                    self._in_flight_points,
+                    cost,
+                    budget,
+                )
+                return
             self._in_flight[capability] = inflight + 1
+            self._in_flight_points += cost
         try:
             stage = self.client.claim(capability)
         except Exception as exc:  # noqa: BLE001 — never crash the SSE loop
-            with self._lock:
-                self._in_flight[capability] = max(
-                    0, self._in_flight.get(capability, 1) - 1
-                )
+            self._release_reservation(capability, cost)
             log.error("claim %s failed: %s", capability, exc)
             return
         if stage is None:
-            with self._lock:
-                self._in_flight[capability] = max(
-                    0, self._in_flight.get(capability, 1) - 1
-                )
+            self._release_reservation(capability, cost)
             return
         task_id = str(stage.get("task_id") or "")
         with self._lock:
             failures = self._failed_tasks.get(task_id, 0)
         if task_id and failures >= max_retries:
-            with self._lock:
-                self._in_flight[capability] = max(
-                    0, self._in_flight.get(capability, 1) - 1
-                )
+            self._release_reservation(capability, cost)
             log.warning(
                 "skipping stage %s for task %s — %d failures >= max_retries %d",
                 stage.get("stage_id"), task_id, failures, max_retries,
@@ -905,6 +949,10 @@ class SseDaemon:
         stage_id = stage.get("stage_id")
         task_id = stage.get("task_id")
         log.info("claimed %s stage %s (task %s)", name, stage_id, task_id)
+        # T-247: the run exit releases the T-246 reserve together with
+        # the points reserved for THIS cap dict (same object that the
+        # claim path reserved from, therefore the same cost).
+        cost = capability_cost(cap)
         try:
             context = {
                 "RELAY_STAGE_ID": str(stage_id or ""),
@@ -994,8 +1042,7 @@ class SseDaemon:
                     )
             log.error("stage %s execution failed: %s", stage_id, exc)
         finally:
-            with self._lock:
-                self._in_flight[name] = max(0, self._in_flight.get(name, 1) - 1)
+            self._release_reservation(name, cost)
             # T-244/T-245: the completed stage may leave queued work
             # behind — check immediately, hinted to this capability.
             self._wake_backfill(name)

@@ -70,6 +70,8 @@ def make_daemon(cfg: dict | None = None) -> SseDaemon:
     d.tasks_failed = 0
     d._failed_tasks = {}
     d._in_flight = {}
+    # T-247: the points ledger is part of the reserve state.
+    d._in_flight_points = 0
     d._started_at = datetime.now(UTC)
     d._lock = threading.Lock()
     d._stop_event = threading.Event()

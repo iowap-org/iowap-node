@@ -51,6 +51,9 @@ def _daemon(module, clsname: str):
     # both naming conventions: SseDaemon._in_flight, node_cli.Daemon.in_flight
     d._in_flight = {}
     d.in_flight = {}
+    # T-247: the points-ledger mirrors use both naming conventions too.
+    d._in_flight_points = 0
+    d.in_flight_points = 0
     d._lock = threading.Lock()
     d._stop_event = threading.Event()
     # T-244: the stage runner sets this after completion; the dummy has

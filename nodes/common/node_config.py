@@ -32,6 +32,15 @@ optional fields. Environment-variable overrides
 (``RELAY_CAPABILITY_<NAME>_HANDLER`` / ``..._MAX_PARALLEL``) are applied
 on read so that operators can patch a profile without editing the YAML.
 
+T-247 adds a node-local points budget: a capability may declare
+``cost`` (admission points, default 1) and the active file a top-level
+``budget`` (e.g. 10). The daemon admits a claim only when
+``running_points + cost <= budget`` AND the capability's in-flight
+count stays under ``max_parallel``. Without ``budget`` the points axis
+is off (default-off — behaviour unchanged). Node-local only: the cost
+never reaches the server (the heartbeat payload builder whitelists
+fields).
+
 For backward compatibility a one-shot migration (``_migrate_old_paths``)
 runs at import time: legacy ``capabilities.active.yaml`` /
 ``capabilities.active.profile`` / ``capabilities.d/`` artifacts are
@@ -73,6 +82,8 @@ CAPABILITY_SCHEMA: dict[str, Any] = {
         "status": {"type": "string", "enum": ["busy", "idle", "online"]},
         "node_name": {"type": "string"},
         "description": {"type": "string"},
+        # T-247: node-level points budget (top-level, optional).
+        "budget": {"type": "integer", "minimum": 0},
         "capabilities": {
             "type": "array",
             "items": {
@@ -87,6 +98,8 @@ CAPABILITY_SCHEMA: dict[str, Any] = {
                     "claimable": {"type": "boolean"},
                     "handler": {"type": "string"},
                     "max_parallel": {"type": "integer", "minimum": 1},
+                    # T-247: admission points (default DEFAULT_COST when absent).
+                    "cost": {"type": "integer", "minimum": 0},
                     "timeout": {"type": "integer", "minimum": 1},
                     "input_schema": {"type": "object"},
                 },
@@ -111,6 +124,14 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
     if not isinstance(data, dict):
         errors.append("profile root must be a mapping")
         return errors
+    # T-247: optional node-level points budget (the daemon's default-off
+    # admission axis; validated fail-loud so a publish can never install
+    # a budget the loader will silently ignore).
+    budget = data.get("budget")
+    if budget is not None and (
+        not isinstance(budget, int) or isinstance(budget, bool) or budget < 0
+    ):
+        errors.append("'budget' must be a non-negative integer")
     # 'capabilities' is optional — a profile may carry only node-level
     # configuration (status, node_name, description). When present it
     # must be a list.
@@ -127,7 +148,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
             if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
                 errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
             # Check for unknown keys
-            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "timeout", "routes", "long_run", "upload_modes", "result_path_hints", "config"}
+            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "cost", "timeout", "routes", "long_run", "upload_modes", "result_path_hints", "config"}
             extra = set(entry.keys()) - allowed
             if extra:
                 errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
@@ -142,6 +163,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
                 ("claimable", bool),
                 ("handler", str),
                 ("max_parallel", int),
+                ("cost", int),
                 ("timeout", int),
                 ("long_run", bool),
             ]:
@@ -153,6 +175,11 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
                 val = entry.get(key)
                 if isinstance(val, int) and val < 1:
                     errors.append(f"{prefix}.{key}: must be >= 1, got {val}")
+            # T-247: cost is admission points — 0 is legal (a free cap),
+            # negative is not.
+            cost = entry.get("cost")
+            if isinstance(cost, int) and not isinstance(cost, bool) and cost < 0:
+                errors.append(f"{prefix}.cost: must be >= 0, got {cost}")
 
     return errors
 
@@ -211,6 +238,9 @@ _migrate_old_paths()
 DEFAULT_VERSION = "1.0.0"
 DEFAULT_MAX_PARALLEL = 1
 DEFAULT_TIMEOUT = 300
+# T-247: admission points — a capability without a declared ``cost``
+# contributes this to the node budget at admission time.
+DEFAULT_COST = 1
 
 # Required normalized keys in order (for stable output / diffs).
 _NORMALIZED_KEYS = (
@@ -221,6 +251,7 @@ _NORMALIZED_KEYS = (
     "claimable",
     "handler",
     "max_parallel",
+    "cost",
     "timeout",
     "routes",
 )
@@ -365,6 +396,17 @@ def _normalize_capability(
             capability=name,
         )
 
+    # T-247: admission points (node-local). Absent/None → DEFAULT_COST;
+    # anything else must be a non-negative integer (0 = free cap).
+    raw_cost = raw.get("cost")
+    cost = raw_cost if raw_cost is not None else DEFAULT_COST
+    if not isinstance(cost, int) or isinstance(cost, bool) or cost < 0:
+        raise CapabilityValidationError(
+            "'cost' must be a non-negative integer (admission points, >= 0)",
+            file=file,
+            capability=name,
+        )
+
     timeout = raw.get("timeout", DEFAULT_TIMEOUT)
     if not isinstance(timeout, int) or isinstance(timeout, bool):
         raise CapabilityValidationError(
@@ -427,6 +469,11 @@ def _normalize_capability(
     # daemon's complete_by_script gate already reads cap["config"].
     if raw.get("config") is not None:
         cap["config"] = raw["config"]
+    # T-247: forward the admission points cost only when declared —
+    # undeclared capabilities cost DEFAULT_COST at admission time and the
+    # heartbeat payload (whitelisted builder) stays unchanged.
+    if raw_cost is not None:
+        cap["cost"] = raw_cost
     # Apply env-var overrides (may raise CapabilityValidationError).
     _apply_env_overrides(cap)
     # Re-validate handler after overrides: an override could clear it.
@@ -1078,6 +1125,48 @@ def load_active_status() -> str | None:
     except (OSError, yaml.YAMLError):
         pass
     return None
+
+
+def load_active_budget() -> int | None:
+    """Return the top-level ``budget`` from the active YAML profile (T-247).
+
+    The points axis is only active when the active file declares a
+    ``budget``; ``None`` means "unset — axis off" and leaves admission to
+    ``max_parallel`` alone. Read fresh from disk on every call (same
+    discipline as :func:`load_active_status`) so a publish/SIGHUP-pickup
+    is honoured on the next claim without cache involvement. An invalid
+    hand-edited value degrades to ``None``: profile validation
+    (``validate_with_schema``) is the loud path, the daemon admission
+    path must never die on YAML content.
+    """
+    path = ACTIVE_PATH
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+        parsed = yaml.safe_load(raw)
+        if isinstance(parsed, dict):
+            val = parsed.get("budget")
+            if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+                return int(val)
+    except (OSError, yaml.YAMLError):
+        pass
+    return None
+
+
+def capability_cost(cap: dict[str, Any]) -> int:
+    """Admission points of a normalized capability (T-247).
+
+    Declared via the profile's ``cost`` key; undeclared capabilities
+    cost :data:`DEFAULT_COST` (1). Junk values in hand-built dicts fall
+    back to the default instead of raising — the profiles themselves are
+    pre-validated (fail-loud at validate/publish time), this helper only
+    guards the daemon admission hot path.
+    """
+    cost = cap.get("cost", DEFAULT_COST)
+    if not isinstance(cost, int) or isinstance(cost, bool) or cost < 0:
+        return DEFAULT_COST
+    return cost
 
 
 _STATUS_RE = re.compile(r'^(status:\s*).*', re.MULTILINE)
