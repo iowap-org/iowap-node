@@ -952,6 +952,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_note.add_argument("message", help="Note text (1..2000 characters).")
     p_note.set_defaults(func=with_client(cli_task._cmd_task_note))
 
+    # T-248: task list — server-side filtered query of scheduler tasks.
+    # --json is the existing global flag (node-cli --json task list ...).
+    p_task_list = p_task_sub.add_parser(
+        "list", help="List/query tasks on the relay (server-side filters)."
+    )
+    p_task_list.add_argument(
+        "--submitted-by",
+        default=None,
+        help="Filter: node ID that submitted the task (submitted_by).",
+    )
+    p_task_list.add_argument(
+        "--owner",
+        default=None,
+        help="Filter: node ID that must claim the task (owner_node_id).",
+    )
+    p_task_list.add_argument(
+        "--status",
+        default=None,
+        help=(
+            "Filter: comma-separated status values, e.g. pending,claimed "
+            "(passed through unvalidated; the relay validates)."
+        ),
+    )
+    p_task_list.add_argument(
+        "--since",
+        default=None,
+        help="Filter: tasks created at/after this ISO-8601 timestamp (created_since).",
+    )
+    p_task_list.add_argument(
+        "--until",
+        default=None,
+        help="Filter: tasks created at/before this ISO-8601 timestamp (created_until).",
+    )
+    p_task_list.set_defaults(func=with_client(cli_task._cmd_task_list))
+
     # capabilities
     p_caps = sub.add_parser("capabilities", help="Capability profile management.")
     p_caps_sub = p_caps.add_subparsers(

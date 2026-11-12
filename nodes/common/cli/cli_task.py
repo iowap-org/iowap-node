@@ -1,4 +1,4 @@
-"""CLI task subcommands — submit / result / note / wait (T-117 split).
+"""CLI task subcommands — submit / result / list / note / wait (T-117; list: T-248).
 
 Handler signatures are plain ``(client, args) -> int``; the
 ``node_cli.with_client`` decorator is applied at parser-registration time
@@ -113,6 +113,52 @@ def _cmd_task_result(client: RelayClient, args) -> int:
         print(json.dumps(data, default=str))
         return 0
     _print_task_result(data)
+    return 0
+
+
+def _cmd_task_list(client: RelayClient, args) -> int:
+    """Query tasks: ``GET /relay/v2/scheduler/tasks`` (T-248).
+
+    Every set option maps 1:1 onto a query param (server-side filtering,
+    T-268); unset options are not sent. ``--status`` passes its comma
+    string through unvalidated. Human rows are sorted newest-first
+    (created_at desc, client-side); ``--json`` prints the full payload.
+    """
+    try:
+        data = client.list_tasks(
+            submitted_by=args.submitted_by,
+            owner_node_id=args.owner,
+            status=args.status,
+            created_since=args.since,
+            created_until=args.until,
+        )
+    except httpx.HTTPStatusError as exc:
+        code, message = _parse_relay_error(exc.response)
+        detail = f"{code}: {message}" if code else message
+        print(
+            f"task list failed: HTTP {exc.response.status_code}: {detail}",
+            file=sys.stderr,
+        )
+        return 1
+    if args.json:
+        print(json.dumps(data, default=str))
+        return 0
+    tasks = sorted(
+        data.get("tasks", []),
+        key=lambda t: str(t.get("created_at") or ""),
+        reverse=True,
+    )
+    if not tasks:
+        print("(no tasks matched the given filters)")
+        return 0
+    for t in tasks:
+        name = t.get("task_name") or t.get("name") or ""
+        owner = t.get("owner_node_id")
+        owner_str = str(owner) if owner else "-"
+        print(
+            f"{t.get('task_id', '?')}  {name}  {t.get('status', '?')}"
+            f"  {t.get('created_at', '?')}  {t.get('submitted_by', '?')} -> {owner_str}"
+        )
     return 0
 
 

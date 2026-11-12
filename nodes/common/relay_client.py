@@ -461,23 +461,32 @@ class RelayClient:
         )
 
     def _get(
-        self, path: str, *, timeout: float | None = None
+        self,
+        path: str,
+        *,
+        timeout: float | None = None,
+        params: dict[str, str] | None = None,
     ) -> httpx.Response:
         return httpx.get(
             f"{self.base_url}{path}",
             headers={"Authorization": f"Bearer {self.token}"},
+            params=params,
             timeout=timeout or self.cfg["request_timeout"],
             verify=self._verify,
         )
 
     def _get_with_retry(
-        self, path: str, *, timeout: float | None = None
+        self,
+        path: str,
+        *,
+        timeout: float | None = None,
+        params: dict[str, str] | None = None,
     ) -> httpx.Response:
-        r = self._get(path, timeout=timeout)
+        r = self._get(path, timeout=timeout, params=params)
         if r.status_code in (401, 403):
             log.warning("auth error %s on %s, refreshing token", r.status_code, path)
             if self._refresh_token():
-                r = self._get(path, timeout=timeout)
+                r = self._get(path, timeout=timeout, params=params)
         return r
 
     def _post_with_auth_retry(
@@ -959,6 +968,36 @@ class RelayClient:
         r = self._get_with_retry(f"/relay/v2/scheduler/tasks/{task_id}")
         if r.status_code == 404:
             return {"error": "not found", "task_id": task_id}
+        r.raise_for_status()
+        return r.json()
+
+    def list_tasks(
+        self,
+        *,
+        submitted_by: str | None = None,
+        owner_node_id: str | None = None,
+        status: str | None = None,
+        created_since: str | None = None,
+        created_until: str | None = None,
+    ) -> dict[str, Any]:
+        """List/query tasks: ``GET /relay/v2/scheduler/tasks`` (T-248).
+
+        Only set filters are sent as query params (1:1 mapping,
+        server-side evaluated in T-268); ``status`` is a comma-separated
+        string passed through unvalidated.
+        """
+        params: dict[str, str] = {}
+        if submitted_by:
+            params["submitted_by"] = submitted_by
+        if owner_node_id:
+            params["owner_node_id"] = owner_node_id
+        if status:
+            params["status"] = status
+        if created_since:
+            params["created_since"] = created_since
+        if created_until:
+            params["created_until"] = created_until
+        r = self._get_with_retry("/relay/v2/scheduler/tasks", params=params)
         r.raise_for_status()
         return r.json()
 
