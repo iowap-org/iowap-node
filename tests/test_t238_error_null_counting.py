@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pytest
 
-from nodes.common import node_cli, node_daemon, poll_daemon
+from nodes.common import node_daemon, poll_daemon
 from nodes.common.relay_client import RelayClient
 
 META = {
@@ -60,7 +60,7 @@ def _fake_complete(*_a, **_k):
 def test_cli_completed_with_null_error_counts_as_completed(client, monkeypatch):
     """{status: completed, result, error: null} → tasks_completed++, NO
     tasks_failed/_failed_tasks bump (the stage-3 flow stays alive)."""
-    daemon = node_cli.Daemon(client, dict(CFG))
+    daemon = poll_daemon.Daemon(client, dict(CFG))
     monkeypatch.setattr(poll_daemon, "run_handler", rh_ok)
     daemon.client.complete = _fake_complete
 
@@ -74,7 +74,7 @@ def test_cli_completed_with_null_error_counts_as_completed(client, monkeypatch):
 def test_cli_non_null_error_still_counts_as_failure(client, monkeypatch):
     """Contract lock: real errors (non-null, flat and envelope form) keep
     incrementing tasks_failed and the per-task budget."""
-    daemon = node_cli.Daemon(client, dict(CFG))
+    daemon = poll_daemon.Daemon(client, dict(CFG))
     daemon.client.complete = _fake_complete
 
     cases = [

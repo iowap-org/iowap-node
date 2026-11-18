@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""node-daemon — SSE-driven reference daemon for IOWAP.
+"""node-daemon/iowap-daemon — SSE-driven reference daemon for IOWAP.
 
-A sibling to ``node-cli daemon`` that replaces the polling claim loop with
+A sibling to ``poll_daemon.Daemon`` (the legacy claim/heartbeat polling
+daemon) that replaces the polling claim loop with
 an SSE event stream. Instead of asking the scheduler for work every N
 seconds, the daemon subscribes to ``/relay/v2/events/stream`` and reacts
 to ``stage_claimed`` and ``task_created`` events:
@@ -28,9 +29,12 @@ budget`` (points axis) and the ``max_parallel`` in-flight count. A
 top-level ``budget`` in the active YAML opts a node in; without it the
 points axis is off (default-off).
 
-``node-cli daemon`` remains unchanged; this module is a separate entry
-point (``node-daemon``) that can run side-by-side without affecting the
-existing daemon.
+Since T-250 the CLI carries no daemon code (``node-cli daemon …`` is
+gone); the poll-mode twin lives in ``nodes.common.poll_daemon`` and is
+reached via ``node-daemon``/``iowap-daemon`` ``--mode poll`` or its own
+``python -m nodes.common.poll_daemon --daemon-internal`` self-spawn.
+This module is the SSE entry point; ``status`` mode (T-250) prints the
+mode-aware status across both pid files without starting anything.
 
 Architecture (threads)::
 
@@ -260,9 +264,10 @@ def _is_already_completed(exc: BaseException) -> bool:
 class SseDaemon:
     """SSE-driven daemon: heartbeat thread + SSE event loop + execution.
 
-    Mirrors ``node_cli.Daemon`` for the heartbeat and stage-execution
-    logic but replaces the polling claim loop with an SSE client that
-    reacts to ``stage_claimed`` / ``task_created`` events.
+    Mirrors ``poll_daemon.Daemon`` (the moved ``node_cli.Daemon``, T-250)
+    for the heartbeat and stage-execution logic but replaces the polling
+    claim loop with an SSE client that reacts to ``stage_claimed`` /
+    ``task_created`` events.
     """
 
     def __init__(self, client: RelayClient, cfg: dict[str, Any]) -> None:
@@ -1185,6 +1190,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run in the foreground (default). Kept for parity with node-cli.",
     )
     parser.add_argument(
+        "status",
+        nargs="?",
+        default=None,
+        choices=("status",),
+        help=(
+            "'status' — print the mode-aware daemon status (pid/mode "
+            "across both pid files: SSE node-daemon.pid + poll "
+            "node-cli.pid) and exit. Read-only, no relay client."
+        ),
+    )
+    parser.add_argument(
+        "--status",
+        dest="status_flag",
+        action="store_true",
+        help="Flag form of the 'status' mode (same output, same exit code).",
+    )
+    parser.add_argument(
         "--mode",
         action=_SingleModeAction,
         default="sse",
@@ -1201,6 +1223,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
+    # T-250: status mode (argv `status` or `--status`) — mode-aware daemon
+    # status across BOTH pid files (SSE node-daemon.pid + poll
+    # node-cli.pid). The logic lives in poll_daemon._daemon_status (single
+    # source of truth, no duplication); only local files are read, so the
+    # branch short-circuits before any relay client is built. Exit 0 when a
+    # daemon is running, 1 otherwise — mirror of the pre-T-250
+    # `node-cli daemon status` contract.
+    if args.status is not None or args.status_flag:
+        return poll_daemon._daemon_status(
+            argparse.Namespace(log_level=args.log_level)
+        )
     try:
         meta = load_meta()
         cfg = _effective_config()

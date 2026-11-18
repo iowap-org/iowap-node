@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from nodes.common import node_cli, poll_daemon
+from nodes.common import poll_daemon
 from nodes.common.relay_client import RelayClient
 
 META = {
@@ -35,7 +35,7 @@ def client() -> RelayClient:
     return RelayClient(dict(META), dict(CFG))
 
 
-def _run_one_heartbeat(daemon: node_cli.Daemon) -> None:
+def _run_one_heartbeat(daemon: poll_daemon.Daemon) -> None:
     thread = threading.Thread(target=daemon._heartbeat_loop, daemon=True)
     thread.start()
     thread.join(timeout=3)
@@ -45,7 +45,7 @@ def _run_one_heartbeat(daemon: node_cli.Daemon) -> None:
 def test_cli_daemon_heartbeat_loads_and_sends_forward_slots(client, monkeypatch):
     """node-cli daemon heartbeat passes the declared forward_slots from
     node.yaml into RelayClient.heartbeat — same contract as the SSE daemon."""
-    daemon = node_cli.Daemon(client, dict(CFG))
+    daemon = poll_daemon.Daemon(client, dict(CFG))
     monkeypatch.setattr(client, "maintenance_due", lambda: False)
     monkeypatch.setattr(
         poll_daemon,
@@ -73,7 +73,7 @@ def test_cli_daemon_heartbeat_without_slots_reports_empty_forward_slots(
     """Missing node.yaml / no forward_slots block still reaches the client
     as an empty list — never as ``None`` — so both daemon paths produce the
     identical heartbeat envelope."""
-    daemon = node_cli.Daemon(client, dict(CFG))
+    daemon = poll_daemon.Daemon(client, dict(CFG))
     monkeypatch.setattr(client, "maintenance_due", lambda: False)
     monkeypatch.setattr(poll_daemon, "load_forward_slots", list)
 
@@ -106,7 +106,7 @@ def test_cli_daemon_heartbeat_failure_is_survivable(
     ticking (heartbeat stops while the loader is broken — capabilities are
     never sent half-known — and the error is surfaced, T-237-hardened).
     """
-    daemon = node_cli.Daemon(client, dict(CFG))
+    daemon = poll_daemon.Daemon(client, dict(CFG))
     monkeypatch.setattr(poll_daemon, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(client, "maintenance_due", lambda: False)
 

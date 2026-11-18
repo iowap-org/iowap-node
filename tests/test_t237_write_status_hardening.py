@@ -33,7 +33,7 @@ import time
 
 import pytest
 
-from nodes.common import node_cli, node_daemon, poll_daemon
+from nodes.common import node_daemon, poll_daemon
 from nodes.common.node_config import CapabilityValidationError
 from nodes.common.relay_client import RelayClient
 
@@ -103,7 +103,7 @@ def test_cli_heartbeat_thread_survives_invalid_active_profile(
     """A broken active profile must not take the heartbeat thread down."""
     monkeypatch.setattr(poll_daemon, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(poll_daemon, "load_forward_slots", list)
-    daemon = node_cli.Daemon(client, dict(CFG))
+    daemon = poll_daemon.Daemon(client, dict(CFG))
     monkeypatch.setattr(poll_daemon, "load_active_profile", _broken_profile())
 
     _run_until_n_tick_errors(daemon, monkeypatch, caplog, want=2)
@@ -115,7 +115,7 @@ def test_cli_status_file_reports_profile_error_with_empty_caps(
     """With a broken profile the status snapshot still lands on disk —
     capabilities fall back to ``[]`` and the error is reported."""
     monkeypatch.setattr(poll_daemon, "STATUS_PATH", tmp_path / "status.json")
-    daemon = node_cli.Daemon(client, dict(CFG))
+    daemon = poll_daemon.Daemon(client, dict(CFG))
     monkeypatch.setattr(poll_daemon, "load_active_profile", _broken_profile())
 
     daemon._write_status()  # must not raise (T-237)
@@ -138,7 +138,7 @@ def test_cli_heartbeat_loop_survives_status_write_failure(
 
     monkeypatch.setattr(poll_daemon, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(poll_daemon, "load_forward_slots", list)
-    daemon = node_cli.Daemon(client, dict(CFG))
+    daemon = poll_daemon.Daemon(client, dict(CFG))
     monkeypatch.setattr(daemon, "_write_status", explode)
 
     ticks: list[int] = []

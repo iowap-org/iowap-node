@@ -2,20 +2,29 @@
 
 Contract:
 - The polling daemon (legacy claim/heartbeat loop) lives in
-  ``nodes.common.poll_daemon``; ``node-cli daemon {start,stop,status,
-  foreground,restart}`` stays byte-identical: same pid file (node-cli.pid),
-  same log file (node-cli.log), same self-spawn command, same SIGHUP.
+  ``nodes.common.poll_daemon``; the CLI carries NO daemon code (T-250):
+  ``node-cli daemon {start,stop,status,foreground,restart}`` is an argparse
+  usage error and node_cli re-exports none of the daemon names
+  (PID_PATH/LOG_PATH/Daemon/_daemon_*). The poll daemon's self-spawn runs
+  its own ``__main__``: ``python -m nodes.common.poll_daemon
+  --daemon-internal`` (same pid file node-cli.pid, same log file
+  node-cli.log, same SIGHUP).
 - ``node-daemon``/``iowap-daemon`` accepts ``--mode {sse,poll}`` (default
-  ``sse`` = exactly the pre-T-250 behaviour). ``--mode poll`` runs the moved
-  polling daemon without ever touching the SSE connection. Requesting both
-  modes (or --mode twice) fails closed: loud error, exit != 0, no process,
-  no pid file.
+  ``sse`` = exactly the pre-T-250 behaviour) and ``status`` / ``--status``
+  (T-250: mode-aware status across both pid files — sees the running SSE
+  daemon, rc 0, mode sse). ``--mode poll`` runs the moved polling daemon
+  without ever touching the SSE connection. Requesting both modes (or
+  --mode twice) fails closed: loud error, exit != 0, no process, no pid
+  file.
 - pyproject [project.scripts] gains ``iowap-cli`` and ``iowap-daemon`` while
   ``node-cli``/``node-daemon`` remain unchanged shims. A built wheel exposes
-  all four console scripts (verified via importlib.metadata).
+  all four console scripts (verified via importlib.metadata). The usage
+  prog follows the invoked binary name (argv[0] basename): ``iowap-cli
+  --help`` sights ``usage: iowap-cli …``, the legacy shim keeps ``node-cli``.
 """
 from __future__ import annotations
 
+import argparse
 import importlib
 import os
 import subprocess
@@ -38,17 +47,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture()
 def daemon_state(tmp_path, monkeypatch):
-    """Isolate every pid/log/status path both modules touch."""
-    for mod in (node_cli, node_daemon, poll_daemon):
-        monkeypatch.setattr(mod, "BASE_DIR", tmp_path, raising=False)
-        if hasattr(mod, "PID_PATH"):
-            monkeypatch.setattr(
-                mod, "PID_PATH", tmp_path / f"{mod.__name__.split('.')[-1]}.pid",
-                raising=False,
-            )
-    monkeypatch.setattr(node_cli, "PID_PATH", tmp_path / "node-cli.pid")
-    monkeypatch.setattr(node_daemon, "PID_PATH", tmp_path / "node-daemon.pid")
-    monkeypatch.setattr(poll_daemon, "PID_PATH", tmp_path / "node-cli.pid")
+    """Isolate every pid/log/status path the daemon modules touch."""
+    monkeypatch.setattr(poll_daemon, "BASE_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(node_daemon, "BASE_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(node_daemon, "PID_PATH", tmp_path / "node-daemon.pid", raising=False)
+    monkeypatch.setattr(poll_daemon, "PID_PATH", tmp_path / "node-cli.pid", raising=False)
     return tmp_path
 
 
@@ -242,6 +245,39 @@ def test_mode_rejects_unknown_values():
     assert exc.value.code != 0
 
 
+# ---------------------------------------------------------------------------
+# status mode (T-250): argv `status` / `--status` — mode-aware local status
+# ---------------------------------------------------------------------------
+
+
+def test_status_positional_parses():
+    args = node_daemon.build_parser().parse_args(["status"])
+    assert args.status == "status"
+    assert args.status_flag is False
+
+
+def test_status_flag_parses():
+    args = node_daemon.build_parser().parse_args(["--status"])
+    assert args.status is None
+    assert args.status_flag is True
+
+
+def test_status_positional_rejects_unknown_words():
+    with pytest.raises(SystemExit) as exc:
+        node_daemon.build_parser().parse_args(["bogus"])
+    assert exc.value.code != 0
+
+
+def test_status_mode_builds_no_client(daemon_state, monkeypatch):
+    """`status` is a pure local read: it must never build a relay client —
+    it works even when the client wiring would raise."""
+    def _boom(*_a, **_k):
+        raise AssertionError("status mode must not build a client")
+
+    monkeypatch.setattr(node_daemon, "load_meta", _boom)
+    assert node_daemon.main(["status"]) == 1  # nothing running (isolated state)
+
+
 def test_double_mode_fails_closed(daemon_state, monkeypatch, capsys):
     """Two --mode flags = contradictory request: loud error, exit != 0, no
     process, no pid file, neither daemon constructed."""
@@ -302,41 +338,82 @@ def test_default_and_explicit_sse_behaviour_unchanged(daemon_state, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# Part 1: node-cli daemon regression — byte-identical surface
+# Part 1: daemon-code removal from the CLI (T-250) — poll_daemon surface
 # ---------------------------------------------------------------------------
+
+_DAEMON_ACTIONS = ("start", "stop", "status", "restart", "foreground")
 
 
 def test_pid_and_log_file_names_unchanged():
-    assert poll_daemon.PID_PATH.name == node_cli.PID_PATH.name == "node-cli.pid"
-    assert poll_daemon.LOG_PATH.name == node_cli.LOG_PATH.name == "node-cli.log"
-    # single source of truth: node_cli re-exports the moved module's paths
-    assert node_cli.PID_PATH is poll_daemon.PID_PATH
+    assert poll_daemon.PID_PATH.name == "node-cli.pid"
+    assert poll_daemon.LOG_PATH.name == "node-cli.log"
 
 
-def test_daemon_start_spawns_the_same_inner_command(daemon_state, monkeypatch, capsys):
-    """`node-cli daemon start` must self-spawn exactly as before T-250."""
+@pytest.mark.parametrize("name", ("PID_PATH", "LOG_PATH", "Daemon", "_daemon_internal"))
+def test_node_cli_reexports_no_daemon_names(name):
+    """T-250: the CLI is a pure tool — no daemon surface leaks through
+    node_cli (nothing may import Daemon/PID_PATH/… from it anymore)."""
+    assert not hasattr(node_cli, name), f"node_cli.{name} must not exist"
+
+
+@pytest.mark.parametrize("action", _DAEMON_ACTIONS)
+def test_node_cli_daemon_tree_is_gone(daemon_state, action, capsys):
+    """``node-cli daemon <action>`` no longer exists: argparse usage error
+    (invalid choice), never a daemon call, no pid file touched."""
+    with pytest.raises(SystemExit) as exc:
+        node_cli.main(["daemon", action])
+    assert exc.value.code != 0
+    assert "invalid choice: 'daemon'" in capsys.readouterr().err
+    assert not (daemon_state / "node-cli.pid").exists()
+    assert not (daemon_state / "node-daemon.pid").exists()
+
+
+def test_node_cli_daemon_internal_flag_is_gone(daemon_state):
+    """The CLI's hidden --daemon-internal self-spawn flag is gone with the
+    daemon code — an unrecognized-argument usage error."""
+    with pytest.raises(SystemExit) as exc:
+        node_cli.main(["--daemon-internal"])
+    assert exc.value.code != 0
+    assert not (daemon_state / "node-cli.pid").exists()
+
+
+def test_daemon_start_spawns_through_the_poll_daemon_module(
+    daemon_state, monkeypatch, capsys
+):
+    """The poll daemon's self-spawn must go over its own module
+    (``python -m nodes.common.poll_daemon --daemon-internal``) — the CLI no
+    longer offers a --daemon-internal entry point to spawn through."""
     monkeypatch.setattr(
         poll_daemon, "subprocess", MagicMock(name="subprocess"),
     )
     proc = poll_daemon.subprocess.Popen.return_value
     proc.poll.return_value = None
     daemon_state.joinpath("node-cli.pid").write_text("12345\n", encoding="utf-8")
-    rc = node_cli.main(["daemon", "start"])
+    rc = poll_daemon._daemon_start(argparse.Namespace(log_level=None))
     assert rc == 0
     argv = poll_daemon.subprocess.Popen.call_args[0][0]
-    assert argv == [sys.executable, "-m", "nodes.common.node_cli", "--daemon-internal"]
+    assert argv == [sys.executable, "-m", "nodes.common.poll_daemon", "--daemon-internal"]
     kwargs = poll_daemon.subprocess.Popen.call_args[1]
     assert kwargs["start_new_session"] is True
     assert "daemon started" in capsys.readouterr().out
 
 
 def test_daemon_stop_reports_not_running(daemon_state, capsys):
-    assert node_cli.main(["daemon", "stop"]) == 0
+    assert poll_daemon._daemon_stop(argparse.Namespace(log_level=None)) == 0
     assert "daemon not running" in capsys.readouterr().out
 
 
 def test_daemon_status_empty_output_shape(daemon_state, capsys):
-    rc = node_cli.main(["daemon", "status"])
+    rc = node_daemon.main(["status"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert out.startswith("pid: -\nmode: -\nrunning: False\n")
+
+
+def test_daemon_status_flag_form_same_output_shape(daemon_state, capsys):
+    """--status is the flag form of the positional status mode: same
+    output, same exit-code contract."""
+    rc = node_daemon.main(["--status"])
     out = capsys.readouterr().out
     assert rc == 1
     assert out.startswith("pid: -\nmode: -\nrunning: False\n")
@@ -344,16 +421,15 @@ def test_daemon_status_empty_output_shape(daemon_state, capsys):
 
 def test_daemon_status_sees_running_sse_daemon(daemon_state, monkeypatch, capsys):
     """T-250: the consolidated daemon usually runs in SSE mode (pid file
-    node-daemon.pid) — status must report it as running, with the mode."""
-    import os as _os
-
+    node-daemon.pid) — `iowap-daemon status` must report it as running with
+    the mode (acceptance: rc 0, mode sse)."""
     sse_pid = node_daemon.PID_PATH
-    sse_pid.write_text(str(_os.getpid()) + "\n", encoding="utf-8")  # this test process is alive
-    rc = node_cli.main(["daemon", "status"])
+    sse_pid.write_text(str(os.getpid()) + "\n", encoding="utf-8")  # this test process is alive
+    rc = node_daemon.main(["status"])
     out = capsys.readouterr().out
     assert rc == 0
     lines = out.splitlines()
-    assert f"pid: {_os.getpid()}" in lines[0]
+    assert f"pid: {os.getpid()}" in lines[0]
     assert "mode: sse" in lines[1]
     assert "running: True" in lines[2]
 
@@ -361,14 +437,50 @@ def test_daemon_status_sees_running_sse_daemon(daemon_state, monkeypatch, capsys
 def test_daemon_status_prefers_poll_mode_when_both_pids_alive(
     daemon_state, monkeypatch, capsys
 ):
-    """Both pid files alive → poll (the caller's own control surface) wins;
-    T-137b forbids this state in production, status just reports honestly."""
-    import os as _os
-
-    node_daemon.PID_PATH.write_text(str(_os.getpid()) + "\n", encoding="utf-8")
-    poll_pid = node_cli.PID_PATH
-    poll_pid.write_text(str(_os.getpid()) + "\n", encoding="utf-8")
-    rc = node_cli.main(["daemon", "status"])
+    """Both pid files alive → poll wins; T-137b forbids this state in
+    production, status just reports honestly."""
+    node_daemon.PID_PATH.write_text(str(os.getpid()) + "\n", encoding="utf-8")
+    poll_pid = poll_daemon.PID_PATH
+    poll_pid.write_text(str(os.getpid()) + "\n", encoding="utf-8")
+    rc = node_daemon.main(["status"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "mode: poll" in out.splitlines()[1]
+
+
+# ---------------------------------------------------------------------------
+# Part 1b: usage prog follows the invoked binary (T-250 cosmetics, owner
+# addition) — argv[0] basename, fallback 'node-cli'
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("argv0", "expected"),
+    [
+        ("/usr/local/bin/iowap-cli", "iowap-cli"),
+        ("/usr/bin/node-cli", "node-cli"),
+        ("iowap-cli", "iowap-cli"),
+    ],
+)
+def test_usage_prog_follows_the_invoked_binary(monkeypatch, argv0, expected):
+    monkeypatch.setattr(sys, "argv", [argv0])
+    assert node_cli.build_parser().prog == expected
+
+
+def test_usage_prog_falls_back_to_node_cli(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [""])
+    assert node_cli.build_parser().prog == "node-cli"
+
+
+def test_usage_prog_can_be_forced_explicitly(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["/usr/bin/pytest"])
+    assert node_cli.build_parser(prog="node-cli").prog == "node-cli"
+
+
+def test_iowap_cli_help_sights_iowap_cli(monkeypatch, capsys):
+    """End-to-end: `iowap-cli --help` prints `usage: iowap-cli …`."""
+    monkeypatch.setattr(sys, "argv", ["/usr/local/bin/iowap-cli"])
+    with pytest.raises(SystemExit) as exc:
+        node_cli.main(["--help"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.lstrip().startswith("usage: iowap-cli")

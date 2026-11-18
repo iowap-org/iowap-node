@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nodes.common import node_cli, node_config, node_daemon, poll_daemon
+from nodes.common import node_config, node_daemon, poll_daemon
 from nodes.common.forward import (
     DEFAULT_SLOT_TYPE,
     ForwardSlotError,
@@ -118,7 +118,7 @@ def relay_home(tmp_path, monkeypatch):
     monkeypatch.setattr(
         node_config, "ACTIVE_PROFILE_NAME_PATH", tmp_path / "node.profile"
     )
-    monkeypatch.setattr(node_cli, "PID_PATH", tmp_path / "node-cli.pid")
+    monkeypatch.setattr(poll_daemon, "PID_PATH", tmp_path / "node-cli.pid")
     monkeypatch.setattr(node_daemon, "PID_PATH", tmp_path / "node-daemon.pid")
     monkeypatch.setattr(poll_daemon, "STATUS_PATH", tmp_path / "node-cli.status")
     monkeypatch.setattr(node_daemon, "STATUS_PATH", tmp_path / "node.status")
@@ -631,7 +631,7 @@ def test_cli_daemon_heartbeat_transports_typed_rows(relay_home, monkeypatch):
     """CLI daemon heartbeat carries the loader's typed 8-key rows verbatim."""
     _write(node_config.ACTIVE_PATH, TYPED_SOURCE)
     client = RelayClient(dict(META), dict(CFG))
-    daemon = node_cli.Daemon(client, dict(CFG))
+    daemon = poll_daemon.Daemon(client, dict(CFG))
     monkeypatch.setattr(client, "maintenance_due", lambda: False)
     monkeypatch.setattr(poll_daemon, "load_active_profile", lambda: [])
 

@@ -7,7 +7,7 @@ landed in the bit bucket (T-001c Störfall 2026-09-05: "Result verworfen
 → Flow failed").
 
 Now: both call sites (``nodes/common/node_daemon.py`` SseDaemon._run_stage
-and ``nodes/common/node_cli.py`` Daemon._run_stage) rescue the result by
+and ``nodes/common/poll_daemon.py`` Daemon._run_stage) rescue the result by
 posting it as an ``[result-rescue]`` info-note on the task (T-052/
 T-154 note channel, note rides in TaskView) before counting the failure.
 The T-179 already-completed branch (opt-in ``complete_by_script``) stays
@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from nodes.common import node_cli, node_daemon, node_utils, poll_daemon
+from nodes.common import node_daemon, node_utils, poll_daemon
 from nodes.common.relay_client import RelayClient
 
 
@@ -48,7 +48,7 @@ def _daemon(module, clsname: str):
     d.tasks_completed = 0
     d.tasks_failed = 0
     d._failed_tasks = {}
-    # both naming conventions: SseDaemon._in_flight, node_cli.Daemon.in_flight
+    # both naming conventions: SseDaemon._in_flight, poll_daemon.Daemon.in_flight
     d._in_flight = {}
     d.in_flight = {}
     # T-247: the points-ledger mirrors use both naming conventions too.
@@ -172,7 +172,7 @@ class TestDaemonRescue:
 
 class TestCliDaemonRescue:
     def test_complete_404_rescues_result_as_note(self, monkeypatch):
-        d = _daemon(node_cli, "Daemon")
+        d = _daemon(poll_daemon, "Daemon")
         d.client.complete = MagicMock(side_effect=FakeExc(404, GONE_404))
         monkeypatch.setattr(
             poll_daemon, "run_handler", MagicMock(return_value={"status": "completed", "result": {"answer": "x"}})
@@ -182,7 +182,7 @@ class TestCliDaemonRescue:
         assert d.tasks_failed == 1 and d.tasks_completed == 0
 
     def test_non_404_failure_calls_no_note(self, monkeypatch):
-        d = _daemon(node_cli, "Daemon")
+        d = _daemon(poll_daemon, "Daemon")
         d.client.complete = MagicMock(side_effect=httpx.ConnectError("net down"))
         monkeypatch.setattr(
             poll_daemon, "run_handler", MagicMock(return_value={"status": "completed", "result": {}})

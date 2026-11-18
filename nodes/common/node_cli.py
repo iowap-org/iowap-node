@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""node-cli — generic capability-driven daemon & CLI for IOWAP.
+"""node-cli — generic capability-driven CLI for IOWAP.
 
 The CLI is fully capability-agnostic: all behaviour is driven by an
 external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
-
-    Daemon control:
-        node-cli daemon start | stop | status | restart | foreground
 
     One-shot operations:
         node-cli heartbeat
@@ -27,7 +24,9 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
 
     Status:
         node-cli status
-        node-cli reload
+        node-cli reload — SIGHUP notification to a running daemon (ops
+            signal only; daemon lifecycle lives in iowap-daemon /
+            nodes.common.poll_daemon, T-250)
         node-cli node busy     — mark this node as busy (T-084)
         node-cli node idle     — mark this node as idle (T-084)
         node-cli node status   — show local + server node status (T-084)
@@ -57,7 +56,6 @@ from nodes.common.handler_runner import (
 )
 from nodes.common.node_config import (
     ACTIVE_PATH,  # noqa: F401 — re-exported so the test fixture's cli.ACTIVE_PATH patch keeps working (T-117)
-    BASE_DIR,  # noqa: F401 — re-exported (T-250: pid/log paths live in poll_daemon, this name stays for fixture-patch compat)
     PROFILES_DIR,  # noqa: F401 — re-exported for the test fixture's cli.PROFILES_DIR patch
     load_active_profile,
 )
@@ -68,11 +66,6 @@ from nodes.common.node_utils import (
     load_json,  # noqa: F401 — re-exported (T-250: cli_server resolves via _cli.load_json)
     load_meta,
 )
-
-# ---------------------------------------------------------------------------
-# Paths (PID_PATH/LOG_PATH) and the Daemon class moved to
-# nodes.common.poll_daemon (T-250) and are re-exported from there.
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -110,20 +103,6 @@ from nodes.common.cli import (
     cli_task,
     cli_update,
 )
-from nodes.common.poll_daemon import (  # noqa: F401 — T-250 re-exports
-    LOG_PATH,
-    PID_PATH,
-    Daemon,
-    _check_other_daemon,
-    _daemon_foreground,
-    _daemon_internal,
-    _daemon_restart,
-    _daemon_start,
-    _daemon_status,
-    _daemon_stop,
-    _pid_running,
-    _read_pid,
-)
 from nodes.common.relay_client import (  # noqa: F401
     RelayClient,
     _base_url,
@@ -156,11 +135,10 @@ def with_client(func):
 
 
 # ---------------------------------------------------------------------------
-# Daemon — moved to nodes.common.poll_daemon (T-250).
-# The `node-cli daemon {start,stop,status,foreground,restart}` subcommands
-# delegate to it and stay byte-identical (pid file node-cli.pid, log
-# node-cli.log, same SIGHUP). The moved names are re-imported at the top
-# of this file so consumers/tests keep importing them from here.
+# Daemon — no longer part of the CLI (T-250): the daemon implementation and
+# its lifecycle control live in nodes.common.poll_daemon (poll mode) and
+# nodes.common.node_daemon (SSE mode, `iowap-daemon`). `reload` above and
+# the SIGHUP in `capabilities publish` remain as ops signalisation only.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -275,10 +253,13 @@ def _cmd_reload(args: argparse.Namespace) -> int:
     # t_c214ca25: notify every live daemon pid file (SSE node-daemon.pid
     # first, legacy polling node-cli.pid fallback). The SSE daemon installs
     # a SIGHUP handler (capability-cache invalidation) — probing only the
-    # polling pid file left SSE-only nodes without hot-reload.
+    # polling pid file left SSE-only nodes without hot-reload. PID_PATH is
+    # read off poll_daemon lazily at call time so the monkeypatched pid
+    # file fixtures take effect (T-250: the CLI no longer re-exports it).
     from nodes.common import node_daemon as _nd
+    from nodes.common import poll_daemon as _pd
 
-    pids = _nu.sighup_pid_files([_nd.PID_PATH, PID_PATH])
+    pids = _nu.sighup_pid_files([_nd.PID_PATH, _pd.PID_PATH])
     if not pids:
         print("daemon not running", file=sys.stderr)
         return 1
@@ -290,10 +271,21 @@ def _cmd_reload(args: argparse.Namespace) -> int:
 # Argument parser
 # ---------------------------------------------------------------------------
 
-def build_parser() -> argparse.ArgumentParser:
+def _parser_prog() -> str:
+    """usage prog = invoked binary name (argv[0] basename, fallback 'node-cli').
+
+    T-250 rebrand: `iowap-cli --help` must sight `usage: iowap-cli …` while
+    the legacy `node-cli` shim keeps showing `node-cli` — same entry point,
+    the argv[0] basename decides.
+    """
+    argv0 = sys.argv[0] if sys.argv and sys.argv[0] else ""
+    return os.path.basename(argv0) or "node-cli"
+
+
+def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="node-cli",
-        description="Generic capability-driven daemon & CLI for IOWAP.",
+        prog=prog or _parser_prog(),
+        description="Generic capability-driven CLI for IOWAP.",
     )
     parser.add_argument(
         "--log-level",
@@ -306,15 +298,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output raw JSON instead of formatted text (for scripting).",
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
-
-    # daemon
-    p_daemon = sub.add_parser("daemon", help="Control the background daemon.")
-    p_daemon_sub = p_daemon.add_subparsers(dest="daemon_command", required=True, metavar="<action>")
-    for action in ("start", "stop", "restart", "foreground"):
-        p = p_daemon_sub.add_parser(action, help=f"daemon {action}")
-        p.set_defaults(func=_daemon_dispatch)
-    p_status = p_daemon_sub.add_parser("status", help="show daemon status")
-    p_status.set_defaults(func=_daemon_dispatch)
 
     # heartbeat
     p_hb = sub.add_parser("heartbeat", help="Send a single heartbeat and exit.")
@@ -850,34 +833,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _daemon_dispatch(args: argparse.Namespace) -> int:
-    action = args.daemon_command
-    if action == "start":
-        return _daemon_start(args)
-    if action == "stop":
-        return _daemon_stop(args)
-    if action == "restart":
-        return _daemon_restart(args)
-    if action == "status":
-        return _daemon_status(args)
-    if action == "foreground":
-        return _daemon_foreground(args)
-    print(f"unknown daemon action: {action}", file=sys.stderr)
-    return 2
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
-    # Hidden internal flag used by the self-spawned daemon process.
-    raw = list(sys.argv[1:] if argv is None else argv)
-    if raw and raw[0] == "--daemon-internal":
-        return _daemon_internal()
-
     parser = build_parser()
-    args = parser.parse_args(raw)
+    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
         # T-226: every invocation records its own absolute path as the
         # top-level node_cli_path stamp in the active profile — consumers

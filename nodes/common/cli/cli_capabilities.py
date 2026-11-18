@@ -3,11 +3,10 @@
 Constants ``ACTIVE_PATH`` and ``PROFILES_DIR`` are referenced lazily via
 ``node_config`` (``_nc.ACTIVE_PATH`` / ``_nc.PROFILES_DIR``) so the
 ``cl.ACTIVE_PATH`` / ``cl.PROFILES_DIR`` monkeypatches applied by the test
-fixture take effect. ``PID_PATH`` (CLI-specific, lives in the facade) is
-referenced lazily via ``node_cli.PID_PATH`` at call time — this is the
-one tolerated circular access because it only resolves inside a handler
-body, after ``node_cli`` is fully initialised. ``node_daemon.PID_PATH``
-(SSE daemon) is resolved the same lazy way inside the publish handler
+fixture take effect. ``PID_PATH`` (polling daemon, lives in poll_daemon
+since T-250 — the CLI no longer re-exports it) is referenced lazily via
+``poll_daemon.PID_PATH`` at call time. ``node_daemon.PID_PATH`` (SSE
+daemon) is resolved the same lazy way inside the publish handler
 (t_c214ca25: the SSE daemon's pid file must be probed for hot-reload).
 
 The ``with_client``-decorated handlers (server/info) keep the plain
@@ -21,7 +20,6 @@ import json
 import sys
 from typing import Any
 
-import nodes.common.node_cli as _cli
 from nodes.common import node_config as _nc
 from nodes.common import node_utils as _nu
 from nodes.common.node_config import (
@@ -87,8 +85,9 @@ def _cmd_capabilities_publish(args) -> int:
     # (t_c214ca25: the old code only probed node-cli.pid and always took
     # the "daemon not running" branch on SSE-only nodes).
     from nodes.common.node_daemon import PID_PATH as _DAEMON_PID_PATH
+    from nodes.common import poll_daemon as _pd
 
-    pids = _nu.sighup_pid_files([_DAEMON_PID_PATH, _cli.PID_PATH])
+    pids = _nu.sighup_pid_files([_DAEMON_PID_PATH, _pd.PID_PATH])
     if pids:
         print(f"published '{args.profile}' -> {active} (sent SIGHUP to pid {', '.join(str(p) for p in pids)})")
     else:

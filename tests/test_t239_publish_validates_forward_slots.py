@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import pytest
 
-from nodes.common import node_cli, node_config, node_daemon, poll_daemon
+from nodes.common import node_config, node_daemon, poll_daemon
 from nodes.common.node_config import (
     CapabilityValidationError,
     publish_profile,
@@ -70,9 +70,7 @@ def relay_home(tmp_path, monkeypatch):
     monkeypatch.setattr(
         node_config, "ACTIVE_PROFILE_NAME_PATH", tmp_path / "node.profile"
     )
-    monkeypatch.setattr(node_cli, "PID_PATH", tmp_path / "node-cli.pid")
     monkeypatch.setattr(node_daemon, "PID_PATH", tmp_path / "node-daemon.pid")
-    monkeypatch.setattr(node_cli, "STATUS_PATH", tmp_path / "node-cli.status")
     monkeypatch.setattr(node_daemon, "STATUS_PATH", tmp_path / "node.status")
     monkeypatch.setattr(poll_daemon, "PID_PATH", tmp_path / "node-cli.pid")
     monkeypatch.setattr(poll_daemon, "STATUS_PATH", tmp_path / "node-cli.status")

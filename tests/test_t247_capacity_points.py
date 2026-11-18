@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from nodes.common import node_cli, node_config, node_daemon, poll_daemon
+from nodes.common import node_config, node_daemon, poll_daemon
 from nodes.common.cli import cli_capabilities
 from nodes.common.node_config import CapabilityValidationError, validate_profile
 
@@ -414,7 +414,7 @@ def _start_loop(daemon):
 def test_cli_daemon_loop_blocks_claim_over_budget(monkeypatch):
     """budget 1 + cost 2 → the claim POST must never fire."""
     fake = FakeClient()
-    daemon = node_cli.Daemon(
+    daemon = poll_daemon.Daemon(
         fake, cfg={"claim_interval": 300, "heartbeat_interval": 60, "max_retries": 2}
     )
     passes: list[int] = []
@@ -444,7 +444,7 @@ def test_cli_daemon_loop_claims_within_budget_and_releases(monkeypatch):
     points return to 0 afterwards (the loop is ready for the next pass)."""
     stage = {"task_id": "t1", "stage_id": "s1", "payload": {}}
     fake = FakeClient([stage])
-    daemon = node_cli.Daemon(
+    daemon = poll_daemon.Daemon(
         fake, cfg={"claim_interval": 300, "heartbeat_interval": 60, "max_retries": 2}
     )
     monkeypatch.setattr(poll_daemon, "load_active_profile", lambda: [dict(CLI_CAP)])

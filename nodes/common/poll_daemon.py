@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Poll-mode daemon (T-250) — the legacy claim/heartbeat polling daemon.
 
-Holds the ``Daemon`` class and its control surface
-(start/stop/status/restart/foreground + the self-spawn inner entry point)
-moved byte-exact out of ``node_cli`` (T-250). Two consumers delegate here:
+Holds the ``Daemon`` class, its lifecycle helpers and the mode-aware
+``_daemon_status`` (moved out of ``node_cli``, T-250). Consumers:
 
-* ``node-cli daemon {start,stop,status,foreground,restart}`` — must stay
-  byte-identical: pid file ``node-cli.pid``, log ``node-cli.log``, same
-  self-spawn command (``python -m nodes.common.node_cli --daemon-internal``),
-  same SIGHUP behaviour (invalidate the capability cache).
+* ``node-cli daemon {start,stop,status,foreground,restart}`` — removed from
+  the CLI (T-250): the CLI carries no daemon code. A ``node-cli daemon …``
+  invocation is now an argparse usage error (exit 2). The poll daemon
+  exposes only ``python -m nodes.common.poll_daemon --daemon-internal``
+  (its own ``__main__``, spawned by ``_daemon_start``) plus the
+  ``node-daemon --mode poll`` foreground entry. pid file ``node-cli.pid``,
+  log ``node-cli.log``, same SIGHUP behaviour (invalidate the capability
+  cache).
 * ``node-daemon``/``iowap-daemon`` ``--mode poll`` — runs the same daemon
   in the foreground of the caller; the mode default stays ``sse``
   (``node_daemon.SseDaemon``), requesting both modes fails closed.
@@ -512,8 +515,11 @@ def _daemon_start(args: argparse.Namespace) -> int:
         return 0
     BASE_DIR.mkdir(parents=True, exist_ok=True)
     log_fd = open(LOG_PATH, "a", encoding="utf-8")  # noqa: SIM115 — kept open by child
+    # T-250: the inner process runs THIS module's __main__ (the CLI carries
+    # no daemon code anymore — it no longer offers a --daemon-internal
+    # entry point to spawn through).
     proc = subprocess.Popen(
-        [sys.executable, "-m", "nodes.common.node_cli", "--daemon-internal"],
+        [sys.executable, "-m", "nodes.common.poll_daemon", "--daemon-internal"],
         stdout=log_fd,
         stderr=log_fd,
         start_new_session=True,
@@ -692,3 +698,19 @@ def start_poll_daemon(
     finally:
         PID_PATH.unlink(missing_ok=True)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Self-spawn inner entry point (T-250) — spawned by _daemon_start as
+# ``python -m nodes.common.poll_daemon --daemon-internal``. The CLI no
+# longer carries a --daemon-internal entry to spawn through.
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--daemon-internal"]:
+        sys.exit(_daemon_internal())
+    print(
+        "usage: python -m nodes.common.poll_daemon --daemon-internal",
+        file=sys.stderr,
+    )
+    sys.exit(2)

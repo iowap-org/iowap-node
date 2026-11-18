@@ -36,7 +36,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nodes.common import node_config, node_cli, node_daemon  # noqa: E402
+from nodes.common import node_cli, node_config, node_daemon, poll_daemon  # noqa: E402
 from nodes.common.node_config import (  # noqa: E402
     ensure_node_cli_stamp,
     publish_profile,
@@ -60,7 +60,7 @@ def relay_home(tmp_path, monkeypatch):
     monkeypatch.setattr(
         node_config, "ACTIVE_PROFILE_NAME_PATH", tmp_path / "node.profile"
     )
-    monkeypatch.setattr(node_cli, "PID_PATH", tmp_path / "node-cli.pid")
+    monkeypatch.setattr(poll_daemon, "PID_PATH", tmp_path / "node-cli.pid")
     monkeypatch.setattr(node_daemon, "PID_PATH", tmp_path / "node-daemon.pid")
     return tmp_path
 
