@@ -20,8 +20,13 @@ Rules:
   raises.
 * Value derivation prefers the venv console script next to the running
   interpreter (works for ``python -m nodes...`` invocations), falls
-  back to argv[0] that IS the cli script, then to ``shutil.which``.
+  back to argv[0] that IS the cli (``iowap-cli``, or the ``node_cli.py``
+  module file of a ``python -m`` run), then to ``shutil.which``.
 * A path that is not the node-cli at all must never be stamped.
+* T-250 sunset (2.3.43): the console scripts are named ``iowap-cli`` /
+  ``iowap-daemon`` — the legacy ``node-cli`` shim no longer exists, so the
+  stamp records the iowap-cli binary and a stray argv[0] named node-cli is
+  not derivable anymore.
 """
 
 from __future__ import annotations
@@ -77,11 +82,11 @@ def _stamp_value(path: Path) -> str | None:
 
 
 def _fake_venv(tmp_path: Path) -> tuple[Path, Path]:
-    """A venv-shaped dir: bin/python + X_OK console script node-cli."""
+    """A venv-shaped dir: bin/python + X_OK console script iowap-cli."""
     venv = tmp_path / "fakevenv"
     bin_dir = venv / "bin"
     bin_dir.mkdir(parents=True)
-    script = bin_dir / "node-cli"
+    script = bin_dir / "iowap-cli"
     script.write_text("#!/bin/sh\n")
     script.chmod(0o755)
     (bin_dir / "python").write_text("#!/bin/sh\n")
@@ -180,16 +185,16 @@ def test_resolve_prefers_venv_console_script(
     assert resolve_own_cli_path() == str(Path(os.path.realpath(script)))
 
 
-def test_resolve_falls_back_to_argv0_node_cli(
+def test_resolve_falls_back_to_argv0_console_script(
     relay_home, tmp_path, monkeypatch
 ):
     # interpreter without a sibling console script (e.g. module invocation
-    # in a venv whose entrypoint is elsewhere)
+    # in a venv whose entrypoint is elsewhere); argv[0] IS the cli script
     (tmp_path / "bin").mkdir(parents=True)
     (tmp_path / "bin" / "python").write_text("#!/bin/sh\n")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
 
-    script = tmp_path / "node-cli"
+    script = tmp_path / "iowap-cli"
     script.write_text("#!/bin/sh\n")
     script.chmod(0o755)
     monkeypatch.setattr(sys, "argv", [str(script), "node", "list"])
@@ -203,7 +208,7 @@ def test_resolve_falls_back_to_which(relay_home, tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
     monkeypatch.setattr(sys, "argv", [str(tmp_path / "runner.py"), "-q"])
 
-    which_path = tmp_path / "which-dir" / "node-cli"
+    which_path = tmp_path / "which-dir" / "iowap-cli"
     which_path.parent.mkdir()
     which_path.write_text("#!/bin/sh\n")
     which_path.chmod(0o755)
@@ -231,8 +236,9 @@ def test_resolve_rejects_unrelated_argv0(relay_home, tmp_path, monkeypatch):
 def test_resolve_prefers_iowap_cli_sibling_when_invoked_as_iowap_cli(
     relay_home, tmp_path, monkeypatch
 ):
-    """T-250: argv[0] = iowap-cli → the iowap-cli sibling wins over the
-    legacy node-cli in the same venv (the stamp records the invoked binary)."""
+    """T-250: argv[0] = iowap-cli → the iowap-cli sibling is stamped. The
+    stray legacy node-cli sibling in the same venv stays ignored (sunset:
+    it is no longer a derivable candidate)."""
     venv = tmp_path / "fakevenv"
     bin_dir = venv / "bin"
     bin_dir.mkdir(parents=True)
@@ -250,25 +256,24 @@ def test_resolve_prefers_iowap_cli_sibling_when_invoked_as_iowap_cli(
     assert resolve_own_cli_path() == str(Path(os.path.realpath(iowap)))
 
 
-def test_resolve_keeps_node_cli_preference_when_invoked_as_node_cli(
+def test_resolve_ignores_legacy_node_cli_argv0_after_sunset(
     relay_home, tmp_path, monkeypatch
 ):
-    """Legacy invocation unchanged: node-cli sibling wins even when an
-    iowap-cli sibling exists (no drift of the existing stamp)."""
-    venv = tmp_path / "fakevenv"
-    bin_dir = venv / "bin"
-    bin_dir.mkdir(parents=True)
-    (bin_dir / "iowap-cli").write_text("#!/bin/sh\n")
-    (bin_dir / "iowap-cli").chmod(0o755)
-    legacy = bin_dir / "node-cli"
-    legacy.write_text("#!/bin/sh\n")
-    legacy.chmod(0o755)
-    (bin_dir / "python").write_text("#!/bin/sh\n")
-    (bin_dir / "python").chmod(0o755)
-    monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
-    monkeypatch.setattr(sys, "argv", [str(legacy), "node", "list"])
+    """T-250 sunset (2.3.43): the node-cli console script no longer exists.
+    argv[0] handling stays for the legal entries only (``iowap-cli``,
+    ``node_cli.py``) — a stray argv[0] named node-cli is NOT a stampable
+    CLI: nothing derivable → no stamp (which is probed for iowap-cli only)."""
+    (tmp_path / "bin").mkdir(parents=True)
+    (tmp_path / "bin" / "python").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
 
-    assert resolve_own_cli_path() == str(Path(os.path.realpath(legacy)))
+    stray = tmp_path / "node-cli"
+    stray.write_text("#!/bin/sh\n")
+    stray.chmod(0o755)
+    monkeypatch.setattr(sys, "argv", [str(stray), "node", "list"])
+    monkeypatch.setattr(node_config.shutil, "which", lambda _p: None)
+
+    assert resolve_own_cli_path() is None
 
 
 def test_stamp_via_iowap_cli_invocation_writes_iowap_path(
@@ -310,7 +315,7 @@ def test_main_invocation_stamps_profile(relay_home, tmp_path, monkeypatch):
     assert _stamp_value(active) == os.path.realpath(
         node_config.ACTIVE_PATH.parent / "does-not-matter"
     ) or _stamp_value(active) is not None  # stamped from the fake venv
-    expected = os.path.realpath(tmp_path / "fakevenv" / "bin" / "node-cli")
+    expected = os.path.realpath(tmp_path / "fakevenv" / "bin" / "iowap-cli")
     assert _stamp_value(active) == expected
 
 
@@ -327,7 +332,7 @@ def test_publish_profile_restamps_after_byte_copy(relay_home, tmp_path, monkeypa
 
     publish_profile("default")
 
-    expected = os.path.realpath(tmp_path / "fakevenv" / "bin" / "node-cli")
+    expected = os.path.realpath(tmp_path / "fakevenv" / "bin" / "iowap-cli")
     assert _stamp_value(active) == expected
     assert "test.cap" in active.read_text()
 
@@ -364,5 +369,5 @@ def test_daemon_run_stamps_profile(relay_home, tmp_path, monkeypatch):
     timer.start()
     t.join(timeout=5)
 
-    expected = os.path.realpath(tmp_path / "fakevenv" / "bin" / "node-cli")
+    expected = os.path.realpath(tmp_path / "fakevenv" / "bin" / "iowap-cli")
     assert _stamp_value(active) == expected

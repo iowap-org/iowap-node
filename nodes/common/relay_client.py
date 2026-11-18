@@ -101,16 +101,19 @@ def _measure_load_pct(cpu_count: int) -> tuple[float, str]:
 
 
 def _log_label() -> str:
-    """T-250 rebrand: the visible log-field names the invoked binary.
-    ``iowap-cli``/``iowap-daemon`` when run via the rebranded console
-    scripts, legacy ``node-daemon`` via its shim, everything else
-    (``node-cli``, ``python -m`` invocations) stays ``node-cli``."""
+    """The visible log-field names the invoked surface: ``iowap-cli`` /
+    ``iowap-daemon`` via the console scripts, module invocations
+    (``python -m``) truthfully under their rebranded names. T-250 sunset
+    (2.3.43): the legacy ``node-cli``/``node-daemon`` shims are gone —
+    everything not matched explicitly is the iowap-cli surface."""
     argv0 = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else ""
     return {
         "iowap-cli": "iowap-cli",
         "iowap-daemon": "iowap-daemon",
-        "node-daemon": "node-daemon",
-    }.get(argv0, "node-cli")
+        # module entry python -m nodes.common.node_daemon — legal after the
+        # sunset, and it IS the iowap-daemon entry code, not the CLI.
+        "node_daemon.py": "iowap-daemon",
+    }.get(argv0, "iowap-cli")
 
 
 def _setup_logging(level: str | None = None) -> None:

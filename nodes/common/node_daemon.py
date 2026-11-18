@@ -262,13 +262,14 @@ def _is_already_completed(exc: BaseException) -> bool:
 
 
 def _daemon_label() -> str:
-    """T-250 rebrand: the ``daemon`` field of worker_status.json names the
-    binary the operator actually runs. ``iowap-daemon`` when invoked via the
-    rebranded console script, legacy ``node-daemon`` otherwise (module
-    invocation ``python -m nodes.common.node_daemon`` included — that entry
-    point IS the legacy name)."""
-    argv0 = os.path.basename(sys.argv[0]) if sys.argv else ""
-    return "iowap-daemon" if argv0 == "iowap-daemon" else "node-daemon"
+    """The ``daemon`` field of worker_status.json names the running surface.
+
+    T-250 sunset (2.3.43): the legacy ``node-daemon`` console script is
+    gone, and a ``python -m nodes.common.node_daemon`` run executes exactly
+    the ``iowap-daemon`` entry code — so every invocation (console script
+    or module) labels ``iowap-daemon``. Any other value would name a
+    binary that no longer exists."""
+    return "iowap-daemon"
 
 
 class SseDaemon:

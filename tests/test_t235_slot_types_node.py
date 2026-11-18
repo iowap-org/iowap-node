@@ -603,7 +603,7 @@ def test_publish_heal_keeps_restamp_working(relay_home, tmp_path, monkeypatch):
     venv = tmp_path / "fakevenv"
     bin_dir = venv / "bin"
     bin_dir.mkdir(parents=True)
-    script = bin_dir / "node-cli"
+    script = bin_dir / "iowap-cli"
     script.write_text("#!/bin/sh\n")
     script.chmod(0o755)
     py = bin_dir / "python"
@@ -616,7 +616,7 @@ def test_publish_heal_keeps_restamp_working(relay_home, tmp_path, monkeypatch):
 
     active = node_config.ACTIVE_PATH
     assert load_forward_slots() == [TYPED_TEXT_ROW]
-    expected = os.path.realpath(venv / "bin" / "node-cli")
+    expected = os.path.realpath(venv / "bin" / "iowap-cli")
     text = active.read_text(encoding="utf-8")
     stamp_line = text.splitlines(keepends=True)[0]
     assert stamp_line == f'node_cli_path: "{expected}"\n'

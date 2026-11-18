@@ -1229,36 +1229,34 @@ _NODE_CLI_STAMP_RE = re.compile(
 def resolve_own_cli_path() -> str | None:
     """Best-effort absolute path of the running CLI console script.
 
-    Preference order: the ``node-cli``/``iowap-cli`` sibling of the running
-    interpreter (covers ``python -m nodes.common.node_cli`` AND
-    console-script runs — both exec from the same venv), then argv[0] when
-    it *is* the cli script (symlink-resolved, e.g. pipx), then
-    ``shutil.which``. Returns ``None`` when nothing derivable exists so
-    callers stamp nothing.
+    Preference order: the ``iowap-cli`` sibling of the running interpreter
+    (covers ``python -m nodes.common.node_cli`` AND console-script runs —
+    both exec from the same venv), then argv[0] when it *is* the cli
+    (symlink-resolved: the ``iowap-cli`` console script or the module file
+    of a ``python -m`` run), then ``shutil.which``. Returns ``None`` when
+    nothing derivable exists so callers stamp nothing.
 
-    T-250: when invoked AS ``iowap-cli`` (argv[0] basename), the iowap-cli
-    sibling wins over node-cli — the stamp must record the binary the
-    consumer actually invoked, not the legacy name.
+    T-250 sunset (2.3.43): the ``node-cli``/``node-daemon`` shims are
+    removed — the stamp records the one binary an install actually creates
+    (``iowap-cli``). argv[0] stays the deciding surface for the module
+    entry (``node_cli.py``), which remains legal after the sunset.
     """
     argv0_base = os.path.basename(sys.argv[0]) if sys.argv else ""
-    invoked_iowap = argv0_base == "iowap-cli"
     exe = str(sys.executable or "")
     if exe:
-        for name in (("iowap-cli", "node-cli") if invoked_iowap else ("node-cli", "iowap-cli")):
-            cand = Path(exe).with_name(name)
-            if cand.is_file() and os.access(cand, os.X_OK):
-                return os.path.realpath(cand)
-    if argv0_base in ("node-cli", "node_cli.py", "iowap-cli"):
+        cand = Path(exe).with_name("iowap-cli")
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return os.path.realpath(cand)
+    if argv0_base in ("node_cli.py", "iowap-cli"):
         try:
             resolved = Path(sys.argv[0]).resolve()
         except (OSError, ValueError):
             resolved = None
         if resolved and resolved.is_file() and os.access(resolved, os.X_OK):
             return os.path.realpath(resolved)
-    for name in ("node-cli", "iowap-cli"):
-        which = shutil.which(name)
-        if which:
-            return os.path.realpath(which)
+    which = shutil.which("iowap-cli")
+    if which:
+        return os.path.realpath(which)
     return None
 
 

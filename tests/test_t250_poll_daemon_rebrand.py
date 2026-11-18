@@ -16,11 +16,13 @@ Contract:
   without ever touching the SSE connection. Requesting both modes (or
   --mode twice) fails closed: loud error, exit != 0, no process, no pid
   file.
-- pyproject [project.scripts] gains ``iowap-cli`` and ``iowap-daemon`` while
-  ``node-cli``/``node-daemon`` remain unchanged shims. A built wheel exposes
-  all four console scripts (verified via importlib.metadata). The usage
-  prog follows the invoked binary name (argv[0] basename): ``iowap-cli
-  --help`` sights ``usage: iowap-cli …``, the legacy shim keeps ``node-cli``.
+- T-250 sunset (iowap-node 2.3.43): the legacy ``node-cli``/``node-daemon``
+  shims are REMOVED — pyproject [project.scripts] carries only
+  ``iowap-cli``/``iowap-daemon``, a built wheel exposes exactly those two
+  console scripts and does NOT recreate the shims (verified via
+  importlib.metadata). The usage prog follows the invoked binary name
+  (argv[0] basename): ``iowap-cli --help`` sights ``usage: iowap-cli …``,
+  ``python -m`` runs mirror their module argv0.
 """
 from __future__ import annotations
 
@@ -142,10 +144,14 @@ def test_pyproject_declares_iowap_entrypoints():
     assert scripts["iowap-daemon"] == "nodes.common.node_daemon:main"
 
 
-def test_legacy_shims_unchanged_in_pyproject():
+def test_legacy_shims_gone_from_pyproject():
+    """T-250 sunset lock: the shim scripts are removed — pyproject declares
+    exactly the two iowap entry points and nothing else."""
     scripts = _scripts()
-    assert scripts["node-cli"] == "nodes.common.node_cli:main"
-    assert scripts["node-daemon"] == "nodes.common.node_daemon:main"
+    assert scripts == {
+        "iowap-cli": "nodes.common.node_cli:main",
+        "iowap-daemon": "nodes.common.node_daemon:main",
+    }
 
 
 @pytest.mark.parametrize(
@@ -160,9 +166,10 @@ def test_entrypoint_callables_resolve(modname, fnname):
     assert callable(getattr(mod, fnname)), f"{modname}:{fnname} must be callable"
 
 
-def test_wheel_exposes_all_four_console_scripts(tmp_path):
-    """A wheel built from this tree must carry all four script entry points
-    (read back through importlib.metadata)."""
+def test_wheel_exposes_only_iowap_console_scripts(tmp_path):
+    """A wheel built from this tree must carry exactly the two iowap entry
+    points — the legacy shims are gone and must NOT be recreated (read
+    back through importlib.metadata)."""
     pytest.importorskip("hatchling", reason="wheel build needs hatchling")
     wheels_dir = tmp_path / "wheels"
     res = subprocess.run(
@@ -191,10 +198,10 @@ def test_wheel_exposes_all_four_console_scripts(tmp_path):
     eps = {
         ep.name: ep.value for ep in dist.entry_points if ep.group == "console_scripts"
     }
-    assert eps["iowap-cli"] == "nodes.common.node_cli:main"
-    assert eps["iowap-daemon"] == "nodes.common.node_daemon:main"
-    assert eps["node-cli"] == "nodes.common.node_cli:main"
-    assert eps["node-daemon"] == "nodes.common.node_daemon:main"
+    assert eps == {
+        "iowap-cli": "nodes.common.node_cli:main",
+        "iowap-daemon": "nodes.common.node_daemon:main",
+    }
 
 
 def test_installed_dist_entrypoints_point_at_the_same_callables():
@@ -216,6 +223,9 @@ def test_installed_dist_entrypoints_point_at_the_same_callables():
             assert values[name] == value, (
                 f"installed entry point {name} drifted from pyproject"
             )
+    # T-250 sunset: an install must not recreate the legacy shims.
+    assert "node-cli" not in values
+    assert "node-daemon" not in values
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +460,7 @@ def test_daemon_status_prefers_poll_mode_when_both_pids_alive(
 
 # ---------------------------------------------------------------------------
 # Part 1b: usage prog follows the invoked binary (T-250 cosmetics, owner
-# addition) — argv[0] basename, fallback 'node-cli'
+# addition) — argv[0] basename, fallback 'iowap-cli'
 # ---------------------------------------------------------------------------
 
 
@@ -458,23 +468,27 @@ def test_daemon_status_prefers_poll_mode_when_both_pids_alive(
     ("argv0", "expected"),
     [
         ("/usr/local/bin/iowap-cli", "iowap-cli"),
-        ("/usr/bin/node-cli", "node-cli"),
+        ("/venv/bin/node_cli.py", "node_cli.py"),
         ("iowap-cli", "iowap-cli"),
     ],
 )
 def test_usage_prog_follows_the_invoked_binary(monkeypatch, argv0, expected):
+    """argv[0] basename mirroring — the module entry (python -m) mirrors
+    its ``node_cli.py`` argv0 just like the console script mirrors its own."""
     monkeypatch.setattr(sys, "argv", [argv0])
     assert node_cli.build_parser().prog == expected
 
 
-def test_usage_prog_falls_back_to_node_cli(monkeypatch):
+def test_usage_prog_falls_back_to_iowap_cli(monkeypatch):
+    """T-250 sunset: with an empty argv[0] the parser names the canonical
+    binary — the legacy node-cli shim no longer exists."""
     monkeypatch.setattr(sys, "argv", [""])
-    assert node_cli.build_parser().prog == "node-cli"
+    assert node_cli.build_parser().prog == "iowap-cli"
 
 
 def test_usage_prog_can_be_forced_explicitly(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["/usr/bin/pytest"])
-    assert node_cli.build_parser(prog="node-cli").prog == "node-cli"
+    assert node_cli.build_parser(prog="iowap-cli").prog == "iowap-cli"
 
 
 def test_iowap_cli_help_sights_iowap_cli(monkeypatch, capsys):
@@ -487,35 +501,47 @@ def test_iowap_cli_help_sights_iowap_cli(monkeypatch, capsys):
 
 
 def test_daemon_label_follows_invoked_binary(daemon_state, monkeypatch):
-    """T-250: worker_status.json 'daemon' names the invoked binary —
-    iowap-daemon for the rebranded entry point, node-daemon for legacy."""
+    """T-250 sunset: every invocation is the iowap-daemon surface —
+    worker_status.json 'daemon' reads iowap-daemon for the console script
+    AND for the module entry (``python -m nodes.common.node_daemon``)."""
     monkeypatch.setattr(sys, "argv", ["/venv/bin/iowap-daemon", "--foreground", "--mode", "sse"])
     assert node_daemon._daemon_label() == "iowap-daemon"
-    monkeypatch.setattr(sys, "argv", ["/venv/bin/node-daemon", "--foreground"])
-    assert node_daemon._daemon_label() == "node-daemon"
-    monkeypatch.setattr(sys, "argv", ["/venv/bin/python", "-m", "nodes.common.node_daemon"])
-    assert node_daemon._daemon_label() == "node-daemon"
+    # module entry: under `python -m nodes.common.node_daemon` argv[0] IS
+    # the module file (node_daemon.py)
+    monkeypatch.setattr(
+        sys, "argv", ["/venv/lib/python3/site-packages/nodes/common/node_daemon.py"]
+    )
+    assert node_daemon._daemon_label() == "iowap-daemon"
 
 
 def test_log_label_follows_invoked_binary(daemon_state, monkeypatch):
-    """T-250: the journal label names the invoked binary, shims keep legacy."""
+    """T-250 sunset: the journal label names the rebranded surface; module
+    entries (``python -m``) keep truthful labels."""
     from nodes.common.relay_client import _log_label
     monkeypatch.setattr(sys, "argv", ["/venv/bin/iowap-daemon", "--foreground", "--mode", "sse"])
     assert _log_label() == "iowap-daemon"
     monkeypatch.setattr(sys, "argv", ["/venv/bin/iowap-cli", "server", "health"])
     assert _log_label() == "iowap-cli"
-    monkeypatch.setattr(sys, "argv", ["/venv/bin/node-daemon", "--foreground"])
-    assert _log_label() == "node-daemon"
-    monkeypatch.setattr(sys, "argv", ["/venv/bin/python", "-m", "nodes.common.node_cli"])
-    assert _log_label() == "node-cli"
+    # module entries: under `python -m` argv[0] IS the module file
+    monkeypatch.setattr(
+        sys, "argv", ["/venv/lib/python3/site-packages/nodes/common/node_cli.py"]
+    )
+    assert _log_label() == "iowap-cli"
+    monkeypatch.setattr(
+        sys, "argv", ["/venv/lib/python3/site-packages/nodes/common/node_daemon.py"]
+    )
+    assert _log_label() == "iowap-daemon"
 
 
 def test_daemon_parser_prog_follows_invoked_binary(daemon_state, monkeypatch):
-    """iowap-daemon --help sights `usage: iowap-daemon …`; the legacy shim
-    keeps `usage: node-daemon`."""
+    """iowap-daemon --help sights `usage: iowap-daemon …`; the module entry
+    mirrors its argv0 (``python -m`` → ``usage: node_daemon.py``)."""
     monkeypatch.setattr(sys, "argv", ["/venv/bin/iowap-daemon", "status"])
     out = node_daemon.build_parser().format_help().splitlines()[0]
     assert "usage: iowap-daemon" in out
-    monkeypatch.setattr(sys, "argv", ["/venv/bin/node-daemon", "--foreground"])
+    # module entry: argv[0] is the module file, mirrored verbatim
+    monkeypatch.setattr(
+        sys, "argv", ["/venv/lib/python3/site-packages/nodes/common/node_daemon.py"]
+    )
     out = node_daemon.build_parser().format_help().splitlines()[0]
-    assert "usage: node-daemon" in out
+    assert "usage: node_daemon.py" in out

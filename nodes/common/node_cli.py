@@ -272,14 +272,16 @@ def _cmd_reload(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _parser_prog() -> str:
-    """usage prog = invoked binary name (argv[0] basename, fallback 'node-cli').
+    """usage prog = invoked binary name (argv[0] basename, fallback 'iowap-cli').
 
-    T-250 rebrand: `iowap-cli --help` must sight `usage: iowap-cli …` while
-    the legacy `node-cli` shim keeps showing `node-cli` — same entry point,
-    the argv[0] basename decides.
+    argv[0] stays the deciding surface: the ``iowap-cli`` script and the
+    legal module entry ``python -m nodes.common.node_cli`` (argv0 basename
+    ``node_cli.py``) both mirror their invocation. T-250 sunset (2.3.43):
+    the empty-argv0 fallback names the one remaining canonical binary —
+    the legacy ``node-cli`` shim no longer exists.
     """
     argv0 = sys.argv[0] if sys.argv and sys.argv[0] else ""
-    return os.path.basename(argv0) or "node-cli"
+    return os.path.basename(argv0) or "iowap-cli"
 
 
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
