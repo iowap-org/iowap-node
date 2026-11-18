@@ -52,9 +52,6 @@ from typing import Any
 import httpx
 
 from nodes.common import node_utils as _nu
-from nodes.common.handler_runner import (
-    run_handler,  # noqa: F401 — re-exported (T-250: tests patch node_cli.run_handler)
-)
 from nodes.common.node_config import (
     ACTIVE_PATH,  # noqa: F401 — re-exported so the test fixture's cli.ACTIVE_PATH patch keeps working (T-117)
     BASE_DIR,  # noqa: F401 — re-exported (T-250: pid/log paths live in poll_daemon, this name stays for fixture-patch compat)
@@ -65,7 +62,6 @@ from nodes.common.node_utils import (
     RESTART_COMMAND,
     SERVICE_UNIT,
     STATUS_PATH,
-    load_json,  # noqa: F401 — re-exported (T-250: cli_server resolves via _cli.load_json)
     load_meta,
 )
 

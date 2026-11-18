@@ -24,7 +24,6 @@ import tomllib
 import zipfile
 from importlib.metadata import PathDistribution
 from pathlib import Path
-from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -55,7 +54,7 @@ def daemon_state(tmp_path, monkeypatch):
 class _FakeClient:
     """RelayClient stand-in: no network, no token, records construction."""
 
-    instances: ClassVar[list[_FakeClient]] = []
+    instances: list[_FakeClient] = []
 
     def __init__(self, meta, cfg):
         self.meta = meta
@@ -74,7 +73,7 @@ class _BoomDaemon:
 class _FakeSseDaemon:
     """Records its run and verifies it owns the SSE pid file."""
 
-    runs: ClassVar[list[dict]] = []
+    runs: list[dict] = []
 
     def __init__(self, client, cfg):
         self.client = client
@@ -89,7 +88,7 @@ class _FakeSseDaemon:
 class _FakePollDaemon:
     """Records its run and verifies it owns the poll pid file."""
 
-    runs: ClassVar[list[dict]] = []
+    runs: list[dict] = []
 
     def __init__(self, client, cfg):
         self.client = client

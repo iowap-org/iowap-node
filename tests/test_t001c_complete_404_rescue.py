@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from nodes.common import node_cli, node_daemon, node_utils, poll_daemon
+from nodes.common import node_cli, node_daemon, node_utils
 from nodes.common.relay_client import RelayClient
 
 
@@ -175,7 +175,7 @@ class TestCliDaemonRescue:
         d = _daemon(node_cli, "Daemon")
         d.client.complete = MagicMock(side_effect=FakeExc(404, GONE_404))
         monkeypatch.setattr(
-            poll_daemon, "run_handler", MagicMock(return_value={"status": "completed", "result": {"answer": "x"}})
+            node_cli, "run_handler", MagicMock(return_value={"status": "completed", "result": {"answer": "x"}})
         )
         d._run_stage(_cap(), _stage())
         assert d.client.add_task_note.call_count == 1
@@ -185,7 +185,7 @@ class TestCliDaemonRescue:
         d = _daemon(node_cli, "Daemon")
         d.client.complete = MagicMock(side_effect=httpx.ConnectError("net down"))
         monkeypatch.setattr(
-            poll_daemon, "run_handler", MagicMock(return_value={"status": "completed", "result": {}})
+            node_cli, "run_handler", MagicMock(return_value={"status": "completed", "result": {}})
         )
         d._run_stage(_cap(), _stage())
         assert d.client.add_task_note.call_count == 0

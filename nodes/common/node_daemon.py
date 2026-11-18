@@ -45,14 +45,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from pathlib import Path
 import logging
 import os
 import signal
 import sys
 import threading
 import time
-from datetime import UTC, datetime
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -117,7 +117,7 @@ log = logging.getLogger("node-daemon")
 
 
 def _utcnow_str() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 # Long-Run lease budget on the relay (T-154): an accepted stage stays
@@ -288,7 +288,7 @@ class SseDaemon:
         # reserve, decremented on every release (_release_reservation).
         self._in_flight_points = 0
         self._lock = threading.Lock()
-        self._started_at = datetime.now(UTC)
+        self._started_at = datetime.now(timezone.utc)
         self.tasks_completed = 0
         self.tasks_failed = 0
         self.last_heartbeat_status = "unknown"
