@@ -562,6 +562,22 @@ def _daemon_stop(args: argparse.Namespace) -> int:
 def _daemon_status(args: argparse.Namespace) -> int:
     pid = _read_pid()
     running = pid is not None and _pid_running(pid)
+    # T-250: the consolidated daemon also runs in SSE mode (iowap-daemon
+    # --mode sse, pid node-daemon.pid). Status must see BOTH modes — the
+    # running daemon is "the daemon" regardless of which pid file holds it.
+    sse_pid: int | None = None
+    sse_running = False
+    try:
+        from nodes.common.node_daemon import PID_PATH as _SSE_PID_PATH
+
+        sse_pid = _nu_read_pid(_SSE_PID_PATH)
+        sse_running = sse_pid is not None and _nu_pid_running(sse_pid)
+    except Exception:  # noqa: BLE001 — fail-soft: status never crashes
+        sse_pid = None
+        sse_running = False
+    mode = "poll" if running else ("sse" if sse_running else "-")
+    shown_pid = pid if running else (sse_pid if sse_running else None)
+    daemon_running = running or sse_running
     active_profile = current_profile_name()
     status_file: dict[str, Any] = {}
     if STATUS_PATH.exists():
@@ -569,8 +585,9 @@ def _daemon_status(args: argparse.Namespace) -> int:
             status_file = load_json(STATUS_PATH, default={}) or {}
         except Exception:  # noqa: BLE001 — fail-soft: corrupt status file renders as "-"/0
             status_file = {}
-    print(f"pid: {pid if pid is not None else '-'}")
-    print(f"running: {running}")
+    print(f"pid: {shown_pid if shown_pid is not None else '-'}")
+    print(f"mode: {mode}")
+    print(f"running: {daemon_running}")
     print(f"active_profile: {active_profile or '-'}")
     print(f"last_heartbeat: {status_file.get('last_heartbeat', '-')}")
     print(f"heartbeat_status: {status_file.get('heartbeat_status', '-')}")
@@ -582,7 +599,7 @@ def _daemon_status(args: argparse.Namespace) -> int:
     inflight = status_file.get("in_flight", {})
     if inflight:
         print(f"in_flight: {inflight}")
-    return 0 if running else 1
+    return 0 if daemon_running else 1
 
 
 def _daemon_restart(args: argparse.Namespace) -> int:

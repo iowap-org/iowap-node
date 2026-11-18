@@ -339,4 +339,36 @@ def test_daemon_status_empty_output_shape(daemon_state, capsys):
     rc = node_cli.main(["daemon", "status"])
     out = capsys.readouterr().out
     assert rc == 1
-    assert out.startswith("pid: -\nrunning: False\n")
+    assert out.startswith("pid: -\nmode: -\nrunning: False\n")
+
+
+def test_daemon_status_sees_running_sse_daemon(daemon_state, monkeypatch, capsys):
+    """T-250: the consolidated daemon usually runs in SSE mode (pid file
+    node-daemon.pid) — status must report it as running, with the mode."""
+    import os as _os
+
+    sse_pid = node_daemon.PID_PATH
+    sse_pid.write_text(str(_os.getpid()) + "\n", encoding="utf-8")  # this test process is alive
+    rc = node_cli.main(["daemon", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.splitlines()
+    assert f"pid: {_os.getpid()}" in lines[0]
+    assert "mode: sse" in lines[1]
+    assert "running: True" in lines[2]
+
+
+def test_daemon_status_prefers_poll_mode_when_both_pids_alive(
+    daemon_state, monkeypatch, capsys
+):
+    """Both pid files alive → poll (the caller's own control surface) wins;
+    T-137b forbids this state in production, status just reports honestly."""
+    import os as _os
+
+    node_daemon.PID_PATH.write_text(str(_os.getpid()) + "\n", encoding="utf-8")
+    poll_pid = node_cli.PID_PATH
+    poll_pid.write_text(str(_os.getpid()) + "\n", encoding="utf-8")
+    rc = node_cli.main(["daemon", "status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "mode: poll" in out.splitlines()[1]
