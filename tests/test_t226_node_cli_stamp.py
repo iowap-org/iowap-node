@@ -225,6 +225,76 @@ def test_resolve_rejects_unrelated_argv0(relay_home, tmp_path, monkeypatch):
     assert resolve_own_cli_path() is None
 
 
+# ------------------------------------------------- T-250: iowap-cli stamp
+
+
+def test_resolve_prefers_iowap_cli_sibling_when_invoked_as_iowap_cli(
+    relay_home, tmp_path, monkeypatch
+):
+    """T-250: argv[0] = iowap-cli → the iowap-cli sibling wins over the
+    legacy node-cli in the same venv (the stamp records the invoked binary)."""
+    venv = tmp_path / "fakevenv"
+    bin_dir = venv / "bin"
+    bin_dir.mkdir(parents=True)
+    iowap = bin_dir / "iowap-cli"
+    iowap.write_text("#!/bin/sh\n")
+    iowap.chmod(0o755)
+    legacy = bin_dir / "node-cli"
+    legacy.write_text("#!/bin/sh\n")
+    legacy.chmod(0o755)
+    (bin_dir / "python").write_text("#!/bin/sh\n")
+    (bin_dir / "python").chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
+    monkeypatch.setattr(sys, "argv", [str(iowap), "server", "health"])
+
+    assert resolve_own_cli_path() == str(Path(os.path.realpath(iowap)))
+
+
+def test_resolve_keeps_node_cli_preference_when_invoked_as_node_cli(
+    relay_home, tmp_path, monkeypatch
+):
+    """Legacy invocation unchanged: node-cli sibling wins even when an
+    iowap-cli sibling exists (no drift of the existing stamp)."""
+    venv = tmp_path / "fakevenv"
+    bin_dir = venv / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "iowap-cli").write_text("#!/bin/sh\n")
+    (bin_dir / "iowap-cli").chmod(0o755)
+    legacy = bin_dir / "node-cli"
+    legacy.write_text("#!/bin/sh\n")
+    legacy.chmod(0o755)
+    (bin_dir / "python").write_text("#!/bin/sh\n")
+    (bin_dir / "python").chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
+    monkeypatch.setattr(sys, "argv", [str(legacy), "node", "list"])
+
+    assert resolve_own_cli_path() == str(Path(os.path.realpath(legacy)))
+
+
+def test_stamp_via_iowap_cli_invocation_writes_iowap_path(
+    relay_home, tmp_path, monkeypatch
+):
+    """End-to-end through ensure_node_cli_stamp: an iowap-cli invocation
+    re-stamps node_cli_path to the iowap-cli binary (T-250 gap found live
+    2026-11-18 — the pin stayed on node-cli after the rebrand)."""
+    active = node_config.ACTIVE_PATH
+    _write_active(active, 'node_cli_path: "/old/venv/bin/node-cli"\n' + PROFILE_YAML)
+    venv = tmp_path / "fakevenv"
+    bin_dir = venv / "bin"
+    bin_dir.mkdir(parents=True)
+    iowap = bin_dir / "iowap-cli"
+    iowap.write_text("#!/bin/sh\n")
+    iowap.chmod(0o755)
+    (bin_dir / "python").write_text("#!/bin/sh\n")
+    (bin_dir / "python").chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
+    monkeypatch.setattr(sys, "argv", [str(iowap), "server", "health"])
+
+    ensure_node_cli_stamp()
+
+    assert _stamp_value(active) == str(Path(os.path.realpath(iowap)))
+
+
 # ------------------------------------------------------------ call sites
 
 
