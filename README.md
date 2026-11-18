@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/iowap-org/iowap-node/main/install.s
 
 ```bash
 pip install "iowap-node"          # import namespace: nodes
-node-cli mcp install              # optional: the MCP toolkit (own venv)
+iowap-cli mcp install              # optional: the MCP toolkit (own venv)
 ```
 
 **From source (dev)**:
@@ -31,12 +31,12 @@ cd iowap-node
 pip install -e .
 cp relay_config.json.example ~/.relay/relay_config.json
 # edit ~/.relay/relay_config.json
-node-cli node register
-node-cli capabilities publish default
+iowap-cli node register
+iowap-cli capabilities publish default
 ```
 
-**Updates**: `node-cli update check` (node + MCP toolkit) and
-`node-cli update apply` — PyPI-first with the GitHub release as fallback.
+**Updates**: `iowap-cli update check` (node + MCP toolkit) and
+`iowap-cli update apply` — PyPI-first with the GitHub release as fallback.
 
 ## What You Can Build
 
@@ -84,8 +84,8 @@ That is the frozen T-005b Envelope-Contract (`handler_runner._build_stdin_payloa
 
 | Component | Description |
 |-----------|-------------|
-| `node-cli` | CLI tool — register, manage, submit tasks, list nodes |
-| `node-daemon` | Event-driven worker — listens for tasks via SSE, runs handlers |
+| `iowap-cli` | CLI tool — register, manage, submit tasks, list nodes |
+| `iowap-daemon` | Event-driven worker — listens for tasks via SSE, runs handlers |
 | `relay_client` | HTTP client library for relay API |
 | `handler_runner` | Execute custom handlers with stdin/stdout contract |
 | `node_config` | Capability/configuration management |
@@ -93,16 +93,16 @@ That is the frozen T-005b Envelope-Contract (`handler_runner._build_stdin_payloa
 ## CLI Reference
 
 ```bash
-node-cli register                  # Register with a relay server
-node-cli capabilities server       # List server-known capabilities
-node-cli capabilities publish      # Publish your capabilities
-node-cli task submit <capability>  # Submit a task
-node-cli task wait <id>            # Wait for task completion
-node-cli node list                 # List registered nodes
-node-cli node info <id>            # Node details
-node-cli daemon                    # Start the daemon (foreground)
-node-cli bridge upload <file>      # Upload via bridge route
-node-cli bridge download <url>     # Download via bridge route
+iowap-cli register                  # Register with a relay server
+iowap-cli capabilities server       # List server-known capabilities
+iowap-cli capabilities publish      # Publish your capabilities
+iowap-cli task submit <capability>  # Submit a task
+iowap-cli task wait <id>            # Wait for task completion
+iowap-cli node list                 # List registered nodes
+iowap-cli node info <id>            # Node details
+iowap-cli daemon                    # Start the daemon (foreground)
+iowap-cli bridge upload <file>      # Upload via bridge route
+iowap-cli bridge download <url>     # Download via bridge route
 ```
 
 ## Forward Routing
@@ -113,7 +113,7 @@ target capability at submit time. Submission forces the relay's
 `forward` pseudo-capability (the slot rides inside the payload):
 
 ```bash
-node-cli task submit --stage 'probe.echo:{"operation":"status"}' --forward-slot 1
+iowap-cli task submit --stage 'probe.echo:{"operation":"status"}' --forward-slot 1
 ```
 
 Slots are declared in the active profile (`~/.relay/node.yaml`):
@@ -134,12 +134,12 @@ forward_slots:
 
 - `forward` is never a real capability and never advertised by the node —
   it exists for submission only (a `capability: forward` block in a
-  profile is refused at `node-cli capabilities validate|publish`).
+  profile is refused at `iowap-cli capabilities validate|publish`).
 - Declared slots are transported with every daemon heartbeat
   (T-233/T-240): removing slots and heartbeating with the emptied
   declaration clears the server-side rows (empty list = delete all).
 - The declaration is validated up front (T-239): a malformed
-  `forward_slots` block fails `node-cli capabilities publish` instead of
+  `forward_slots` block fails `iowap-cli capabilities publish` instead of
   leaving the node silent at the relay.
 
 Docs: live on your relay at `/relay/v2/docs/concepts/forward-routing` —
