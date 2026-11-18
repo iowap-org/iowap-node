@@ -261,6 +261,16 @@ def _is_already_completed(exc: BaseException) -> bool:
     return _ALREADY_COMPLETED_DETAIL in detail
 
 
+def _daemon_label() -> str:
+    """T-250 rebrand: the ``daemon`` field of worker_status.json names the
+    binary the operator actually runs. ``iowap-daemon`` when invoked via the
+    rebranded console script, legacy ``node-daemon`` otherwise (module
+    invocation ``python -m nodes.common.node_daemon`` included — that entry
+    point IS the legacy name)."""
+    argv0 = os.path.basename(sys.argv[0]) if sys.argv else ""
+    return "iowap-daemon" if argv0 == "iowap-daemon" else "node-daemon"
+
+
 class SseDaemon:
     """SSE-driven daemon: heartbeat thread + SSE event loop + execution.
 
@@ -361,7 +371,7 @@ class SseDaemon:
         status = {
             "pid": os.getpid(),
             "node_id": self.client.meta.get("node_id"),
-            "daemon": "node-daemon",
+            "daemon": _daemon_label(),
             "started_at": self._started_at.isoformat(),
             "last_heartbeat": _utcnow_str(),
             "heartbeat_status": self.last_heartbeat_status,

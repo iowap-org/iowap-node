@@ -484,3 +484,14 @@ def test_iowap_cli_help_sights_iowap_cli(monkeypatch, capsys):
         node_cli.main(["--help"])
     assert exc.value.code == 0
     assert capsys.readouterr().out.lstrip().startswith("usage: iowap-cli")
+
+
+def test_daemon_label_follows_invoked_binary(daemon_state, monkeypatch):
+    """T-250: worker_status.json 'daemon' names the invoked binary —
+    iowap-daemon for the rebranded entry point, node-daemon for legacy."""
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/iowap-daemon", "--foreground", "--mode", "sse"])
+    assert node_daemon._daemon_label() == "iowap-daemon"
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/node-daemon", "--foreground"])
+    assert node_daemon._daemon_label() == "node-daemon"
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/python", "-m", "nodes.common.node_daemon"])
+    assert node_daemon._daemon_label() == "node-daemon"
