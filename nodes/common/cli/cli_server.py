@@ -13,9 +13,8 @@ from typing import Any
 
 import httpx
 
-import nodes.common.node_cli as _cli
 from nodes.common import node_utils
-from nodes.common.node_utils import save_meta, save_token
+from nodes.common.node_utils import load_json, save_meta, save_token
 from nodes.common.relay_client import _parse_prometheus_gauges
 
 REGISTER_PATH = "/relay/v2/auth/register"
@@ -166,10 +165,10 @@ def resolve_server(server: str | None, as_json: bool = False) -> str | None:
     """Resolve the server argument: arg → config file / node state → error."""
     if server:
         return normalize_base_url(server)
-    cfg = _cli.load_json(node_utils.CONFIG_PATH, default={}) or {}
+    cfg = load_json(node_utils.CONFIG_PATH, default={}) or {}
     base = cfg.get("base_url")
     if not base and node_utils.META_PATH.exists():
-        meta = _cli.load_json(node_utils.META_PATH, default={}) or {}
+        meta = load_json(node_utils.META_PATH, default={}) or {}
         base = meta.get("base_url")
     if base:
         return str(base).rstrip("/")

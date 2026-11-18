@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pytest
 
-from nodes.common import node_cli, node_daemon
+from nodes.common import node_cli, node_daemon, poll_daemon
 from nodes.common.relay_client import RelayClient
 
 META = {
@@ -61,7 +61,7 @@ def test_cli_completed_with_null_error_counts_as_completed(client, monkeypatch):
     """{status: completed, result, error: null} → tasks_completed++, NO
     tasks_failed/_failed_tasks bump (the stage-3 flow stays alive)."""
     daemon = node_cli.Daemon(client, dict(CFG))
-    monkeypatch.setattr(node_cli, "run_handler", rh_ok)
+    monkeypatch.setattr(poll_daemon, "run_handler", rh_ok)
     daemon.client.complete = _fake_complete
 
     daemon._run_stage(dict(CAP), dict(STAGE))
@@ -83,7 +83,7 @@ def test_cli_non_null_error_still_counts_as_failure(client, monkeypatch):
         {"status": "error", "error": "boom"},
     ]
     for result in cases:
-        monkeypatch.setattr(node_cli, "run_handler", lambda *a, _r=result, **k: _r)
+        monkeypatch.setattr(poll_daemon, "run_handler", lambda *a, _r=result, **k: _r)
         daemon._run_stage(dict(CAP), dict(STAGE))
 
     assert daemon.tasks_completed == 0

@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nodes.common import node_cli, node_config, node_daemon
+from nodes.common import node_cli, node_config, node_daemon, poll_daemon
 from nodes.common.forward import (
     DEFAULT_SLOT_TYPE,
     ForwardSlotError,
@@ -120,7 +120,7 @@ def relay_home(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(node_cli, "PID_PATH", tmp_path / "node-cli.pid")
     monkeypatch.setattr(node_daemon, "PID_PATH", tmp_path / "node-daemon.pid")
-    monkeypatch.setattr(node_cli, "STATUS_PATH", tmp_path / "node-cli.status")
+    monkeypatch.setattr(poll_daemon, "STATUS_PATH", tmp_path / "node-cli.status")
     monkeypatch.setattr(node_daemon, "STATUS_PATH", tmp_path / "node.status")
     return tmp_path
 
@@ -633,7 +633,7 @@ def test_cli_daemon_heartbeat_transports_typed_rows(relay_home, monkeypatch):
     client = RelayClient(dict(META), dict(CFG))
     daemon = node_cli.Daemon(client, dict(CFG))
     monkeypatch.setattr(client, "maintenance_due", lambda: False)
-    monkeypatch.setattr(node_cli, "load_active_profile", lambda: [])
+    monkeypatch.setattr(poll_daemon, "load_active_profile", lambda: [])
 
     seen = []
 

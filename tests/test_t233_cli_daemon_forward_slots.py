@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from nodes.common import node_cli
+from nodes.common import node_cli, poll_daemon
 from nodes.common.relay_client import RelayClient
 
 META = {
@@ -48,7 +48,7 @@ def test_cli_daemon_heartbeat_loads_and_sends_forward_slots(client, monkeypatch)
     daemon = node_cli.Daemon(client, dict(CFG))
     monkeypatch.setattr(client, "maintenance_due", lambda: False)
     monkeypatch.setattr(
-        node_cli,
+        poll_daemon,
         "load_forward_slots",
         lambda: [{"slot": "1", "label": "Parity Slot", "description": "t233"}],
     )
@@ -75,7 +75,7 @@ def test_cli_daemon_heartbeat_without_slots_reports_empty_forward_slots(
     identical heartbeat envelope."""
     daemon = node_cli.Daemon(client, dict(CFG))
     monkeypatch.setattr(client, "maintenance_due", lambda: False)
-    monkeypatch.setattr(node_cli, "load_forward_slots", list)
+    monkeypatch.setattr(poll_daemon, "load_forward_slots", list)
 
     seen: list[list[dict[str, str]] | None] = []
 
@@ -107,7 +107,7 @@ def test_cli_daemon_heartbeat_failure_is_survivable(
     never sent half-known — and the error is surfaced, T-237-hardened).
     """
     daemon = node_cli.Daemon(client, dict(CFG))
-    monkeypatch.setattr(node_cli, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(poll_daemon, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(client, "maintenance_due", lambda: False)
 
     loader_calls: list[int] = []
@@ -120,7 +120,7 @@ def test_cli_daemon_heartbeat_failure_is_survivable(
             return [{"slot": "1", "label": "ok-once"}]
         raise ValueError("bad forward_slots")
 
-    monkeypatch.setattr(node_cli, "load_forward_slots", flaky_loader)
+    monkeypatch.setattr(poll_daemon, "load_forward_slots", flaky_loader)
 
     def fake_heartbeat(caps, inflight, forward_slots=None):
         heartbeat_calls.append(1)

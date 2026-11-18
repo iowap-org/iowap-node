@@ -1,6 +1,6 @@
 [project]
 name = "iowap-node"
-version = "2.3.37"
+version = "2.3.38"
 description = "IOWAP Node Framework — daemon, CLI, and handler runner for distributed agent nodes"
 readme = "README.md"
 license = "MIT"
@@ -15,9 +15,14 @@ dependencies = [
     "zeroconf>=0.63",
 ]
 
+# T-250 rebrand (shim strategy): node-cli/node-daemon remain the working
+# legacy names (sunset date deliberately open, owned by Felix); iowap-* are
+# the new canonical entry points pointing at the same callables.
 [project.scripts]
 node-cli = "nodes.common.node_cli:main"
 node-daemon = "nodes.common.node_daemon:main"
+iowap-cli = "nodes.common.node_cli:main"
+iowap-daemon = "nodes.common.node_daemon:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -45,19 +45,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from pathlib import Path
 import logging
 import os
 import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
 
-from nodes.common import file_serve
+from nodes.common import file_serve, poll_daemon
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     capability_cost,
@@ -117,7 +117,7 @@ log = logging.getLogger("node-daemon")
 
 
 def _utcnow_str() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # Long-Run lease budget on the relay (T-154): an accepted stage stays
@@ -288,7 +288,7 @@ class SseDaemon:
         # reserve, decremented on every release (_release_reservation).
         self._in_flight_points = 0
         self._lock = threading.Lock()
-        self._started_at = datetime.now(timezone.utc)
+        self._started_at = datetime.now(UTC)
         self.tasks_completed = 0
         self.tasks_failed = 0
         self.last_heartbeat_status = "unknown"
@@ -1140,10 +1140,39 @@ class SseDaemon:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+_MODE_CHOICES = ("sse", "poll")
+
+
+class _SingleModeAction(argparse.Action):
+    """T-250: refuse a contradictory request at parse time.
+
+    ``--mode`` given more than once (or a future config/env duplicate) means
+    both daemon modes were requested for one process — that can never be
+    honoured (separate pid files, separate loops, token fights), so the
+    start fails closed: loud error, exit != 0, no process, no pid file.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        # NB: argparse prefab-fills the default ("sse") into the namespace
+        # before actions run — so occurrences of the flag, not the value,
+        # must be counted here.
+        if getattr(namespace, "_mode_seen", False):
+            parser.error(
+                f"{option_string or '--mode'} given more than once — one "
+                "process runs exactly one mode (sse|poll), refusing to "
+                "start (fail-closed)."
+            )
+        namespace._mode_seen = True
+        setattr(namespace, self.dest, values)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="node-daemon",
-        description="SSE-driven daemon for IOWAP.",
+        description=(
+            "IOWAP node daemon: 'sse' mode (default, SSE-driven) or "
+            "'poll' mode (legacy claim/heartbeat polling daemon)."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -1154,6 +1183,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--foreground",
         action="store_true",
         help="Run in the foreground (default). Kept for parity with node-cli.",
+    )
+    parser.add_argument(
+        "--mode",
+        action=_SingleModeAction,
+        default="sse",
+        choices=_MODE_CHOICES,
+        help=(
+            "Daemon mode (T-250): 'sse' (default — unchanged SSE-driven "
+            "behaviour) or 'poll' (legacy claim/heartbeat polling daemon, "
+            "pid node-cli.pid). Requesting both modes fails closed."
+        ),
     )
     return parser
 
@@ -1168,6 +1208,13 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         print(exc, file=sys.stderr)
         return 1
+    # T-250: --mode poll hands the pre-built client over to the moved
+    # polling daemon (pid node-cli.pid, own T-137b guard). Everything
+    # below this branch is the unchanged SSE path.
+    if args.mode == "poll":
+        return poll_daemon.start_poll_daemon(
+            client, cfg, own_name="node-daemon --mode poll"
+        )
     BASE_DIR.mkdir(parents=True, exist_ok=True)
     # T-137b-Guard: refuse to start while the polling daemon is running.
     conflict = _check_other_daemon(base_dir=BASE_DIR)

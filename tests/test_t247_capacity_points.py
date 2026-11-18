@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from nodes.common import node_cli, node_config, node_daemon
+from nodes.common import node_cli, node_config, node_daemon, poll_daemon
 from nodes.common.cli import cli_capabilities
 from nodes.common.node_config import CapabilityValidationError, validate_profile
 
@@ -423,8 +423,8 @@ def test_cli_daemon_loop_blocks_claim_over_budget(monkeypatch):
         passes.append(1)
         return [dict(CLI_CAP)]
 
-    monkeypatch.setattr(node_cli, "load_active_profile", profile)
-    monkeypatch.setattr(node_cli, "load_active_budget", lambda: 1)
+    monkeypatch.setattr(poll_daemon, "load_active_profile", profile)
+    monkeypatch.setattr(poll_daemon, "load_active_budget", lambda: 1)
 
     daemon.in_flight_points = 0
     worker = _start_loop(daemon)
@@ -447,9 +447,9 @@ def test_cli_daemon_loop_claims_within_budget_and_releases(monkeypatch):
     daemon = node_cli.Daemon(
         fake, cfg={"claim_interval": 300, "heartbeat_interval": 60, "max_retries": 2}
     )
-    monkeypatch.setattr(node_cli, "load_active_profile", lambda: [dict(CLI_CAP)])
-    monkeypatch.setattr(node_cli, "load_active_budget", lambda: 5)
-    monkeypatch.setattr(node_cli, "run_handler", lambda *a, **k: {"status": "completed"})
+    monkeypatch.setattr(poll_daemon, "load_active_profile", lambda: [dict(CLI_CAP)])
+    monkeypatch.setattr(poll_daemon, "load_active_budget", lambda: 5)
+    monkeypatch.setattr(poll_daemon, "run_handler", lambda *a, **k: {"status": "completed"})
     daemon.in_flight_points = 0
 
     worker = _start_loop(daemon)

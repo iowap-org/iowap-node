@@ -25,7 +25,7 @@ from collections import deque
 
 import pytest
 
-from nodes.common import node_cli, node_daemon
+from nodes.common import node_cli, node_daemon, poll_daemon
 
 CAP = "a.cap"
 
@@ -105,7 +105,7 @@ def test_cli_daemon_reclaims_immediately_after_complete(
 ):
     """After a completed stage the claim loop must start the next pass
     right away — NOT after the full claim interval (300s here)."""
-    daemon_module_stubs(node_cli)
+    daemon_module_stubs(poll_daemon)
     fake = FakeClient([_stage(1), _stage(2)])
     daemon = node_cli.Daemon(
         fake,
