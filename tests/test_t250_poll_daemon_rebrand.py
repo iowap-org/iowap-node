@@ -495,3 +495,27 @@ def test_daemon_label_follows_invoked_binary(daemon_state, monkeypatch):
     assert node_daemon._daemon_label() == "node-daemon"
     monkeypatch.setattr(sys, "argv", ["/venv/bin/python", "-m", "nodes.common.node_daemon"])
     assert node_daemon._daemon_label() == "node-daemon"
+
+
+def test_log_label_follows_invoked_binary(daemon_state, monkeypatch):
+    """T-250: the journal label names the invoked binary, shims keep legacy."""
+    from nodes.common.relay_client import _log_label
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/iowap-daemon", "--foreground", "--mode", "sse"])
+    assert _log_label() == "iowap-daemon"
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/iowap-cli", "server", "health"])
+    assert _log_label() == "iowap-cli"
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/node-daemon", "--foreground"])
+    assert _log_label() == "node-daemon"
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/python", "-m", "nodes.common.node_cli"])
+    assert _log_label() == "node-cli"
+
+
+def test_daemon_parser_prog_follows_invoked_binary(daemon_state, monkeypatch):
+    """iowap-daemon --help sights `usage: iowap-daemon …`; the legacy shim
+    keeps `usage: node-daemon`."""
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/iowap-daemon", "status"])
+    out = node_daemon.build_parser().format_help().splitlines()[0]
+    assert "usage: iowap-daemon" in out
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/node-daemon", "--foreground"])
+    out = node_daemon.build_parser().format_help().splitlines()[0]
+    assert "usage: node-daemon" in out

@@ -100,13 +100,26 @@ def _measure_load_pct(cpu_count: int) -> tuple[float, str]:
         return 0.0, "loadavg"
 
 
+def _log_label() -> str:
+    """T-250 rebrand: the visible log-field names the invoked binary.
+    ``iowap-cli``/``iowap-daemon`` when run via the rebranded console
+    scripts, legacy ``node-daemon`` via its shim, everything else
+    (``node-cli``, ``python -m`` invocations) stays ``node-cli``."""
+    argv0 = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    return {
+        "iowap-cli": "iowap-cli",
+        "iowap-daemon": "iowap-daemon",
+        "node-daemon": "node-daemon",
+    }.get(argv0, "node-cli")
+
+
 def _setup_logging(level: str | None = None) -> None:
     if level is None:
         level = os.environ.get("RELAY_LOG_LEVEL", "INFO")
     numeric = getattr(logging, str(level).upper(), logging.INFO)
     logging.basicConfig(
         level=numeric,
-        format="%(asctime)s | %(levelname)-7s | node-cli | %(message)s",
+        format=f"%(asctime)s | %(levelname)-7s | {_log_label()} | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 

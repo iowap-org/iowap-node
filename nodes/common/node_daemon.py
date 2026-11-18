@@ -1181,9 +1181,18 @@ class _SingleModeAction(argparse.Action):
         setattr(namespace, self.dest, values)
 
 
+def _parser_prog() -> str:
+    """usage prog = invoked binary name (argv[0] basename, fallback
+    'node-daemon'). T-250 rebrand: `iowap-daemon --help` must sight
+    `usage: iowap-daemon …` while the legacy `node-daemon` shim keeps
+    showing `node-daemon` — same entry point, argv[0] decides."""
+    argv0 = sys.argv[0] if sys.argv and sys.argv[0] else ""
+    return os.path.basename(argv0) or "node-daemon"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="node-daemon",
+        prog=_parser_prog(),
         description=(
             "IOWAP node daemon: 'sse' mode (default, SSE-driven) or "
             "'poll' mode (legacy claim/heartbeat polling daemon)."
