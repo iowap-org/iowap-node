@@ -56,6 +56,7 @@ import re
 import shutil
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -777,9 +778,45 @@ class ActiveProfileCache:
 _active_cache = ActiveProfileCache()
 
 
-def load_active_profile() -> list[dict[str, Any]]:
-    """Convenience accessor for the module-level active profile cache."""
+def load_active_profile_unmerged() -> list[dict[str, Any]]:
+    """The base active profile WITHOUT bridge-merged caps.
+
+    The bridge handler (T-003) merges its published ``host.`` caps into
+    :func:`load_active_profile` via the provider hook below; collision
+    checks need the pristine local set.
+    """
     return _active_cache.get()
+
+
+# T-003: the bridge handler registers a provider that supplies the
+# currently published ``host.`` caps; they are appended to every
+# load_active_profile() result (heartbeat, claim loops, backfill sweeps,
+# status snapshot) without touching any daemon loop code.
+_BRIDGE_CAPS_PROVIDER: Callable[[], list[dict[str, Any]]] | None = None
+
+
+def register_bridge_caps_provider(provider: Callable[[], list[dict[str, Any]]]) -> None:
+    """Install the bridge caps merge provider (idempotent, test-replaceable)."""
+    global _BRIDGE_CAPS_PROVIDER
+    _BRIDGE_CAPS_PROVIDER = provider
+
+
+def load_active_profile() -> list[dict[str, Any]]:
+    """The active profile plus the bridge handler's published ``host.`` caps."""
+    caps = _active_cache.get()
+    provider = _BRIDGE_CAPS_PROVIDER
+    if provider is None:
+        return caps
+    try:
+        extra = provider()
+    except Exception:  # noqa: BLE001 — profile loading must never die
+        __import__("logging").getLogger("relay.node_config").warning(
+            "bridge caps provider failed — serving the base profile"
+        )
+        return caps
+    if not extra:
+        return caps
+    return [*caps, *extra]
 
 
 # N3 (audit 2026-10-31, F3 degradation): last valid forward-slot

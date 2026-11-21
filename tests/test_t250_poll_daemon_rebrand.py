@@ -118,11 +118,17 @@ def _reset_recorders():
 
 
 def _wire_main(monkeypatch, tmp_path):
-    """Fakes so node_daemon.main() never builds a real client / network."""
-    monkeypatch.setattr(node_daemon, "load_meta", lambda: {"node_id": "t250"})
+    """Fakes so node_daemon.main() never builds a real client / network.
+
+    T-011: main() acquires its config through ``wait_for_relay_config``
+    (blank-start idle gate) — the seam moved off load_meta/_effective_config.
+    """
     monkeypatch.setattr(
-        node_daemon, "_effective_config",
-        lambda: {"heartbeat_interval": 1, "claim_interval": 1},
+        node_daemon, "wait_for_relay_config",
+        lambda **_k: (
+            {"node_id": "t250"},
+            {"heartbeat_interval": 1, "claim_interval": 1},
+        ),
     )
     monkeypatch.setattr(node_daemon, "RelayClient", _FakeClient)
     return tmp_path
@@ -280,11 +286,12 @@ def test_status_positional_rejects_unknown_words():
 
 def test_status_mode_builds_no_client(daemon_state, monkeypatch):
     """`status` is a pure local read: it must never build a relay client —
-    it works even when the client wiring would raise."""
+    it works even when the client wiring would raise. T-011: it must not
+    even enter the blank-start wait (that gate is for daemon modes only)."""
     def _boom(*_a, **_k):
-        raise AssertionError("status mode must not build a client")
+        raise AssertionError("status mode must not touch the config path")
 
-    monkeypatch.setattr(node_daemon, "load_meta", _boom)
+    monkeypatch.setattr(node_daemon, "wait_for_relay_config", _boom)
     assert node_daemon.main(["status"]) == 1  # nothing running (isolated state)
 
 

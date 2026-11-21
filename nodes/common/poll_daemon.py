@@ -33,7 +33,7 @@ from typing import Any
 
 import httpx
 
-from nodes.common import file_serve
+from nodes.common import bridge, file_serve
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     BASE_DIR,
@@ -48,8 +48,8 @@ from nodes.common.node_utils import (
     STATUS_PATH,
     TOKEN_PATH,
     load_json,
-    load_meta,
     post_result_rescue_note,
+    wait_for_relay_config,
     write_json_atomic,
 )
 from nodes.common.node_utils import (
@@ -60,7 +60,6 @@ from nodes.common.node_utils import (
 )
 from nodes.common.relay_client import (
     RelayClient,
-    _effective_config,
     _setup_logging,
     _utcnow_str,
 )
@@ -107,6 +106,8 @@ class Daemon:
         self.server_probe: dict[str, Any] = {"ok": False, "error": "probe pending"}
         self._probe_thread: threading.Thread | None = None
         self._started_at = datetime.now(UTC)
+        # T-003: the bridge manifest poller thread (started by run()).
+        self._bridge_thread: threading.Thread | None = None
         # T-060: per-task failure counter so the daemon stops reclaiming
         # stages for a task whose handler keeps failing (exit 0 with an
         # ``error`` result or an exception). Mirrors the server-side
@@ -294,12 +295,18 @@ class Daemon:
                 "RELAY_BASE_URL": self.client.base_url,
                 "RELAY_TOKEN_FILE": str(TOKEN_PATH),
             }
-            result = run_handler(
-                cap.get("handler", ""),
-                stage,
-                context=context,
-                timeout=int(cap.get("timeout", 300)),
-            )
+            if cap.get("bridge"):
+                # T-003: bridge caps forward to the provider instead of a
+                # local handler (see node_daemon._run_stage for the full
+                # terminal/retryable contract).
+                result = bridge.execute_bridge_task(self.client, cap, stage)
+            else:
+                result = run_handler(
+                    cap.get("handler", ""),
+                    stage,
+                    context=context,
+                    timeout=int(cap.get("timeout", 300)),
+                )
             try:
                 self.client.complete(str(task_id), str(stage_id), result)
                 with self._lock:
@@ -459,6 +466,8 @@ class Daemon:
             log.exception("startup status write failed")
         self._start_heartbeat_thread()
         self._start_probe_thread()
+        # T-003: bridge manifest poller — own thread, pull model (SPEC §4).
+        self._bridge_thread = bridge.start_poller(self._stop_event)
         # T-166 (F1): ephemeral file serve inside the daemon — the CLI
         # process dies after the stdout envelope, the serve endpoint must
         # survive. Mirrors the wiring from node_daemon.py (SSE daemon);
@@ -485,6 +494,9 @@ class Daemon:
             self._stop_event.set()
             if self._hb_thread and self._hb_thread.is_alive():
                 self._hb_thread.join(timeout=5)
+            # T-003: the bridge poller exits with the stop event.
+            if self._bridge_thread and self._bridge_thread.is_alive():
+                self._bridge_thread.join(timeout=5)
             try:
                 self._write_status()
             except Exception:
@@ -615,9 +627,12 @@ def _daemon_restart(args: argparse.Namespace) -> int:
 
 def _daemon_foreground(args: argparse.Namespace) -> int:
     _setup_logging(os.environ.get("RELAY_LOG_LEVEL"))
+    # T-011 blank start: idle until a relay configuration exists.
+    ready = wait_for_relay_config(poll_seconds=2.0)
+    if ready is None:
+        return 0
+    meta, cfg = ready
     try:
-        meta = load_meta()
-        cfg = _effective_config()
         client = RelayClient(meta, cfg)
     except SystemExit as exc:
         print(exc, file=sys.stderr)
@@ -658,9 +673,13 @@ def _daemon_internal() -> int:
     if conflict:
         print(conflict, file=sys.stderr)
         return 1
+    # T-011 blank start: idle until a relay configuration exists (no
+    # crash, no relay traffic; SIGHUP re-checks immediately).
+    ready = wait_for_relay_config(poll_seconds=2.0)
+    if ready is None:
+        return 0
+    meta, cfg = ready
     try:
-        meta = load_meta()
-        cfg = _effective_config()
         client = RelayClient(meta, cfg)
     except SystemExit as exc:
         print(exc, file=sys.stderr)

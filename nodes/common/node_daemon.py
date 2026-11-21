@@ -61,7 +61,7 @@ from typing import Any
 
 import httpx
 
-from nodes.common import file_serve, poll_daemon
+from nodes.common import bridge, file_serve, poll_daemon
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     capability_cost,
@@ -76,11 +76,11 @@ from nodes.common.node_utils import (
     BASE_DIR,
     STATUS_PATH,
     TOKEN_PATH,
-    load_meta,
     post_result_rescue_note,
+    wait_for_relay_config,
     write_json_atomic,
 )
-from nodes.common.relay_client import RelayClient, _effective_config, _setup_logging
+from nodes.common.relay_client import RelayClient, _setup_logging
 
 # ---------------------------------------------------------------------------
 # Paths (mirrors node_cli.py)
@@ -308,6 +308,8 @@ class SseDaemon:
         self.tasks_completed = 0
         self.tasks_failed = 0
         self.last_heartbeat_status = "unknown"
+        # T-003: the bridge manifest poller thread (started by run()).
+        self._bridge_thread: threading.Thread | None = None
         # T-060 mirror: per-task failure counter so the daemon stops
         # reclaiming stages for a task whose handler keeps failing.
         self._failed_tasks: dict[str, int] = {}
@@ -978,19 +980,28 @@ class SseDaemon:
                 "RELAY_BASE_URL": self.client.base_url,
                 "RELAY_TOKEN_FILE": str(TOKEN_PATH),
             }
-            result = run_handler(
-                cap.get("handler", ""),
-                stage,
-                context=context,
-                # T-154/T-163: a long_run capability must not be killed by
-                # the short per-stage timeout (default 300s). The relay's
-                # Long-Run lease keeps the stage `accepted` for up to 2h as
-                # long as progress notes keep arriving, so the handler
-                # process gets the same 2h budget. Without this, a big
-                # archive/extract is killed mid-run and the stage is
-                # re-claimed to start over.
-                timeout=_handler_timeout(cap),
-            )
+            if cap.get("bridge"):
+                # T-003: a bridge capability forwards to the provider
+                # (POST /v1/exec/<name>) instead of running a local
+                # handler. Terminal errors return an error envelope
+                # (completed below); retryable errors raise
+                # BridgeRetryableError → generic failure path → the
+                # claim expires and the relay requeues.
+                result = bridge.execute_bridge_task(self.client, cap, stage)
+            else:
+                result = run_handler(
+                    cap.get("handler", ""),
+                    stage,
+                    context=context,
+                    # T-154/T-163: a long_run capability must not be killed by
+                    # the short per-stage timeout (default 300s). The relay's
+                    # Long-Run lease keeps the stage `accepted` for up to 2h as
+                    # long as progress notes keep arriving, so the handler
+                    # process gets the same 2h budget. Without this, a big
+                    # archive/extract is killed mid-run and the stage is
+                    # re-claimed to start over.
+                    timeout=_handler_timeout(cap),
+                )
             try:
                 self.client.complete(str(task_id), str(stage_id), result)
                 with self._lock:
@@ -1105,6 +1116,10 @@ class SseDaemon:
             log.exception("startup status write failed")
         self._start_heartbeat_thread()
         self._start_probe_thread()
+        # T-003: bridge manifest poller — its own thread next to the
+        # heartbeat (pull model, SPEC §4); idles cheaply when the node
+        # has no ``bridge:`` config.
+        self._bridge_thread = bridge.start_poller(self._stop_event)
         # T-166 (F1): ephemeral file serve inside the daemon — the CLI
         # process dies after the stdout envelope, the serve endpoint must
         # survive. Bind errors (port in use) = WARNING, the node keeps
@@ -1141,6 +1156,10 @@ class SseDaemon:
             # so a mid-sweep claim does not outlive the shutdown log line.
             if self._backfill_thread and self._backfill_thread.is_alive():
                 self._backfill_thread.join(timeout=5)
+            # T-003: the bridge poller exits with the stop event; join it
+            # so no manifest poll outlives the shutdown log line.
+            if self._bridge_thread and self._bridge_thread.is_alive():
+                self._bridge_thread.join(timeout=5)
             try:
                 self._write_status()
             except Exception:
@@ -1254,9 +1273,15 @@ def main(argv: list[str] | None = None) -> int:
         return poll_daemon._daemon_status(
             argparse.Namespace(log_level=args.log_level)
         )
+    # T-011 blank start: without a relay configuration the daemon idles
+    # (no crash, no relay traffic) until the node is registered — the
+    # idle loop re-checks on config-file appearance and on SIGHUP
+    # (`iowap-cli reload`). SIGTERM/SIGINT end the idle cleanly.
+    ready = wait_for_relay_config(poll_seconds=2.0)
+    if ready is None:
+        return 0
+    meta, cfg = ready
     try:
-        meta = load_meta()
-        cfg = _effective_config()
         client = RelayClient(meta, cfg)
     except SystemExit as exc:
         print(exc, file=sys.stderr)

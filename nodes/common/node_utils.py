@@ -14,9 +14,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("node-utils")
 
@@ -182,6 +184,126 @@ def save_meta(meta: dict):
     # Migrate: remove legacy file after successful write
     if LEGACY_META_PATH.exists() and LEGACY_META_PATH != META_PATH:
         LEGACY_META_PATH.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# T-011: blank-start idle — wait for the relay configuration to appear
+# ---------------------------------------------------------------------------
+
+
+def relay_config_ready() -> tuple[dict, dict] | None:
+    """Return ``(meta, cfg)`` when the node could talk to a relay.
+
+    Ready means: a state file (``iowap-agent.json``) exists AND a runtime
+    token exists AND an EXPLICIT base_url is set (env ``RELAY_BASE_URL``,
+    ``relay_config.json`` or the state file). mDNS discovery is
+    deliberately NOT consulted — a blank-started node must not send any
+    network traffic (T-011).
+    """
+    try:
+        meta = load_meta()
+    except FileNotFoundError:
+        return None
+    cfg = load_config()
+    base_url = (
+        os.environ.get("RELAY_BASE_URL")
+        or cfg.get("base_url")
+        or meta.get("base_url")
+    )
+    token = load_token()
+    if not base_url or not token or not token.get("token"):
+        return None
+    return meta, cfg
+
+
+def _write_blank_start_status() -> None:
+    """One idle snapshot into worker_status.json (never raises)."""
+    try:
+        write_json_atomic(
+            STATUS_PATH,
+            {
+                "pid": os.getpid(),
+                "started_at": _utcnow_str(),
+                "last_heartbeat": _utcnow_str(),
+                "heartbeat_status": "idle",
+                "capabilities": [],
+                "in_flight": {},
+                "blank_start": True,
+                "error": "blank start: waiting for relay configuration "
+                "(register the node or run `iowap-cli reload`)",
+            },
+        )
+    except OSError as exc:
+        logger.warning("could not write blank-start status: %s", exc)
+
+
+def wait_for_relay_config(
+    *,
+    poll_seconds: float = 2.0,
+    wake: threading.Event | None = None,
+    stop_event: threading.Event | None = None,
+) -> tuple[dict, dict] | None:
+    """Blank-start idle loop (T-011): block until the relay config exists.
+
+    Polls :func:`relay_config_ready` every ``poll_seconds``; a SIGHUP (or
+    the ``wake`` event — ``iowap-cli reload``) triggers an immediate
+    re-check; ``stop_event`` (SIGTERM/SIGINT) ends the wait with
+    ``None``. The idle snapshot is written once at idle start. Signal
+    handlers are installed ONLY in the main thread and restored on
+    return — the daemon's own handlers take over afterwards.
+    """
+    ready = relay_config_ready()
+    if ready is not None:
+        return ready
+    logger.info(
+        "blank start: no relay configuration found — idling until the "
+        "node is registered (config files, SIGHUP or `iowap-cli reload`)"
+    )
+    _write_blank_start_status()
+    wake = wake or threading.Event()
+    stop = stop_event or threading.Event()
+
+    installed: list[tuple[int, Any]] = []
+    if threading.current_thread() is threading.main_thread():
+        previous = {}
+        for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
+            try:
+                previous[sig] = signal.getsignal(sig)
+            except (ValueError, OSError, AttributeError):
+                previous = {}
+                break
+        if previous:
+
+            def _on_wake(*_: Any) -> None:
+                wake.set()
+
+            def _on_stop(*_: Any) -> None:
+                stop.set()
+                wake.set()
+
+            try:
+                signal.signal(signal.SIGHUP, _on_wake)
+                signal.signal(signal.SIGTERM, _on_stop)
+                signal.signal(signal.SIGINT, _on_stop)
+                installed = list(previous.items())
+            except (ValueError, OSError):
+                installed = []
+
+    try:
+        while not stop.is_set():
+            wake.wait(poll_seconds)
+            wake.clear()
+            ready = relay_config_ready()
+            if ready is not None:
+                logger.info("blank start: relay configuration detected — starting up")
+                return ready
+        return None
+    finally:
+        for sig, handler in installed:
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
 
 
 # ---------------------------------------------------------------------------
