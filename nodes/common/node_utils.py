@@ -237,12 +237,30 @@ def _write_blank_start_status() -> None:
         logger.warning("could not write blank-start status: %s", exc)
 
 
+def _start_node_ui() -> Any:
+    """Start the node UI server (best-effort — never breaks the idle loop).
+
+    Returns the server (or ``None``). T-021: uses ``start_dashboard`` (the
+    server also serves the dashboard once the node is configured) and
+    keeps the handle in ``onboarding._active_server`` so the transition
+    from blank to configured needs no server restart.
+    """
+    try:
+        from nodes.common import onboarding
+
+        return onboarding.start_dashboard()
+    except Exception as exc:  # noqa: BLE001 — UI must never break the idle
+        logger.warning("node UI could not start: %s", exc)
+        return None
+
+
 def wait_for_relay_config(
     *,
     poll_seconds: float = 2.0,
     wake: threading.Event | None = None,
     stop_event: threading.Event | None = None,
     serve_onboarding: bool = False,
+    serve_dashboard: bool = False,
 ) -> tuple[dict, dict] | None:
     """Blank-start idle loop (T-011): block until the relay config exists.
 
@@ -253,29 +271,30 @@ def wait_for_relay_config(
     handlers are installed ONLY in the main thread and restored on
     return — the daemon's own handlers take over afterwards.
 
-    With ``serve_onboarding=True`` (T-017, daemons only) the blank state
-    additionally serves the node-side onboarding UI on port 7783
-    (:mod:`nodes.common.onboarding`); it is stopped as soon as the
-    configuration appears or the wait ends.
+    With ``serve_dashboard=True`` (daemons only; ``serve_onboarding`` is
+    the T-017 alias) the node UI serves on port 7783 for the WHOLE wait
+    AND beyond it: since T-021 the same server renders the dashboard once
+    the configuration appears, so it keeps running after this function
+    returns (use :func:`nodes.common.onboarding._active_server` /
+    ``shutdown`` to stop it). Only a wait that ends WITHOUT a
+    configuration (stop_event) tears the server down.
     """
     ready = relay_config_ready()
     if ready is not None:
+        if serve_dashboard or serve_onboarding:
+            _start_node_ui()
         return ready
     logger.info(
         "blank start: no relay configuration found — idling until the "
         "node is registered (config files, SIGHUP or `iowap-cli reload`)"
     )
     _write_blank_start_status()
-    # T-017: while blank, serve the node-side onboarding UI (port 7783).
+    # T-017/T-021: serve the node UI (form while blank, dashboard after the
+    # configuration appears — state-based rendering, same server).
     # Local import — onboarding imports this module.
     onboarding_server = None
-    if serve_onboarding:
-        try:
-            from nodes.common import onboarding
-
-            onboarding_server = onboarding.start_if_blank()
-        except Exception as exc:  # noqa: BLE001 — UI must never break the idle
-            logger.warning("onboarding UI could not start: %s", exc)
+    if serve_dashboard or serve_onboarding:
+        onboarding_server = _start_node_ui()
     wake = wake or threading.Event()
     stop = stop_event or threading.Event()
 
@@ -305,6 +324,7 @@ def wait_for_relay_config(
             except (ValueError, OSError):
                 installed = []
 
+    found: tuple[dict, dict] | None = None
     try:
         while not stop.is_set():
             wake.wait(poll_seconds)
@@ -312,6 +332,7 @@ def wait_for_relay_config(
             ready = relay_config_ready()
             if ready is not None:
                 logger.info("blank start: relay configuration detected — starting up")
+                found = ready
                 return ready
         return None
     finally:
@@ -320,7 +341,10 @@ def wait_for_relay_config(
                 signal.signal(sig, handler)
             except (ValueError, OSError):
                 pass
-        if onboarding_server is not None:
+        if onboarding_server is not None and found is None:
+            # T-021: a wait that found the configuration keeps the UI server
+            # alive (it IS the dashboard now); only a stopped wait tears it
+            # down.
             try:
                 from nodes.common import onboarding
 

@@ -1279,7 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
     # (`iowap-cli reload`). SIGTERM/SIGINT end the idle cleanly.
     # T-017: while blank, the idle loop serves the node-side onboarding
     # UI (port 7783) so registration happens in the container itself.
-    ready = wait_for_relay_config(poll_seconds=2.0, serve_onboarding=True)
+    ready = wait_for_relay_config(poll_seconds=2.0, serve_dashboard=True)
     if ready is None:
         return 0
     meta, cfg = ready

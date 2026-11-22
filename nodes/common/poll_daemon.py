@@ -629,7 +629,7 @@ def _daemon_foreground(args: argparse.Namespace) -> int:
     _setup_logging(os.environ.get("RELAY_LOG_LEVEL"))
     # T-011 blank start: idle until a relay configuration exists.
     # T-017: while blank, serve the node-side onboarding UI (port 7783).
-    ready = wait_for_relay_config(poll_seconds=2.0, serve_onboarding=True)
+    ready = wait_for_relay_config(poll_seconds=2.0, serve_dashboard=True)
     if ready is None:
         return 0
     meta, cfg = ready
@@ -677,7 +677,7 @@ def _daemon_internal() -> int:
     # T-011 blank start: idle until a relay configuration exists (no
     # crash, no relay traffic; SIGHUP re-checks immediately).
     # T-017: while blank, serve the node-side onboarding UI (port 7783).
-    ready = wait_for_relay_config(poll_seconds=2.0, serve_onboarding=True)
+    ready = wait_for_relay_config(poll_seconds=2.0, serve_dashboard=True)
     if ready is None:
         return 0
     meta, cfg = ready
