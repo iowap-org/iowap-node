@@ -192,7 +192,15 @@ def configure_node(name: str, relay: str) -> dict[str, Any]:
         return {"ok": False, "http_status": 400, "error": "node name is required"}
     if not relay:
         return {"ok": False, "http_status": 400, "error": "relay URL is required"}
-    base_url = normalize_base_url(relay)
+    try:
+        base_url = normalize_base_url(relay)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "http_status": 400,
+            "node_name": name,
+            "error": f"{exc} — submitted relay value: {relay!r}",
+        }
     _write_relay_config(base_url)
     _update_node_yaml(name)
     result = register_node(base_url, name=name, force=True, timeout=15.0)

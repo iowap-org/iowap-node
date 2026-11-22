@@ -26,14 +26,40 @@ def normalize_base_url(server: str) -> str:
 
     ``192.0.2.60`` → ``http://192.0.2.60:8788``; a ``host:port`` keeps
     its port; a full URL is kept as-is (trailing slash stripped).
+
+    Raises ``ValueError`` with a friendly message when the result does not
+    parse as a usable URL — e.g. an empty host (``http://:8788``) or a host
+    label that would hit httpx's IDNA codec ("label empty or too long",
+    T-016c: trailing/double dots). Never returns an unparseable URL.
     """
     server = server.strip().rstrip("/")
     if server.startswith(("http://", "https://")):
-        return server
-    host, sep, port = server.rpartition(":")
-    if sep and port.isdigit():
-        return f"http://{host}:{port}"
-    return f"http://{server}:{DEFAULT_PORT}"
+        url = server
+    else:
+        host, sep, port = server.rpartition(":")
+        if sep and port.isdigit():
+            host = host.strip().rstrip(".")  # trailing/double dots → empty idna label
+            url = f"http://{host}:{port}"
+        else:
+            host = server.strip().rstrip(".")
+            url = f"http://{host}:{DEFAULT_PORT}"
+    try:
+        import httpx as _httpx
+
+        parsed = _httpx.URL(url)
+    except Exception as exc:  # noqa: BLE001 — surface as friendly ValueError
+        raise ValueError(f"relay URL is not usable: {url!r} ({exc})") from None
+    parsed_host = parsed.host or ""
+    if not parsed_host or parsed_host != parsed_host.rstrip(".") or ".." in parsed_host:
+        # Empty/short labels crash httpx < 0.28 with a raw
+        # "encoding with 'idna' codec failed (UnicodeError: label empty or
+        # too long)" (T-016c, Windows VM finding) — reject with a friendly
+        # message instead.
+        raise ValueError(
+            f"relay URL host looks invalid: {url!r} "
+            f"(trailing/double dots or missing host are not usable)"
+        )
+    return url
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +123,18 @@ def register_node(
             "node_name": node_name,
         }
     except Exception as exc:  # noqa: BLE001
+        import logging
+        import traceback
+
+        logging.getLogger(__name__).error(
+            "node register failed against %s: %s\n%s",
+            base_url,
+            exc,
+            traceback.format_exc(),
+        )
         return {
             "ok": False,
-            "error": f"registration failed: {exc}",
+            "error": f"registration failed: {exc!r}",
             "base_url": base_url,
             "node_name": node_name,
         }
