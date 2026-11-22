@@ -37,60 +37,86 @@ def normalize_base_url(server: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# node register (T-178)
+# node register (T-178; in-process reuse for the T-017 onboarding UI)
 # ---------------------------------------------------------------------------
 
 
-def _cmd_node_register(args) -> int:
-    """node-cli node register <server> — register this node and persist state.
+def register_node(
+    server: str,
+    *,
+    name: str | None = None,
+    force: bool = False,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Register this node on a relay and persist state — in-process.
 
+    Single source of truth for registration: ``iowap-cli node register``
+    (T-178) and the T-017 onboarding UI (POST /configure) both call this.
     Chicken-and-egg-free: runs without meta/token files and creates them.
-    Never writes anything on failure.
+    Never writes anything on failure and never raises; returns a result
+    dict with ``ok``, ``error`` (on failure) and, on success, ``node_id``,
+    ``node_name``, ``base_url``, ``status``, ``expires_at`` and
+    ``registration_secret``.
     """
     import socket
 
-    base_url = normalize_base_url(args.server)
-    name = args.name or socket.gethostname()
+    base_url = normalize_base_url(server)
+    node_name = name or socket.gethostname()
 
     # Guard: refuse to clobber an existing node identity unless --force.
     meta_path = node_utils.META_PATH
-    if meta_path.exists() and not args.force:
-        print(
-            f"node state already exists at {meta_path} "
-            f"(node already registered?). Use --force to re-register.",
-            file=sys.stderr,
-        )
-        return 1
+    if meta_path.exists() and not force:
+        return {
+            "ok": False,
+            "error": (
+                f"node state already exists at {meta_path} "
+                f"(node already registered?). Use --force to re-register."
+            ),
+            "base_url": base_url,
+            "node_name": node_name,
+        }
 
     body = {
-        "node_name": name,
+        "node_name": node_name,
         "endpoint": None,
         "role": "node",
         "capabilities": [],
     }
     try:
-        resp = httpx.post(f"{base_url}{REGISTER_PATH}", json=body, timeout=args.timeout)
+        resp = httpx.post(f"{base_url}{REGISTER_PATH}", json=body, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
     except httpx.HTTPStatusError as exc:
-        print(
-            f"registration failed: HTTP {exc.response.status_code}: {exc.response.text[:200]}",
-            file=sys.stderr,
-        )
-        return 1
+        return {
+            "ok": False,
+            "error": (
+                f"registration failed: HTTP {exc.response.status_code}: "
+                f"{exc.response.text[:200]}"
+            ),
+            "base_url": base_url,
+            "node_name": node_name,
+        }
     except Exception as exc:  # noqa: BLE001
-        print(f"registration failed: {exc}", file=sys.stderr)
-        return 1
+        return {
+            "ok": False,
+            "error": f"registration failed: {exc}",
+            "base_url": base_url,
+            "node_name": node_name,
+        }
 
     node_id = data.get("node_id")
     token = data.get("token")
     if not node_id or not token:
-        print(f"unexpected registration response: {json.dumps(data)[:200]}", file=sys.stderr)
-        return 1
+        return {
+            "ok": False,
+            "error": f"unexpected registration response: {json.dumps(data)[:200]}",
+            "base_url": base_url,
+            "node_name": node_name,
+        }
 
     meta = {
         "node_id": node_id,
-        "node_name": name,
+        "node_name": node_name,
         "endpoint": None,
         "registration_secret": data.get("registration_secret"),
         "capabilities": [],
@@ -99,15 +125,48 @@ def _cmd_node_register(args) -> int:
     save_meta(meta)
     save_token(token, data.get("expires_at"))
 
+    return {
+        "ok": True,
+        "node_id": node_id,
+        "node_name": node_name,
+        "base_url": base_url,
+        "status": data.get("status", "pending"),
+        "expires_at": data.get("expires_at"),
+        "registration_secret": data.get("registration_secret"),
+    }
+
+
+def _cmd_node_register(args) -> int:
+    """node-cli node register <server> — register this node and persist state."""
+    result = register_node(
+        args.server, name=args.name, force=args.force, timeout=args.timeout
+    )
+    if not result.get("ok"):
+        print(result.get("error") or "registration failed", file=sys.stderr)
+        return 1
+
+    node_id = result["node_id"]
+    name = result["node_name"]
+    base_url = result["base_url"]
+
     if args.json:
-        print(json.dumps({"ok": True, **meta, "status": data.get("status", "pending")}, default=str))
+        print(json.dumps({
+            "ok": True,
+            "node_id": node_id,
+            "node_name": name,
+            "endpoint": None,
+            "registration_secret": result.get("registration_secret"),
+            "capabilities": [],
+            "base_url": base_url,
+            "status": result.get("status", "pending"),
+        }, default=str))
         return 0
 
     print(f"✅ Node registered: {name} (ID={node_id})")
     print(f"   Server:  {base_url}")
-    print(f"   Status:  {data.get('status', 'pending')}")
-    if data.get("expires_at"):
-        print(f"   Token:   temporary tp_-token, expires {data['expires_at']}")
+    print(f"   Status:  {result.get('status', 'pending')}")
+    if result.get("expires_at"):
+        print(f"   Token:   temporary tp_-token, expires {result['expires_at']}")
     print()
     print("   ⏳ Node is pending — an admin must approve it (dashboard or admin API)")
     print("      before it can claim work.")

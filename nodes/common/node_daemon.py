@@ -1277,7 +1277,9 @@ def main(argv: list[str] | None = None) -> int:
     # (no crash, no relay traffic) until the node is registered — the
     # idle loop re-checks on config-file appearance and on SIGHUP
     # (`iowap-cli reload`). SIGTERM/SIGINT end the idle cleanly.
-    ready = wait_for_relay_config(poll_seconds=2.0)
+    # T-017: while blank, the idle loop serves the node-side onboarding
+    # UI (port 7783) so registration happens in the container itself.
+    ready = wait_for_relay_config(poll_seconds=2.0, serve_onboarding=True)
     if ready is None:
         return 0
     meta, cfg = ready

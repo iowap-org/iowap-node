@@ -242,6 +242,7 @@ def wait_for_relay_config(
     poll_seconds: float = 2.0,
     wake: threading.Event | None = None,
     stop_event: threading.Event | None = None,
+    serve_onboarding: bool = False,
 ) -> tuple[dict, dict] | None:
     """Blank-start idle loop (T-011): block until the relay config exists.
 
@@ -251,6 +252,11 @@ def wait_for_relay_config(
     ``None``. The idle snapshot is written once at idle start. Signal
     handlers are installed ONLY in the main thread and restored on
     return — the daemon's own handlers take over afterwards.
+
+    With ``serve_onboarding=True`` (T-017, daemons only) the blank state
+    additionally serves the node-side onboarding UI on port 7783
+    (:mod:`nodes.common.onboarding`); it is stopped as soon as the
+    configuration appears or the wait ends.
     """
     ready = relay_config_ready()
     if ready is not None:
@@ -260,6 +266,16 @@ def wait_for_relay_config(
         "node is registered (config files, SIGHUP or `iowap-cli reload`)"
     )
     _write_blank_start_status()
+    # T-017: while blank, serve the node-side onboarding UI (port 7783).
+    # Local import — onboarding imports this module.
+    onboarding_server = None
+    if serve_onboarding:
+        try:
+            from nodes.common import onboarding
+
+            onboarding_server = onboarding.start_if_blank()
+        except Exception as exc:  # noqa: BLE001 — UI must never break the idle
+            logger.warning("onboarding UI could not start: %s", exc)
     wake = wake or threading.Event()
     stop = stop_event or threading.Event()
 
@@ -303,6 +319,13 @@ def wait_for_relay_config(
             try:
                 signal.signal(sig, handler)
             except (ValueError, OSError):
+                pass
+        if onboarding_server is not None:
+            try:
+                from nodes.common import onboarding
+
+                onboarding.shutdown(onboarding_server)
+            except Exception:  # noqa: BLE001 — best-effort teardown
                 pass
 
 
