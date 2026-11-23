@@ -145,6 +145,29 @@ forward_slots:
 Docs: live on your relay at `/relay/v2/docs/concepts/forward-routing` —
 [concepts/forward-routing.md](https://github.com/iowap-org/iowap-docs/blob/main/concepts/forward-routing.md).
 
+## Bridge workspace channel (`daemon.json`, T-026)
+
+In a universal-node setup the host-side bridge daemon and the node share a
+workspace volume. Two channels run over it:
+
+* **Node → daemon:** `<workspace>/bridge/providers.yaml` — capability
+  definitions (written by the node dashboard, watched by the daemon, T-022).
+* **Daemon → node:** `<workspace>/bridge/daemon.json` —
+  `{"url": "http://host.docker.internal:7780", "token": "<bridge token>"}`,
+  written by the daemon after every successful bootstrap. The node's
+  watcher (10 s poll) adopts `url` + `token` into the `bridge:` block of
+  the active node.yaml — ONLY those two fields, everything else stays
+  untouched — and SIGHUPs the daemon pid files so the change is picked up
+  live. This repairs containers that were re-created by hand (`docker
+  compose up` without the token envs): the daemon starts existing
+  containers as-is, so the shared file is the only channel that survives
+  every recreate.
+
+**Precedence: `daemon.json` wins.** While the file exists, a
+hand-configured `bridge.url`/`bridge.token` in node.yaml is overwritten by
+the next poll (every takeover is logged). To configure the bridge by hand,
+delete `<workspace>/bridge/daemon.json` first — a missing file is a no-op.
+
 ## Docker
 
 A base Docker image is available for containerized nodes:

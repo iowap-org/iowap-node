@@ -61,7 +61,7 @@ from typing import Any
 
 import httpx
 
-from nodes.common import bridge, file_serve, poll_daemon
+from nodes.common import bridge, daemon_channel, file_serve, poll_daemon
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     capability_cost,
@@ -310,6 +310,8 @@ class SseDaemon:
         self.last_heartbeat_status = "unknown"
         # T-003: the bridge manifest poller thread (started by run()).
         self._bridge_thread: threading.Thread | None = None
+        # T-026: the daemon.json watcher thread (started by run()).
+        self._daemon_channel_thread: threading.Thread | None = None
         # T-060 mirror: per-task failure counter so the daemon stops
         # reclaiming stages for a task whose handler keeps failing.
         self._failed_tasks: dict[str, int] = {}
@@ -1120,6 +1122,10 @@ class SseDaemon:
         # heartbeat (pull model, SPEC §4); idles cheaply when the node
         # has no ``bridge:`` config.
         self._bridge_thread = bridge.start_poller(self._stop_event)
+        # T-026: adopt <workspace>/bridge/daemon.json (the daemon's reverse
+        # workspace channel) into the node.yaml bridge block — own thread,
+        # next to the bridge poller; no-op while the channel file is absent.
+        self._daemon_channel_thread = daemon_channel.start_watcher(self._stop_event)
         # T-166 (F1): ephemeral file serve inside the daemon — the CLI
         # process dies after the stdout envelope, the serve endpoint must
         # survive. Bind errors (port in use) = WARNING, the node keeps
@@ -1160,6 +1166,9 @@ class SseDaemon:
             # so no manifest poll outlives the shutdown log line.
             if self._bridge_thread and self._bridge_thread.is_alive():
                 self._bridge_thread.join(timeout=5)
+            # T-026: the daemon.json watcher exits with the stop event.
+            if self._daemon_channel_thread and self._daemon_channel_thread.is_alive():
+                self._daemon_channel_thread.join(timeout=5)
             try:
                 self._write_status()
             except Exception:

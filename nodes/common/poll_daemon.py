@@ -33,7 +33,7 @@ from typing import Any
 
 import httpx
 
-from nodes.common import bridge, file_serve
+from nodes.common import bridge, daemon_channel, file_serve
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     BASE_DIR,
@@ -108,6 +108,8 @@ class Daemon:
         self._started_at = datetime.now(UTC)
         # T-003: the bridge manifest poller thread (started by run()).
         self._bridge_thread: threading.Thread | None = None
+        # T-026: the daemon.json watcher thread (started by run()).
+        self._daemon_channel_thread: threading.Thread | None = None
         # T-060: per-task failure counter so the daemon stops reclaiming
         # stages for a task whose handler keeps failing (exit 0 with an
         # ``error`` result or an exception). Mirrors the server-side
@@ -468,6 +470,10 @@ class Daemon:
         self._start_probe_thread()
         # T-003: bridge manifest poller — own thread, pull model (SPEC §4).
         self._bridge_thread = bridge.start_poller(self._stop_event)
+        # T-026: adopt <workspace>/bridge/daemon.json (the daemon's reverse
+        # workspace channel) into the node.yaml bridge block — mirrors the
+        # wiring in node_daemon.py (SSE daemon).
+        self._daemon_channel_thread = daemon_channel.start_watcher(self._stop_event)
         # T-166 (F1): ephemeral file serve inside the daemon — the CLI
         # process dies after the stdout envelope, the serve endpoint must
         # survive. Mirrors the wiring from node_daemon.py (SSE daemon);
@@ -497,6 +503,9 @@ class Daemon:
             # T-003: the bridge poller exits with the stop event.
             if self._bridge_thread and self._bridge_thread.is_alive():
                 self._bridge_thread.join(timeout=5)
+            # T-026: the daemon.json watcher exits with the stop event.
+            if self._daemon_channel_thread and self._daemon_channel_thread.is_alive():
+                self._daemon_channel_thread.join(timeout=5)
             try:
                 self._write_status()
             except Exception:
