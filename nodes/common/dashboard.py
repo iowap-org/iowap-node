@@ -361,9 +361,17 @@ def rotate_bearer(supervisor: "McpSupervisor | None" = None) -> tuple[str, bool]
     bearer = generate_bearer()
     write_bearer(bearer)
     restarted = False
-    if supervisor is not None and supervisor.is_running():
-        supervisor.restart()
-        restarted = True
+    if supervisor is not None:
+        if supervisor.is_running():
+            supervisor.restart()
+            restarted = True
+        else:
+            # T-016d: rotate on a stopped process = rotate + start — otherwise
+            # a fresh bearer is written but the endpoint stays dead.
+            ok, msg = supervisor.start()
+            restarted = ok
+            if not ok:
+                logger.warning("rotate_bearer: start after rotate failed: %s", msg)
     return bearer, restarted
 
 
@@ -432,6 +440,25 @@ class McpSupervisor:
         pid = self._read_pid()
         return pid is not None and node_utils.pid_running(pid)
 
+    def _child_env(self) -> dict:
+        """Child environment with the bearer injected (T-016d).
+
+        The dashboard writes the bearer to :func:`mcp_bearer_path`, but a
+        container recreated via plain ``docker compose up`` carries no
+        ``IOWAP_MCP_BEARER`` env — without this injection the spawned
+        ``iowap-mcp`` hit its fail-closed guard and exited immediately
+        (curl 52 on the published port). Env wins over the file.
+        """
+        env = dict(os.environ)
+        if not env.get("IOWAP_MCP_BEARER", "").strip():
+            try:
+                value = self.bearer_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                value = ""
+            if value:
+                env["IOWAP_MCP_BEARER"] = value
+        return env
+
     def start(self) -> tuple[bool, str]:
         """Spawn the MCP process (no-op when already running)."""
         if self.is_running():
@@ -445,7 +472,8 @@ class McpSupervisor:
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
                 with self.log_path.open("ab") as log:
                     self._proc = subprocess.Popen(
-                        argv, stdout=log, stderr=subprocess.STDOUT
+                        argv, stdout=log, stderr=subprocess.STDOUT,
+                        env=self._child_env(),
                     )
         except OSError as exc:
             logger.warning("MCP start failed: %s", exc)

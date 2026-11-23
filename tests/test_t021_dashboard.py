@@ -61,6 +61,13 @@ def dash_env(tmp_path, monkeypatch):
         monkeypatch.setattr(node_utils, name, tmp_path / f"{name.lower()}.json")
     monkeypatch.setattr(node_config, "ACTIVE_PATH", tmp_path / "node.yaml")
     monkeypatch.setattr(node_config, "BASE_DIR", tmp_path / "relay")
+    # T-016d: isolate the dashboard's MCP paths too — unpinned, the suite
+    # wrote the REAL ~/.relay/mcp_bearer on hosts with an existing ~/.relay
+    # (rotated tokens leaked into the node's home) and current_bearer()'s
+    # file-wins rule broke the T-017 render assertions.
+    monkeypatch.setattr(dashboard, "mcp_bearer_path", lambda: tmp_path / "mcp_bearer")
+    monkeypatch.setattr(dashboard, "mcp_pid_path", lambda: tmp_path / "mcp.pid")
+    monkeypatch.setattr(dashboard, "mcp_log_path", lambda: tmp_path / "mcp.log")
     monkeypatch.setenv("IOWAP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.delenv("RELAY_BASE_URL", raising=False)
     monkeypatch.delenv("IOWAP_MCP_BEARER", raising=False)
@@ -181,11 +188,14 @@ def test_rotate_bearer_writes_file_and_restarts(dash_env):
     assert mode == 0o600
 
 
-def test_rotate_bearer_without_running_process_skips_restart(dash_env):
+def test_rotate_bearer_without_running_process_starts_it(dash_env):
+    # T-016d: rotate on a STOPPED process must start it — the old behavior
+    # (skip restart) left a fresh bearer written while the endpoint stayed
+    # dead (curl 52), exactly the Windows-VM finding.
     fake = FakeSupervisor(running=False)
     _, restarted = dashboard.rotate_bearer(supervisor=fake)
-    assert restarted is False
-    assert fake.restarts == 0
+    assert restarted is True
+    assert fake.started == 1
 
 
 # ---------------------------------------------------------------------------

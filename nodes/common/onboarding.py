@@ -671,7 +671,13 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
                     banner=f"Auto-publish {'enabled' if enabled else 'disabled'} (reload triggered)"
                 )
         elif path == "/mcp/enable":
-            ok, msg = dashboard.build_supervisor().start()
+            sup = dashboard.build_supervisor()
+            # T-016d: enabling with no bearer at all would spawn a child that
+            # exits on its fail-closed guard — provision one first.
+            if not dashboard.current_bearer():
+                dashboard.write_bearer(dashboard.generate_bearer())
+                logger.info("mcp enable: provisioned initial bearer file")
+            ok, msg = sup.start()
             if ok:
                 return 200, _render_dashboard(banner=msg)
             return 500, _render_dashboard(error=msg)
