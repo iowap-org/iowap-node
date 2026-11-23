@@ -50,11 +50,14 @@ def test_child_env_injects_bearer_from_file(sup: dashboard.McpSupervisor, tmp_pa
     assert env["IOWAP_MCP_BEARER"] == "iw_mcp_filetoken"
 
 
-def test_child_env_prefers_env_over_file(sup: dashboard.McpSupervisor, tmp_path, monkeypatch) -> None:
+def test_child_env_file_wins_over_stale_env(sup: dashboard.McpSupervisor, tmp_path, monkeypatch) -> None:
+    # T-016e: after a dashboard rotation the FILE is the new truth — the
+    # container env may still carry the pre-rotation bootstrap token, and a
+    # restart with that stale env token caused invalid_token on every probe.
     sup.bearer_path.write_text("iw_mcp_filetoken", encoding="utf-8")
     monkeypatch.setenv("IOWAP_MCP_BEARER", "iw_mcp_envtoken")
     env = sup._child_env()
-    assert env["IOWAP_MCP_BEARER"] == "iw_mcp_envtoken"
+    assert env["IOWAP_MCP_BEARER"] == "iw_mcp_filetoken"
 
 
 def test_real_spawn_passes_bearer_env(sup: dashboard.McpSupervisor, tmp_path, monkeypatch) -> None:

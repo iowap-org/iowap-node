@@ -451,16 +451,22 @@ class McpSupervisor:
         container recreated via plain ``docker compose up`` carries no
         ``IOWAP_MCP_BEARER`` env — without this injection the spawned
         ``iowap-mcp`` hit its fail-closed guard and exited immediately
-        (curl 52 on the published port). Env wins over the file.
+        (curl 52 on the published port).
+
+        T-016e: the FILE wins over the env. The dashboard always writes the
+        file before start/restart and renders its snippets from the same
+        file — with the old "env wins" rule a rotation on a
+        bootstrap-created container restarted the process with the STALE
+        env token while the UI showed the new file token
+        (``invalid_token`` on every probe).
         """
         env = dict(os.environ)
-        if not env.get("IOWAP_MCP_BEARER", "").strip():
-            try:
-                value = self.bearer_path.read_text(encoding="utf-8").strip()
-            except OSError:
-                value = ""
-            if value:
-                env["IOWAP_MCP_BEARER"] = value
+        try:
+            value = self.bearer_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            value = ""
+        if value:
+            env["IOWAP_MCP_BEARER"] = value
         return env
 
     def start(self) -> tuple[bool, str]:
