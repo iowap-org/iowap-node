@@ -385,10 +385,14 @@ def default_mcp_command(port: int) -> list[str]:
     env_cmd = os.environ.get("IOWAP_MCP_COMMAND", "").strip()
     if env_cmd:
         return shlex.split(env_cmd)
+    # --host 0.0.0.0 (T-016d, same reason the T-020 entrypoint needs it):
+    # the process defaults to container-internal loopback, but the compose
+    # publish 127.0.0.1:7781 -> container eth0 never reaches that bind —
+    # the endpoint would answer curl 52 while looking perfectly alive.
     exe = shutil.which("iowap-mcp")
     if exe:
-        return [exe, "--http", "--port", str(port)]
-    return [sys.executable, "-m", "iowap_client_mcp", "--http", "--port", str(port)]
+        return [exe, "--http", "--host", "0.0.0.0", "--port", str(port)]
+    return [sys.executable, "-m", "iowap_client_mcp", "--http", "--host", "0.0.0.0", "--port", str(port)]
 
 
 class McpSupervisor:
