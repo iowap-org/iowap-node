@@ -188,7 +188,7 @@ def test_get_root_configured_shows_status_and_snippets(onb_env, monkeypatch):
         assert "hermes mcp add iowap" in resp.text
         assert "mcpServers" in resp.text
         assert "[mcp_servers.iowap]" in resp.text
-        assert "curl -H" in resp.text
+        assert "curl -i -X POST" in resp.text
         # configured → the form is gone, POST is refused
         assert 'name="relay"' not in resp.text
         resp_post = _post(srv, {"name": "x", "relay": "http://192.0.2.60:8788"})
@@ -368,9 +368,13 @@ def test_mcp_snippets_exact_formats():
         'url = "http://127.0.0.1:7781/mcp"\n'
         'http_headers = { "Authorization" = "Bearer iw_mcp_secret" }'
     )
-    assert snips["curl"] == (
-        'curl -H "Authorization: Bearer iw_mcp_secret" http://127.0.0.1:7781/mcp'
-    )
+    # T-016f: the probe is the two-step MCP handshake (initialize -> session
+    # id -> further calls with Mcp-Session-Id); a single-shot curl answered
+    # -32600 "Missing session ID" and looked like a server bug.
+    assert "Mcp-Session-Id: <ID aus Schritt 1>" in snips["curl"]
+    assert '"method":"initialize"' in snips["curl"]
+    assert '"method":"tools/list"' in snips["curl"]
+    assert "Bearer iw_mcp_secret" in snips["curl"]
 
 
 def test_mcp_snippets_port_env_override(onb_env, monkeypatch):

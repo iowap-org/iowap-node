@@ -212,7 +212,25 @@ def mcp_snippets(bearer: str, mcp_port: int | None = None) -> dict[str, str]:
             f'url = "{url}"\n'
             f'http_headers = {{ "Authorization" = "Bearer {bearer}" }}'
         ),
-        "curl": f'curl -H "Authorization: Bearer {bearer}" {url}',
+        # T-016f: the streamable-HTTP transport requires the MCP handshake —
+        # initialize first (the response carries an Mcp-Session-Id header),
+        # then further calls WITH that session id. A single-shot curl gets
+        # "-32600 Missing session ID" and looks like a server bug.
+        "curl": (
+            "# 1) Handshake: initialize - die Antwort hat einen Mcp-Session-Id Header\n"
+            "curl -i -X POST " + url + " -H \"Authorization: Bearer " + bearer + "\" "
+            "-H \"Content-Type: application/json\" "
+            "-H \"Accept: application/json, text/event-stream\" "
+            "-d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+            "\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},"
+            "\"clientInfo\":{\"name\":\"probe\",\"version\":\"1.0\"}}}'\n"
+            "# 2) Weitere Calls MIT der Session-ID (z.B. tools/list):\n"
+            "curl -X POST " + url + " -H \"Authorization: Bearer " + bearer + "\" "
+            "-H \"Mcp-Session-Id: <ID aus Schritt 1>\" "
+            "-H \"Content-Type: application/json\" "
+            "-H \"Accept: application/json, text/event-stream\" "
+            "-d '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}'"
+        ),
     }
 
 
