@@ -53,6 +53,7 @@ import html
 import json
 import logging
 import os
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -466,7 +467,7 @@ def _mcp_section(banner_bearer: str | None = None) -> str:
 def _capability_rows(providers: list[dict[str, Any]], bridge_cfg: dict[str, Any] | None) -> str:
     if not providers:
         return (
-            "<tr><td colspan='5' class='note'>No capabilities defined yet — "
+            "<tr><td colspan='6' class='note'>No capabilities defined yet — "
             "add one below (the script lives on this host, the capability "
             "definition goes here).</td></tr>"
         )
@@ -483,11 +484,17 @@ def _capability_rows(providers: list[dict[str, Any]], bridge_cfg: dict[str, Any]
         )
         toggle_action = "unpublish" if published else "publish"
         toggle_label = "Unpublish" if published else "Publish"
+        # T-030: scheduler capacity (defaults 1× / 1 pt)
+        limits = (
+            f"{_esc(entry.get('max_parallel', 1))}&times; / "
+            f"{_esc(entry.get('cost', 1))} pt"
+        )
         rows.append(f"""
 <tr>
   <td class='mono'>{_esc(name)}</td>
   <td><span class='badge accent'>{_esc(ctype)}</span></td>
   <td class='note'>{_esc(summary)}</td>
+  <td class='note'>{limits}</td>
   <td>{badge}</td>
   <td>
     <form class='inline' method='post' action='/caps/{toggle_action}'>
@@ -516,14 +523,16 @@ def _capabilities_section(bridge_cfg: dict[str, Any] | None) -> str:
     return f"""
 <div class='card'>
 <table>
-  <thead><tr><th>Capability</th><th>Type</th><th>Summary</th><th>Status</th>
-  <th>Actions</th></tr></thead>
+  <thead><tr><th>Capability</th><th>Type</th><th>Summary</th><th>Parallel / Cost</th>
+  <th>Status</th><th>Actions</th></tr></thead>
   <tbody>{_capability_rows(providers, bridge_cfg)}</tbody>
 </table>
 <p class='note'>Definitions live in
 <code>{_esc(dashboard.providers_path())}</code> (the bridge daemon picks
 them up automatically). Publishing adds the capability to
-<code>bridge.allowlist</code> in node.yaml and reloads the daemon.</p>
+<code>bridge.allowlist</code> in node.yaml and reloads the daemon.
+<em>Parallel / Cost</em> feed the relay scheduler (max parallel claims /
+admission points per claim).</p>
 <p style='margin-top:1rem'>Auto-publish (all capabilities while the
 allowlist is empty): {auto_badge} {auto_form}</p>
 </div>
@@ -532,7 +541,7 @@ allowlist is empty): {auto_badge} {auto_form}</p>
 <form method='post' action='/caps/create'>
   <div class='fields'>
     <div><label>Name</label>
-      <input name='name' required pattern='[a-z][a-z0-9_.-]{{1,63}}'
+      <input name='name' id='cap_name' required pattern='[a-z][a-z0-9_.-]{{1,63}}'
              placeholder='script.cleanup'></div>
     <div><label>Type</label>
       <select name='type'>
@@ -547,11 +556,50 @@ allowlist is empty): {auto_badge} {auto_form}</p>
   <h2>process fields</h2>
   <div class='fields'>
     <div><label>Command (argv template)</label>
-      <input name='command' class='mono'
-             placeholder="python C:/scripts/cleanup.py --target {{target}}"></div>
+      <input name='command' id='cap_command' class='mono'
+             placeholder="python C:/scripts/cleanup.py --target {{{{target}}}}"></div>
     <div><label>Artifacts glob (workspace-relative, optional)</label>
       <input name='artifacts_glob' class='mono' placeholder='out/*.png'></div>
   </div>
+  <p class='note' style='margin-top:.5rem'>
+    <input type='file' id='cap_script' accept='{_esc(",".join(dashboard.SCRIPT_EXTENSIONS))}'
+           style='display:none'>
+    <button class='btn' type='button'
+            onclick="document.getElementById('cap_script').click()">Script w&auml;hlen&hellip;</button>
+    <span id='cap_script_status' class='note'></span><br>
+    Datei-Upload nach <code>&lt;workspace&gt;/bridge/scripts/</code> (max.
+    {_esc(dashboard.MAX_SCRIPT_BYTES // (1024 * 1024))} MB; .bat .cmd .ps1 .py .sh .exe).
+    Name + Command werden automatisch vorbelegt und bleiben editierbar —
+    der Daemon f&uuml;hrt Prozesse mit cwd = Workspace aus, relative
+    <code>scripts/...</code>-Pfade funktionieren.
+  </p>
+  <script>
+  (function () {{
+    var input = document.getElementById('cap_script');
+    if (!input) return;
+    input.addEventListener('change', function () {{
+      var file = input.files && input.files[0];
+      var status = document.getElementById('cap_script_status');
+      if (!file) return;
+      status.textContent = 'Lade ' + file.name + ' hoch\\u2026';
+      var reader = new FileReader();
+      reader.onload = function () {{
+        var body = new FormData();
+        body.append('file', file);
+        fetch('/caps/script-upload', {{ method: 'POST', body: body }})
+          .then(function (r) {{ return r.json(); }})
+          .then(function (data) {{
+            if (!data.ok) {{ status.textContent = 'Fehler: ' + data.error; return; }}
+            document.getElementById('cap_name').value = data.name;
+            document.getElementById('cap_command').value = JSON.stringify(data.command);
+            status.textContent = 'Gespeichert als ' + data.stored;
+          }})
+          .catch(function (exc) {{ status.textContent = 'Upload fehlgeschlagen: ' + exc; }});
+      }};
+      reader.readAsArrayBuffer(file);
+    }});
+  }})();
+  </script>
   <h2>http fields</h2>
   <div class='fields'>
     <div><label>Health URL (optional)</label>
@@ -563,18 +611,102 @@ allowlist is empty): {auto_badge} {auto_form}</p>
       </select></div>
     <div><label>URL template</label>
       <input name='url_template' class='mono'
-             placeholder='http://127.0.0.1:9000/api/{{task_id}}/render'></div>
+             placeholder='http://127.0.0.1:9000/api/{{{{task_id}}}}/render'></div>
     <div><label>Body template (optional)</label>
-      <input name='body_template' class='mono' placeholder='{{"file": "{{file}}"}}'></div>
+      <input name='body_template' class='mono' placeholder='{{{{"file": "{{{{file}}}}"}}}}'></div>
     <div><label>Result path (optional dot path)</label>
       <input name='result_path' class='mono' placeholder='result'></div>
     <div><label>Artifact paths (comma-separated dot paths)</label>
       <input name='artifact_paths' class='mono' placeholder='result.output_path'></div>
   </div>
+  <h2>scheduler</h2>
+  <div class='fields'>
+    <div><label>Max parallel (default 1)</label>
+      <input name='max_parallel' type='number' min='1' value='1'></div>
+    <div><label>Cost — admission points (default 1)</label>
+      <input name='cost' type='number' min='0' value='1'></div>
+  </div>
   <div style='margin-top:1.25rem'>
     <button class='btn btn-primary' type='submit'>Create capability</button>
   </div>
 </form>
+</div>"""
+
+
+def _forward_section(panel: dict[str, Any]) -> str:
+    """The Forward-Slots section (T-030) — read-only for non-admin tokens.
+
+    Slots themselves are declared in node.yaml (``forward_slots``, T-053)
+    and transported by the heartbeat; this panel maintains only the
+    (node, slot) → target mappings via the relay's forward-mappings API.
+    A 403 (runtime token without admin role) hides the section behind a
+    quiet note instead of showing a dead editor.
+    """
+    if panel.get("forbidden"):
+        return """
+<div class='card'>
+<p class='note'>Forward-Slots: nur f&uuml;r Admin-Nodes konfigurierbar —
+dieser Node-Token hat keine Admin-Rolle. Slots und Mappings werden im
+Relay-Dashboard gepflegt.</p>
+</div>"""
+    if not panel.get("ok"):
+        err = panel.get("error") or "unbekannter Fehler"
+        return f"""
+<div class='card'>
+<p class='note'>Forward-Slots nicht abrufbar: {_esc(err)}</p>
+</div>"""
+
+    mappings = panel.get("mappings") or {}
+    rows = []
+    for slot in panel.get("slots") or []:
+        if not isinstance(slot, dict):
+            continue
+        sid = str(slot.get("slot", "?"))
+        label = str(slot.get("label") or "")
+        description = str(slot.get("description") or "")
+        slot_type = str(slot.get("slot_type") or "forward")
+        mapping = mappings.get(sid) or {}
+        target = str(mapping.get("target_capability") or "")
+        pin = str(mapping.get("target_node_id") or "")
+        pin_note = f" <span class='badge accent'>pin: {_esc(pin)}</span>" if pin else ""
+        rows.append(f"""
+<tr>
+  <td class='mono'>{_esc(sid)}</td>
+  <td>{_esc(label)}<div class='note'>{_esc(description)}</div></td>
+  <td><span class='badge'>{_esc(slot_type)}</span></td>
+  <td>
+    <form class='inline' method='post' action='/forward/save'
+          style='display:flex;gap:.4rem;flex-wrap:wrap'>
+      <input type='hidden' name='slot' value='{_esc(sid)}'>
+      <input name='target_capability' class='mono' value='{_esc(target)}'
+             placeholder='target_capability' required style='min-width:14rem'>
+      <button class='btn btn-primary' type='submit'>Speichern</button>
+    </form>
+    <form class='inline' method='post' action='/forward/delete'>
+      <input type='hidden' name='slot' value='{_esc(sid)}'>
+      <button class='btn btn-danger' type='submit'>Mapping l&ouml;schen</button>
+    </form>
+  </td>
+  <td>{pin_note}</td>
+</tr>""")
+    if not rows:
+        rows.append(
+            "<tr><td colspan='5' class='note'>Keine Forward-Slots deklariert — "
+            "Slots werden in node.yaml (<code>forward_slots</code>) angelegt "
+            "und per Heartbeat &uuml;bertragen.</td></tr>"
+        )
+    return f"""
+<div class='card'>
+<table>
+  <thead><tr><th>Slot</th><th>Label / Beschreibung</th><th>Typ</th>
+  <th>Ziel (target_capability)</th><th>Pin</th></tr></thead>
+  <tbody>{''.join(rows)}</tbody>
+</table>
+<p class='note'>Nodes mit Admin-Rolle d&uuml;rfen die
+<code>(node, slot) &rarr; target_capability</code>-Mappings direkt hier
+pflegen (PUT/DELETE <code>/relay/v2/forward-mappings/&#123;node&#125;/&#123;slot&#125;</code>).
+Slots selbst werden NICHT hier angelegt — sie kommen aus der
+node.yaml (<code>forward_slots</code>, T-053).</p>
 </div>"""
 
 
@@ -626,6 +758,8 @@ def _render_dashboard(
 </div>
 <h2>Capabilities</h2>
 {_capabilities_section(bridge_cfg)}
+<h2>Forward-Slots</h2>
+{_forward_section(dashboard.fetch_forward_panel())}
 <h2>MCP endpoint</h2>
 {_mcp_section(bearer_override)}
 <p class='note'>If the relay shows the node as <em>pending</em>, an admin
@@ -647,10 +781,48 @@ _DASHBOARD_POST_ROUTES = (
     "/caps/publish",
     "/caps/unpublish",
     "/caps/auto-publish",
+    "/caps/script-upload",
+    "/forward/save",
+    "/forward/delete",
     "/mcp/enable",
     "/mcp/disable",
     "/mcp/bearer/rotate",
 )
+
+# T-030: the script-upload body may carry up to MAX_SCRIPT_BYTES of file
+# content plus multipart overhead — larger than the plain form cap.
+_MAX_UPLOAD_BODY_BYTES = dashboard.MAX_SCRIPT_BYTES + 256 * 1024
+
+
+def _parse_multipart_file(content_type: str, body: bytes) -> tuple[str, bytes] | None:
+    """Extract the first file part ``(filename, content)`` from a multipart body.
+
+    Minimal stdlib parser (the dashboard has no framework): finds the
+    boundary, walks the parts, returns the first part carrying a
+    ``filename`` in its Content-Disposition. ``None`` on any mismatch.
+    """
+    match = re.search(r'boundary="?([^";]+)"?', content_type or "")
+    if not match:
+        return None
+    boundary = ("--" + match.group(1)).encode("utf-8", errors="replace")
+    for part in body.split(boundary):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        head, sep, content = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        disposition = head.decode("utf-8", errors="replace")
+        if "filename=" not in disposition.lower():
+            continue
+        fn = re.search(r'filename="([^"]*)"', disposition, re.IGNORECASE)
+        if fn is None:
+            continue
+        # one trailing CRLF belongs to the part framing, not the content
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        return fn.group(1), content
+    return None
 
 
 def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, bytes]:
@@ -688,6 +860,40 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
                 return 200, _render_dashboard(
                     banner=f"Auto-publish {'enabled' if enabled else 'disabled'} (reload triggered)"
                 )
+        elif path == "/forward/save":
+            slot = (form.get("slot") or [""])[0].strip()
+            target = (form.get("target_capability") or [""])[0].strip()
+            pin = (form.get("target_node_id") or [""])[0].strip()
+            if not slot or not target:
+                return 400, _render_dashboard(
+                    error="forward mapping: slot and target_capability are required"
+                )
+            try:
+                meta = node_utils.load_meta()
+                node_id = meta.get("node_id") or ""
+                client = dashboard.build_forward_client()
+            except Exception as exc:  # noqa: BLE001
+                return 400, _render_dashboard(error=f"forward client: {exc}")
+            ok, msg = dashboard.save_forward_mapping(
+                client, node_id, slot, target, pin or None
+            )
+            if ok:
+                return 200, _render_dashboard(banner=msg)
+            return 400, _render_dashboard(error=msg)
+        elif path == "/forward/delete":
+            slot = (form.get("slot") or [""])[0].strip()
+            if not slot:
+                return 400, _render_dashboard(error="forward delete: slot is required")
+            try:
+                meta = node_utils.load_meta()
+                node_id = meta.get("node_id") or ""
+                client = dashboard.build_forward_client()
+            except Exception as exc:  # noqa: BLE001
+                return 400, _render_dashboard(error=f"forward client: {exc}")
+            ok, msg = dashboard.delete_forward_mapping(client, node_id, slot)
+            if ok:
+                return 200, _render_dashboard(banner=msg)
+            return 400, _render_dashboard(error=msg)
         elif path == "/mcp/enable":
             sup = dashboard.build_supervisor()
             # T-016d: enabling with no bearer at all would spawn a child that
@@ -797,6 +1003,11 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                     "text/plain; charset=utf-8",
                 )
                 return
+            if path == "/caps/script-upload":
+                # T-030: multipart upload — raw body, JSON response
+                # (the browser fetch() fills name/command from it).
+                self._handle_script_upload()
+                return
             form = self._read_form()
             if form is None:
                 return
@@ -804,6 +1015,49 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             self._send(status, body)
             return
         self._send(404, b"not found\n", "text/plain; charset=utf-8")
+
+    def _handle_script_upload(self) -> None:
+        """POST /caps/script-upload — multipart file → <workspace>/bridge/scripts/.
+
+        JSON response (fetched from the capability form): on success
+        ``{"ok", "name", "command", "stored"}`` — the JS prefills the
+        capability name and the command argv (both stay editable).
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            self._send(400, json.dumps({"ok": False, "error": "empty body"}).encode(),
+                       "application/json")
+            return
+        if length > _MAX_UPLOAD_BODY_BYTES:
+            self._send(413, json.dumps({"ok": False, "error": "body too large"}).encode(),
+                       "application/json")
+            return
+        body = self.rfile.read(length)
+        part = _parse_multipart_file(self.headers.get("Content-Type", ""), body)
+        if part is None:
+            self._send(400, json.dumps(
+                {"ok": False, "error": "no multipart file part found"}).encode(),
+                "application/json")
+            return
+        filename, content = part
+        ok, message, stored = dashboard.save_script(filename, content)
+        if not ok:
+            self._send(400, json.dumps({"ok": False, "error": message}).encode(),
+                       "application/json")
+            return
+        self._send(
+            200,
+            json.dumps({
+                "ok": True,
+                "stored": stored,
+                "name": dashboard.slugify_capability_name(stored),
+                "command": dashboard.script_command_argv(stored),
+            }).encode(),
+            "application/json",
+        )
 
 
 # ---------------------------------------------------------------------------

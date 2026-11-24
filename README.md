@@ -142,8 +142,67 @@ forward_slots:
   `forward_slots` block fails `iowap-cli capabilities publish` instead of
   leaving the node silent at the relay.
 
+### Forward-Slots section in the node dashboard (T-030)
+
+The node dashboard (port 7783, section „Forward-Slots" under
+Capabilities) shows the node's declared slots together with their
+`(node, slot) → target_capability` mappings:
+
+* Read side: the dashboard fetches
+  `GET /relay/v2/forward-mappings/slots?node=<own>` and
+  `GET /relay/v2/forward-mappings?node=<own>` with the node token.
+* Admin nodes (admin-role node token, human admin or master) can edit
+  the mapping target per slot inline — saved via
+  `PUT /relay/v2/forward-mappings/{node_id}/{slot}` with
+  `{"target_capability": "…"}` (upsert, optional `target_node_id` pin)
+  — and delete a mapping via `DELETE /relay/v2/forward-mappings/{node_id}/{slot}`.
+* Nodes without the admin role get a quiet note („nur für Admin-Nodes
+  konfigurierbar") instead of a dead editor.
+* Slots themselves are NOT created in the dashboard — they come from the
+  `forward_slots` block in node.yaml and ride the heartbeat (T-053).
+
 Docs: live on your relay at `/relay/v2/docs/concepts/forward-routing` —
 [concepts/forward-routing.md](https://github.com/iowap-org/iowap-docs/blob/main/concepts/forward-routing.md).
+
+## Capability dashboard fields (T-030)
+
+The node dashboard's capability form (Add) writes
+`<workspace>/bridge/providers.yaml`; besides the T-019 fields it carries:
+
+| Field | Meaning | Default |
+|---|---|---|
+| `max_parallel` | max parallel claims the scheduler grants for this capability | 1 |
+| `cost` | admission points charged per claim (T-247) | 1 |
+| `artifacts_glob` | workspace-relative glob of files uploaded as artifacts after a run (e.g. `artifacts/host.sysinfo/*`) | — |
+
+Empty fields mean the defaults; invalid values (non-integer, below the
+minimum) are rejected without writing anything. `max_parallel`/`cost`
+are forwarded from the providers entry into the bridge manifest →
+heartbeat → relay scheduler (they take effect once the bridge daemon
+passes them through the manifest — the Go side currently serves name/
+type/summary/long_run/input_schema).
+
+### Script upload (T-030)
+
+Next to the command field, **„Script wählen…"** opens the native file
+picker (`.bat .cmd .ps1 .py .sh .exe`) and uploads the file to
+`POST /caps/script-upload` (multipart). The dashboard stores it
+atomically under `<workspace>/bridge/scripts/` (2 MB cap, filename
+sanitized, collisions get a numeric suffix like `cleanup.1.py`) and
+prefills the form — capability name (slugified filename) and command
+argv per extension:
+
+| Extension | Default argv |
+|---|---|
+| `.bat` / `.cmd` | `cmd /c scripts\<file>` |
+| `.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\<file>` |
+| `.py` | `python scripts\<file>` |
+| `.sh` | `bash scripts/<file>` |
+| `.exe` | `scripts\<file>` |
+
+Both fields stay editable. Relative `scripts/...` paths work because the
+bridge daemon executes process commands with `cwd = workspace`
+(process.go: `cmd.Dir = workspaceDir`).
 
 ## Bridge workspace channel (`daemon.json`, T-026)
 

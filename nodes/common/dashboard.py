@@ -44,11 +44,14 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
 from nodes.common import node_config, node_utils
+
+if TYPE_CHECKING:
+    from nodes.common.relay_client import RelayClient
 
 logger = logging.getLogger("node-dashboard")
 
@@ -134,6 +137,19 @@ def _validate_provider_fields(fields: dict[str, Any]) -> tuple[dict[str, Any] | 
     if fields.get("long_run") in ("on", "1", "true", True):
         entry["long_run"] = True
 
+    # T-030: scheduler capacity — max_parallel (≥1, default 1) and cost
+    # (admission points, ≥0, default 1). Empty field = default; anything
+    # non-integer / below the minimum is a validation error (nothing is
+    # written — create_provider discards the whole entry on error).
+    max_parallel, mp_err = _parse_capacity(fields.get("max_parallel"), default=1, minimum=1)
+    if mp_err:
+        return None, f"max_parallel: {mp_err}"
+    cost, cost_err = _parse_capacity(fields.get("cost"), default=1, minimum=0)
+    if cost_err:
+        return None, f"cost: {cost_err}"
+    entry["max_parallel"] = max_parallel
+    entry["cost"] = cost
+
     if ctype == "process":
         raw_command = (fields.get("command") or "").strip()
         if not raw_command:
@@ -171,6 +187,25 @@ def _validate_provider_fields(fields: dict[str, Any]) -> tuple[dict[str, Any] | 
     if health:
         entry["health_url"] = health
     return entry, ""
+
+
+def _parse_capacity(value: Any, *, default: int, minimum: int) -> tuple[int, str]:
+    """Parse one capacity form field (T-030) → ``(int, error)``.
+
+    Empty/None → ``(default, "")``. Accepts ints and digit strings;
+    floats, negatives below ``minimum`` and garbage are errors.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default, ""
+    if isinstance(value, bool):
+        return default, "must be an integer"
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default, f"invalid value {value!r} — must be an integer"
+    if parsed < minimum:
+        return default, f"must be ≥ {minimum} (got {parsed})"
+    return parsed, ""
 
 
 def parse_command(raw: str) -> list[str]:
@@ -557,3 +592,259 @@ class McpSupervisor:
 def build_supervisor() -> McpSupervisor:
     """The supervisor for the current container (factory — tests replace it)."""
     return McpSupervisor()
+
+
+# ---------------------------------------------------------------------------
+# Script upload (T-030, Ronny): form picks a file → stored under
+# <workspace>/bridge/scripts/ → the process provider's argv references it
+# workspace-relative (the Go daemon execs with cmd.Dir = workspaceDir,
+# process.go — relative paths resolve).
+# ---------------------------------------------------------------------------
+
+MAX_SCRIPT_BYTES = 2 * 1024 * 1024
+SCRIPT_EXTENSIONS = (".bat", ".cmd", ".ps1", ".py", ".sh", ".exe")
+SCRIPTS_DIRNAME = "scripts"  # under <workspace>/bridge/
+
+
+def scripts_dir(workspace: Path | None = None) -> Path:
+    """``<workspace>/bridge/scripts`` — the upload target directory."""
+    base = workspace if workspace is not None else workspace_dir()
+    return base / "bridge" / SCRIPTS_DIRNAME
+
+
+def sanitize_script_filename(filename: str) -> str:
+    """Basename + safe characters only — no traversal, no hidden files."""
+    name = (filename or "").replace("\\", "/").split("/")[-1].strip()
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).lstrip("._")
+    return name
+
+
+def script_command_argv(filename: str) -> list[str]:
+    """The default argv template for an uploaded script, per extension (T-030).
+
+    Windows extensions use backslashes (cmd/powershell resolve them),
+    ``.sh`` uses the POSIX separator. The path is workspace-relative —
+    the daemon runs every process command with cwd = workspace
+    (iowap-bridge-daemon process.go: ``cmd.Dir = workspaceDir``).
+    """
+    ext = Path(filename).suffix.lower()
+    if ext in (".bat", ".cmd"):
+        return ["cmd", "/c", f"scripts\\{filename}"]
+    if ext == ".ps1":
+        return [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", f"scripts\\{filename}",
+        ]
+    if ext == ".py":
+        return ["python", f"scripts\\{filename}"]
+    if ext == ".sh":
+        return ["bash", f"scripts/{filename}"]
+    # .exe (and anything else the allowlist may grow): direct relative path
+    return [f"scripts\\{filename}"]
+
+
+def slugify_capability_name(filename: str) -> str:
+    """Filename stem → a CAP_NAME_RE-valid capability name (T-030).
+
+    Lowercase, invalid chars → ``-``; a result that would not match
+    ``^[a-z][a-z0-9_.-]{1,63}$`` (empty, digit-first, too long) is
+    prefixed/clamped so the form always gets a valid default.
+    """
+    stem = Path(sanitize_script_filename(filename)).stem
+    slug = re.sub(r"[^a-z0-9_.-]+", "-", stem.lower()).strip("-.")
+    slug = re.sub(r"-{2,}", "-", slug)
+    if not slug or not CAP_NAME_RE.match(slug):
+        slug = f"cap-{slug}" if slug else "cap-script"
+    return slug[:64]
+
+
+def save_script(
+    filename: str,
+    content: bytes,
+    workspace: Path | None = None,
+) -> tuple[bool, str, str]:
+    """Store one uploaded script atomically (T-030) → ``(ok, message, stored_name)``.
+
+    Rules: extension allowlist (:data:`SCRIPT_EXTENSIONS`, case-insensitive),
+    size cap :data:`MAX_SCRIPT_BYTES`, collisions get a numeric suffix
+    (``tool.1.bat``) instead of overwriting. The write is temp+rename, so
+    a concurrent daemon read never sees a partial file.
+    """
+    name = sanitize_script_filename(filename)
+    if not name or "." not in name:
+        return False, "filename missing or has no extension", ""
+    ext = Path(name).suffix.lower()
+    if ext not in SCRIPT_EXTENSIONS:
+        return False, (
+            f"extension {ext!r} not allowed — one of "
+            f"{', '.join(SCRIPT_EXTENSIONS)}"
+        ), ""
+    if len(content) > MAX_SCRIPT_BYTES:
+        return False, (
+            f"script too large ({len(content)} bytes) — cap is "
+            f"{MAX_SCRIPT_BYTES // (1024 * 1024)} MB"
+        ), ""
+    target_dir = scripts_dir(workspace)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stem, suffix = Path(name).stem, Path(name).suffix
+    candidate = target_dir / name
+    counter = 0
+    while candidate.exists():
+        counter += 1
+        candidate = target_dir / f"{stem}.{counter}{suffix}"
+    tmp = candidate.with_suffix(candidate.suffix + ".tmp")
+    tmp.write_bytes(content)
+    tmp.replace(candidate)
+    return True, str(candidate.name), candidate.name
+
+
+# ---------------------------------------------------------------------------
+# Forward-Slots panel (T-030): GET slots + mappings, PUT/DELETE mappings.
+# Slots themselves are declared in node.yaml (T-053/075) and transported
+# by the heartbeat — the dashboard only maintains the (node, slot) →
+# target mappings via the relay's /relay/v2/forward-mappings API.
+# ---------------------------------------------------------------------------
+
+FORWARD_MAPPINGS_PATH = "/relay/v2/forward-mappings"
+
+
+def build_forward_client() -> "RelayClient":
+    """A RelayClient for the current node (meta/config/token from disk).
+
+    Raises (SystemExit from _base_url / registration gaps) when the node
+    has no usable relay address — callers must catch and render a note.
+    """
+    from nodes.common import relay_client
+
+    meta = node_utils.load_meta()
+    cfg = relay_client._effective_config()
+    return relay_client.RelayClient(meta, cfg)  # type: ignore[return-value]
+
+
+def fetch_forward_panel(
+    client: Any = None,
+    *,
+    node_id: str | None = None,
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    """Fetch this node's forward slots + mappings (T-030). Never raises.
+
+    Returns ``{"ok", "forbidden", "error", "node_id", "slots", "mappings"}``
+    where ``mappings`` maps slot → mapping entry. ``forbidden`` is True on
+    403 (the runtime token is not an admin — the UI hides the editor).
+    """
+    panel: dict[str, Any] = {
+        "ok": False,
+        "forbidden": False,
+        "error": None,
+        "node_id": node_id or "",
+        "slots": [],
+        "mappings": {},
+    }
+    try:
+        if client is None:
+            client = build_forward_client()
+        if not node_id:
+            meta = node_utils.load_meta()
+            node_id = meta.get("node_id") or ""
+        panel["node_id"] = node_id
+        if not node_id:
+            panel["error"] = "no node_id in meta"
+            return panel
+
+        r_slots = client._get_with_retry(
+            f"{FORWARD_MAPPINGS_PATH}/slots", params={"node": node_id}, timeout=timeout
+        )
+        if r_slots.status_code == 403:
+            panel["forbidden"] = True
+            return panel
+        if r_slots.status_code != 200:
+            panel["error"] = f"slots request failed (HTTP {r_slots.status_code})"
+            return panel
+        slots = r_slots.json().get("slots", [])
+        panel["slots"] = slots if isinstance(slots, list) else []
+
+        r_maps = client._get_with_retry(
+            FORWARD_MAPPINGS_PATH, params={"node": node_id}, timeout=timeout
+        )
+        if r_maps.status_code == 403:
+            panel["forbidden"] = True
+            return panel
+        if r_maps.status_code == 200:
+            rows = r_maps.json().get("mappings", [])
+            panel["mappings"] = {
+                m.get("slot"): m for m in rows if isinstance(m, dict) and m.get("slot")
+            }
+        else:
+            # slots are readable but mappings are not — still render slots
+            panel["error"] = f"mappings request failed (HTTP {r_maps.status_code})"
+        panel["ok"] = True
+        return panel
+    except Exception as exc:  # noqa: BLE001 — the dashboard must keep rendering
+        logger.warning("forward panel fetch failed: %s", exc)
+        panel["error"] = f"{type(exc).__name__}: {exc}"
+        return panel
+
+
+def save_forward_mapping(
+    client: Any,
+    node_id: str,
+    slot: str,
+    target_capability: str,
+    target_node_id: str | None = None,
+    *,
+    timeout: float = 8.0,
+) -> tuple[bool, str]:
+    """PUT one (node, slot) → target mapping (T-030). Never raises.
+
+    Contract (iowap-server api/v2/forward.py): ``PUT
+    /relay/v2/forward-mappings/{node_id}/{slot}`` with JSON body
+    ``{"target_capability": "…"}`` (upsert — create AND update).
+    """
+    slot = (slot or "").strip()
+    target = (target_capability or "").strip()
+    if not slot or not target:
+        return False, "slot and target_capability are required"
+    path = f"{FORWARD_MAPPINGS_PATH}/{node_id}/{slot}"
+    body: dict[str, Any] = {"target_capability": target}
+    if target_node_id and target_node_id.strip():
+        body["target_node_id"] = target_node_id.strip()
+    try:
+        r = client._put(path, body, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+    if r.status_code == 403:
+        return False, "forbidden — admin role required"
+    if r.status_code in (200, 201):
+        return True, f"mapping for slot {slot} saved"
+    detail = ""
+    try:
+        detail = r.json().get("detail", "")
+    except Exception:  # noqa: BLE001
+        pass
+    return False, f"HTTP {r.status_code}: {detail or 'upsert failed'}"
+
+
+def delete_forward_mapping(
+    client: Any,
+    node_id: str,
+    slot: str,
+    *,
+    timeout: float = 8.0,
+) -> tuple[bool, str]:
+    """DELETE one (node, slot) mapping (T-030). Never raises."""
+    slot = (slot or "").strip()
+    if not slot:
+        return False, "slot is required"
+    path = f"{FORWARD_MAPPINGS_PATH}/{node_id}/{slot}"
+    try:
+        r = client._delete(path, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+    if r.status_code == 403:
+        return False, "forbidden — admin role required"
+    if r.status_code == 404:
+        return False, f"no mapping for slot {slot}"
+    if r.status_code == 200:
+        return True, f"mapping for slot {slot} deleted"
+    return False, f"HTTP {r.status_code}: delete failed"

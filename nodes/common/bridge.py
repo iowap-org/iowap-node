@@ -141,6 +141,20 @@ def fetch_manifest(url: str, token: str, timeout: float = _MANIFEST_TIMEOUT) -> 
     return data
 
 
+def _coerce_capacity(value: Any, *, default: int, minimum: int) -> int:
+    """Coerce a manifest capacity field to a usable int (T-030).
+
+    The manifest entry (providers.yaml via the bridge daemon) MAY carry
+    ``max_parallel`` (≥1) / ``cost`` (≥0, admission points, T-247).
+    Anything that is not a plain int ≥ minimum (bools included — bool is
+    an int subclass) falls back to the default instead of poisoning the
+    heartbeat/scheduler with a bogus value.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value if value >= minimum else default
+
+
 def build_bridge_cap(name: str, raw: dict[str, Any]) -> dict[str, Any]:
     """Normalize ONE manifest capability into a registry cap dict.
 
@@ -149,7 +163,10 @@ def build_bridge_cap(name: str, raw: dict[str, Any]) -> dict[str, Any]:
     and the ``bridge`` marker routes claimed stages to
     :func:`execute_bridge_task` instead of the local handler runner.
     ``input_schema`` passes through 1:1 (client-mcp T-009 convention —
-    the node never re-validates).
+    the node never re-validates). ``max_parallel`` / ``cost`` (T-030)
+    pass through from the manifest entry with a default of 1 each, so
+    providers.yaml values reach the manifest → heartbeat → relay
+    scheduler instead of being hardcoded away.
     """
     cap: dict[str, Any] = {
         "name": name if name.startswith(BRIDGE_PREFIX) else f"{BRIDGE_PREFIX}{name}",
@@ -158,8 +175,8 @@ def build_bridge_cap(name: str, raw: dict[str, Any]) -> dict[str, Any]:
         "auto_publish": True,
         "claimable": True,
         "handler": "",  # never executed locally
-        "max_parallel": 1,
-        "cost": 1,
+        "max_parallel": _coerce_capacity(raw.get("max_parallel"), default=1, minimum=1),
+        "cost": _coerce_capacity(raw.get("cost"), default=1, minimum=0),
         "timeout": DEFAULT_BRIDGE_TIMEOUT,
         "long_run": bool(raw.get("long_run")),
         "bridge": True,

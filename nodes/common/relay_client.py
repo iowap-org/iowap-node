@@ -476,6 +476,27 @@ class RelayClient:
             verify=self._verify,
         )
 
+    def _put(
+        self, path: str, body: dict[str, Any] | None = None, *, timeout: float | None = None
+    ) -> httpx.Response:
+        """PUT with Bearer auth (T-030: forward-mapping upsert)."""
+        return httpx.put(
+            f"{self.base_url}{path}",
+            headers={"Authorization": f"Bearer {self.token}"},
+            json=body or {},
+            timeout=timeout or self.cfg["request_timeout"],
+            verify=self._verify,
+        )
+
+    def _delete(self, path: str, *, timeout: float | None = None) -> httpx.Response:
+        """DELETE with Bearer auth (T-030: forward-mapping delete)."""
+        return httpx.delete(
+            f"{self.base_url}{path}",
+            headers={"Authorization": f"Bearer {self.token}"},
+            timeout=timeout or self.cfg["request_timeout"],
+            verify=self._verify,
+        )
+
     def _get(
         self,
         path: str,
