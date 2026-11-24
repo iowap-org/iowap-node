@@ -189,12 +189,18 @@ def parse_command(raw: str) -> list[str]:
                 return [str(x) for x in parsed if str(x).strip()]
         except ValueError:
             pass
-    argv = shlex.split(raw)
-    # comma-separated input: shlex keeps the commas glued to the tokens —
-    # strip a single leading/trailing comma per token (csv-like arguments
-    # with inner commas survive).
-    cleaned = [t.lstrip(",").rstrip(",") for t in argv]
-    cleaned = [t for t in cleaned if t]
+    # T-016i: posix=False — POSIX shlex eats backslashes as escape chars and
+    # turned "c:\\scripts\\hello.bat" into "c:scripteshello.bat". Windows
+    # paths must survive untouched; quotes and separator commas are stripped
+    # per token afterwards.
+    argv = shlex.split(raw, posix=False)
+    cleaned = []
+    for t in argv:
+        if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+            t = t[1:-1]
+        t = t.lstrip(",").rstrip(",")
+        if t:
+            cleaned.append(t)
     return cleaned if cleaned else argv
 
 

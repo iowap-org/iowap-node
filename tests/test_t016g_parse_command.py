@@ -47,3 +47,16 @@ def test_trailing_comma_tolerated() -> None:
 def test_invalid_json_array_falls_back() -> None:
     # starts with '[' but is not valid JSON → shlex fallback, not a crash
     assert parse_command("[cmd]") == ["[cmd]"]
+
+
+def test_windows_backslash_paths_survive() -> None:
+    # T-016i: POSIX shlex ate backslashes as escapes (c:scripteshello.bat)
+    assert parse_command("cmd /c c:\\scripts\\hello.bat") == [
+        "cmd", "/c", "c:\\scripts\\hello.bat"
+    ]
+
+
+def test_quoted_windows_path() -> None:
+    assert parse_command('"c:\\scripts\\tool.exe" --run') == [
+        "c:\\scripts\\tool.exe", "--run"
+    ]
