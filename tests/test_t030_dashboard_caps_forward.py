@@ -41,6 +41,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nodes.common import bridge, dashboard, node_config, node_utils, onboarding
 
 
+@pytest.fixture(autouse=True)
+def _fresh_forward_latch(monkeypatch):
+    """T-032: the 403 latch is module state — reset per test so a 403 case
+    never silences the error cases that follow it."""
+    monkeypatch.setattr(dashboard, "_FORBIDDEN_LATCH", {})
+
+
 @pytest.fixture()
 def dash_env(tmp_path, monkeypatch):
     """Isolate every state path the dashboard touches (see test_t021)."""

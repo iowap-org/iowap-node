@@ -520,8 +520,13 @@ class RelayClient:
         params: dict[str, str] | None = None,
     ) -> httpx.Response:
         r = self._get(path, timeout=timeout, params=params)
-        if r.status_code in (401, 403):
-            log.warning("auth error %s on %s, refreshing token", r.status_code, path)
+        # T-032: only 401 means "stale token" — 403 means the token is VALID
+        # but the role lacks the permission (e.g. a non-admin node asking for
+        # forward mappings). Refreshing on 403 spun the registration-secret
+        # rotation in a loop and collided with live calls (spurious 401s on
+        # heartbeat/SSE).
+        if r.status_code == 401:
+            log.warning("auth error 401 on %s, refreshing token", path)
             if self._refresh_token():
                 r = self._get(path, timeout=timeout, params=params)
         return r
@@ -529,19 +534,22 @@ class RelayClient:
     def _post_with_auth_retry(
         self, path: str, body: dict[str, Any] | None = None, *, timeout: float | None = None
     ) -> httpx.Response:
-        """POST + a single auth replay on 401/403 (token refresh).
+        """POST + a single auth replay on 401 (token refresh).
 
         T-243 (F14): the predecessor NAME suggested network-retry
         semantics — this is NO network retry. Everything issued through
         here (heartbeat, claim, complete, submit, route registration) is
         NOT idempotent: a transport-level replay could double-execute a
-        task. The only repeated request is the auth one — 401/403
-        refreshes the token once and repeats exactly once with the fresh
-        token.
+        task. The only repeated request is the auth one — 401 refreshes
+        the token once and repeats exactly once with the fresh token.
+
+        T-032: 403 is a PERMISSION answer, not a stale token — no refresh,
+        no replay (the refresh loop degraded registration secrets and
+        caused spurious 401s on unrelated calls).
         """
         r = self._post(path, body, timeout=timeout)
-        if r.status_code in (401, 403):
-            log.warning("auth error %s on %s, refreshing token", r.status_code, path)
+        if r.status_code == 401:
+            log.warning("auth error 401 on %s, refreshing token", path)
             if self._refresh_token():
                 r = self._post(path, body, timeout=timeout)
         return r

@@ -38,6 +38,7 @@ import os
 import re
 import secrets
 import json
+import time
 import shlex
 import shutil
 import signal
@@ -708,6 +709,12 @@ def save_script(
 FORWARD_MAPPINGS_PATH = "/relay/v2/forward-mappings"
 
 
+# T-032: node_id -> monotonic deadline until which the forward panel is
+# muted after a 403 (permission answers don't change render-to-render).
+_FORBIDDEN_LATCH: dict[str, float] = {}
+_FORWARD_FORBIDDEN_TTL = 600.0
+
+
 def build_forward_client() -> "RelayClient":
     """A RelayClient for the current node (meta/config/token from disk).
 
@@ -741,6 +748,19 @@ def fetch_forward_panel(
         "slots": [],
         "mappings": {},
     }
+    # T-032: after a 403 the role will not change within seconds — latch the
+    # forbidden state per node for 10 minutes so repeated dashboard renders
+    # stop hammering an endpoint that answers permission-denied.
+    if not node_id:
+        try:
+            node_id = node_utils.load_meta().get("node_id") or ""
+        except Exception:  # noqa: BLE001 — latch is best-effort
+            node_id = ""
+    latch = _FORBIDDEN_LATCH.get(node_id)
+    if latch and time.monotonic() < latch:
+        panel["forbidden"] = True
+        panel["node_id"] = node_id
+        return panel
     try:
         if client is None:
             client = build_forward_client()
@@ -757,6 +777,7 @@ def fetch_forward_panel(
         )
         if r_slots.status_code == 403:
             panel["forbidden"] = True
+            _FORBIDDEN_LATCH[node_id] = time.monotonic() + _FORWARD_FORBIDDEN_TTL
             return panel
         if r_slots.status_code != 200:
             panel["error"] = f"slots request failed (HTTP {r_slots.status_code})"
