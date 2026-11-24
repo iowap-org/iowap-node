@@ -152,7 +152,7 @@ def build_bridge_cap(name: str, raw: dict[str, Any]) -> dict[str, Any]:
     the node never re-validates).
     """
     cap: dict[str, Any] = {
-        "name": f"{BRIDGE_PREFIX}{name}",
+        "name": name if name.startswith(BRIDGE_PREFIX) else f"{BRIDGE_PREFIX}{name}",
         "version": "1.0.0",
         "description": raw.get("summary") if isinstance(raw.get("summary"), str) else None,
         "auto_publish": True,
@@ -251,6 +251,12 @@ class BridgeManager:
                 log.warning("bridge cap with invalid name %r skipped", name)
                 skipped.append(str(name))
                 continue
+            # T-016h: the dashboard may legitimately store the name WITH the
+            # host. prefix (operators read the published name off the UI).
+            # Normalize to the bare form first so the prefix below can never
+            # double up (host.host.sysinfo was invisible at the relay's
+            # host.sysinfo lookups).
+            name = name.removeprefix(BRIDGE_PREFIX)
             health = raw.get("health", "ok")
             if health == "down":
                 # SPEC §3: down → not published / unpublished.
