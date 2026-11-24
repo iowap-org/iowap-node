@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import secrets
+import json
 import shlex
 import shutil
 import signal
@@ -137,7 +138,7 @@ def _validate_provider_fields(fields: dict[str, Any]) -> tuple[dict[str, Any] | 
         raw_command = (fields.get("command") or "").strip()
         if not raw_command:
             return None, "process capabilities require a command (argv template)"
-        argv = shlex.split(raw_command)
+        argv = parse_command(raw_command)
         if not argv:
             return None, "command could not be parsed into an argv list"
         entry["command"] = argv
@@ -170,6 +171,31 @@ def _validate_provider_fields(fields: dict[str, Any]) -> tuple[dict[str, Any] | 
     if health:
         entry["health_url"] = health
     return entry, ""
+
+
+def parse_command(raw: str) -> list[str]:
+    """Parse the dashboard's free-text command into an argv list (T-016g).
+
+    Users type all kinds of shapes: a JSON array (["cmd", "/c", "sysinfo"]),
+    comma-separated (cmd, /c, systeminfo), or plain whitespace. shlex alone
+    keeps commas attached to tokens ("cmd,"), which made command[0]
+    unresolvable and the provider permanently health=down.
+    """
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed if str(x).strip()]
+        except ValueError:
+            pass
+    argv = shlex.split(raw)
+    # comma-separated input: shlex keeps the commas glued to the tokens —
+    # strip a single leading/trailing comma per token (csv-like arguments
+    # with inner commas survive).
+    cleaned = [t.lstrip(",").rstrip(",") for t in argv]
+    cleaned = [t for t in cleaned if t]
+    return cleaned if cleaned else argv
 
 
 def create_provider(fields: dict[str, Any], path: Path | None = None) -> tuple[bool, str]:
