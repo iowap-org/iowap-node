@@ -25,6 +25,15 @@ error result (the relay's retry budget then fails the task);
 retryable errors raise :class:`BridgeRetryableError` — the daemon logs
 and leaves the stage uncompleted, so the claim expires and the relay
 requeues it (identical to a local handler crash).
+
+Exec contract v1.1 — spec mode (board T-044, daemon ≥ 0.3.7): the exec
+body additionally carries ``spec`` — the node's registry entry for the
+capability, copied 1:1 from the workspace ``bridge/providers.yaml``
+(the same file the daemon watches). The bridge daemon acts as a dumb
+executor: it dispatches on the SPEC instead of resolving names (no more
+"capability unknown" when both sides must agree on names). Hosts
+without a workspace registry send a spec-less body — that legacy path
+stays supported on old AND new daemons.
 """
 
 from __future__ import annotations
@@ -40,7 +49,7 @@ from typing import Any
 import httpx
 import yaml
 
-from nodes.common import node_config
+from nodes.common import dashboard, node_config
 
 log = logging.getLogger("bridge")
 
@@ -408,6 +417,53 @@ def start_poller(stop_event: threading.Event) -> threading.Thread:
 # ---------------------------------------------------------------------------
 
 
+# The comfyui manifest default: an entry WITHOUT a name resolves to
+# "comfy.generate" (mirrors the daemon-side registry capabilityName()
+# rule — required to FIND the un-named built-in entry, nothing else).
+_COMFY_DEFAULT_NAME = "comfy.generate"
+
+
+def _entry_reg_name(entry: dict[str, Any]) -> str:
+    """The manifest name a providers.yaml entry is exposed under."""
+    n = entry.get("name")
+    if isinstance(n, str) and n.strip():
+        return n.strip()
+    if entry.get("type") == "comfyui":
+        return _COMFY_DEFAULT_NAME
+    return ""
+
+
+def bridge_spec_for(name: str) -> dict[str, Any] | None:
+    """The providers.yaml entry for a bridge capability (exec contract v1.1).
+
+    The node resolves its own registry copy — the workspace
+    ``bridge/providers.yaml``, the same file the daemon watches — and
+    :func:`execute_bridge_task` sends it as the exec body ``spec``
+    (board T-044): the daemon becomes a dumb executor, dispatching on
+    the spec instead of resolving names, which removes the
+    double-knowledge class where a name mismatch between node registry
+    and daemon registry bricked an exec with a 404.
+
+    Pass-through discipline: the entry's fields ride EXACTLY as written
+    — nothing invented, absent fields stay absent (no defaults). The
+    ``name`` field rides along but is a no-op (the URL segment routes).
+    Returns ``None`` when the name has no entry: hosts without a
+    workspace registry (e.g. iowap-cli) then send a spec-less body,
+    which old AND new daemons resolve the legacy way.
+    """
+    if not name:
+        return None
+    try:
+        entries = dashboard.load_providers()
+    except Exception as exc:  # noqa: BLE001 — a broken store must not wedge the exec
+        log.warning("bridge spec lookup failed for %s: %s", name, exc)
+        return None
+    for entry in entries:
+        if isinstance(entry, dict) and _entry_reg_name(entry) == name:
+            return dict(entry)
+    return None
+
+
 def _resolve_artifact_path(workspace: str, rel: Any) -> Path | None:
     """Resolve a workspace-relative artifact path, rejecting traversal."""
     if not isinstance(rel, str) or not rel.strip():
@@ -490,6 +546,13 @@ def execute_bridge_task(
         params = {} if params is None else {"payload": params}
     timeout_s = int(cap.get("timeout", DEFAULT_BRIDGE_TIMEOUT) or DEFAULT_BRIDGE_TIMEOUT)
     body = {"task_id": task_id, "params": params, "timeout_s": timeout_s}
+    spec = bridge_spec_for(str(name))
+    if spec is not None:
+        # Exec contract v1.1 (board T-044): the registry entry rides the
+        # body so a ≥0.3.7 daemon dispatches on the spec (dumb executor).
+        # Old daemons drop the unknown key and legacy-resolve the name —
+        # cross-version safe in both directions.
+        body["spec"] = spec
     url = f"{cfg['url']}/v1/exec/{name}"
     try:
         r = httpx.post(
@@ -541,6 +604,20 @@ def execute_bridge_task(
             "status": "error",
             "error": f"bridge: capability '{name}' unknown at the provider (404)",
         }
+    if r.status_code == 422:
+        # Exec contract v1.1: a mis-shaped spec never reaches the runner —
+        # the node must fix the spec, retrying cannot heal it (terminal).
+        detail = ""
+        try:
+            err = r.json().get("error")
+            if isinstance(err, dict):
+                detail = str(err.get("message", "")).strip()
+        except ValueError:
+            detail = ""
+        msg = f"bridge: exec spec invalid (422) for '{name}'"
+        if detail:
+            msg = f"{msg}: {detail}"
+        return {"status": "error", "error": msg}
     if r.status_code in (401, 403):
         return {
             "status": "error",

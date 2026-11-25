@@ -40,6 +40,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -609,3 +610,128 @@ def test_poller_thread_without_config_polls_nothing(bridge_env):
     thread.join(timeout=10)
     assert not thread.is_alive()
     assert bridge.get_manager().published == {}
+
+
+
+# ---------------------------------------------------------------------------
+# Exec contract v1.1 — spec mode (board T-044)
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_spec_for_resolves_registry_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("IOWAP_WORKSPACE_DIR", str(tmp_path))
+    entry = {
+        "name": "sys.run",
+        "type": "process",
+        "command": ["cmd", "/c", "systeminfo"],
+        "stdin_json": False,
+        "summary": "System info via the host",
+    }
+    (tmp_path / "bridge").mkdir()
+    (tmp_path / "bridge" / "providers.yaml").write_text(
+        yaml.safe_dump({"providers": [entry]}, sort_keys=False), encoding="utf-8"
+    )
+    assert bridge.bridge_spec_for("sys.run") == entry
+    assert bridge.bridge_spec_for("no.such.cap") is None
+    assert bridge.bridge_spec_for("") is None
+
+
+def test_bridge_spec_for_comfy_default_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("IOWAP_WORKSPACE_DIR", str(tmp_path))
+    (tmp_path / "bridge").mkdir()
+    (tmp_path / "bridge" / "providers.yaml").write_text(
+        yaml.safe_dump(
+            {"providers": [{"type": "comfyui", "url": "http://127.0.0.1:8188", "start_cmd": "C:/ComfyUI/run.bat"}]},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    # No `name` field + type comfyui == comfy.generate (daemon capabilityName rule).
+    assert bridge.bridge_spec_for("comfy.generate") == {
+        "type": "comfyui",
+        "url": "http://127.0.0.1:8188",
+        "start_cmd": "C:/ComfyUI/run.bat",
+    }
+
+
+def test_bridge_spec_for_broken_store_degrades_to_none(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("IOWAP_WORKSPACE_DIR", str(tmp_path))
+    (tmp_path / "bridge").mkdir()
+    (tmp_path / "bridge" / "providers.yaml").write_text("providers:\n  - [unclosed\n", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="bridge"):
+        assert bridge.bridge_spec_for("comfy.generate") is None
+    assert any("providers.yaml" in r.message or "could not read" in r.message for r in caplog.records)
+
+
+def test_bridge_spec_for_missing_store_degrades_to_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("IOWAP_WORKSPACE_DIR", str(tmp_path))  # no providers.yaml at all
+    assert bridge.bridge_spec_for("sys.run") is None
+
+
+def test_exec_forward_body_carries_spec_from_registry(exec_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("IOWAP_WORKSPACE_DIR", str(tmp_path))
+    entry = {
+        "name": "sys.run",
+        "type": "process",
+        "command": ["cmd", "/c", "systeminfo"],
+        "stdin_json": False,
+    }
+    (tmp_path / "bridge").mkdir()
+    (tmp_path / "bridge" / "providers.yaml").write_text(
+        yaml.safe_dump({"providers": [entry]}, sort_keys=False), encoding="utf-8"
+    )
+    cap = bridge.build_bridge_cap("sys.run", {"name": "sys.run"})
+    assert cap["name"] == "host.sys.run"
+
+    def responder(post):
+        # prefix-stripped name stays the URL segment (routing label unchanged)
+        assert post["url"] == "http://bridge.test:7780/v1/exec/sys.run"
+        assert post["headers"]["Authorization"] == "Bearer bridge-tok"
+        # spec == the registry entry, fields exactly as written (no defaults)
+        assert post["json"]["spec"] == entry
+        # the legacy keys ride untouched
+        assert post["json"]["task_id"] == "t1"
+        assert post["json"]["params"] == {"prompt": "cat"}
+        assert post["json"]["timeout_s"] == bridge.DEFAULT_BRIDGE_TIMEOUT
+        return httpx.Response(200, json={"status": "completed", "result": {"ok": 1}}, request=httpx.Request("POST", post["url"]))
+
+    _stub_exec_post(monkeypatch, responder)
+    result = bridge.execute_bridge_task(exec_env, cap, _stage())
+    assert result == {"status": "completed", "result": {"ok": 1}}
+
+
+def test_exec_forward_body_has_no_spec_without_workflow_file(exec_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("IOWAP_WORKSPACE_DIR", str(tmp_path))  # no providers.yaml
+
+    def responder(post):
+        # Legacy body shape — an old daemon (which drops unknown keys) and
+        # a new one (legacy resolution) both accept it unchanged.
+        assert post["json"] == {
+            "task_id": "t1",
+            "params": {"prompt": "cat"},
+            "timeout_s": bridge.DEFAULT_BRIDGE_TIMEOUT,
+        }
+        return httpx.Response(200, json={"status": "completed", "result": {}}, request=httpx.Request("POST", post["url"]))
+
+    _stub_exec_post(monkeypatch, responder)
+    result = bridge.execute_bridge_task(exec_env, _bridge_cap(), _stage())
+    assert result["status"] == "completed"
+
+
+def test_exec_forward_422_spec_invalid_is_terminal(exec_env, monkeypatch):
+    message = 'invalid exec spec for "comfy.generate": unknown provider type "teleport"'
+
+    def responder(post):
+        return httpx.Response(
+            422,
+            json={"error": {"code": "spec.invalid", "message": message}},
+            request=httpx.Request("POST", post["url"]),
+        )
+
+    _stub_exec_post(monkeypatch, responder)
+    result = bridge.execute_bridge_task(exec_env, _bridge_cap(), _stage())
+    # terminal error envelope; the daemon's cause text rides through
+    assert result == {
+        "status": "error",
+        "error": f"bridge: exec spec invalid (422) for 'comfy.generate': {message}",
+    }
