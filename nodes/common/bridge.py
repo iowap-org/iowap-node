@@ -155,6 +155,21 @@ def _coerce_capacity(value: Any, *, default: int, minimum: int) -> int:
     return value if value >= minimum else default
 
 
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def _coerce_version(value: Any) -> str:
+    """Coerce a manifest version field to a usable ``X.Y.Z`` string (T-036).
+
+    The providers.yaml entry (dashboard edit path, T-036) MAY carry
+    ``version``; anything that is not a plain ``X.Y.Z`` string falls back
+    to 1.0.0 instead of poisoning the heartbeat with a bogus value.
+    """
+    if isinstance(value, str) and _VERSION_RE.match(value.strip()):
+        return value.strip()
+    return "1.0.0"
+
+
 def build_bridge_cap(name: str, raw: dict[str, Any]) -> dict[str, Any]:
     """Normalize ONE manifest capability into a registry cap dict.
 
@@ -164,13 +179,14 @@ def build_bridge_cap(name: str, raw: dict[str, Any]) -> dict[str, Any]:
     :func:`execute_bridge_task` instead of the local handler runner.
     ``input_schema`` passes through 1:1 (client-mcp T-009 convention —
     the node never re-validates). ``max_parallel`` / ``cost`` (T-030)
-    pass through from the manifest entry with a default of 1 each, so
-    providers.yaml values reach the manifest → heartbeat → relay
-    scheduler instead of being hardcoded away.
+    pass through from the manifest entry with a default of 1 each, and
+    ``version`` (T-036) with the 1.0.0 default — so edits in the
+    providers.yaml reach the manifest → heartbeat → relay upsert instead
+    of being hardcoded away.
     """
     cap: dict[str, Any] = {
         "name": name if name.startswith(BRIDGE_PREFIX) else f"{BRIDGE_PREFIX}{name}",
-        "version": "1.0.0",
+        "version": _coerce_version(raw.get("version")),
         "description": raw.get("summary") if isinstance(raw.get("summary"), str) else None,
         "auto_publish": True,
         "claimable": True,

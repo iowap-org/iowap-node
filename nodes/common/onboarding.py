@@ -497,6 +497,9 @@ def _capability_rows(providers: list[dict[str, Any]], bridge_cfg: dict[str, Any]
   <td class='note'>{limits}</td>
   <td>{badge}</td>
   <td>
+    <form class='inline' method='get' action='/caps/edit'>
+      <input type='hidden' name='name' value='{_esc(name)}'>
+      <button class='btn' type='submit'>Edit</button></form>
     <form class='inline' method='post' action='/caps/{toggle_action}'>
       <input type='hidden' name='name' value='{_esc(name)}'>
       <button class='btn' type='submit'>{toggle_label}</button></form>
@@ -509,57 +512,84 @@ def _capability_rows(providers: list[dict[str, Any]], bridge_cfg: dict[str, Any]
     return "".join(rows)
 
 
-def _capabilities_section(bridge_cfg: dict[str, Any] | None) -> str:
-    providers = dashboard.load_providers()
-    auto = bool(bridge_cfg and bridge_cfg.get("auto_publish"))
-    auto_badge = (
-        "<span class='badge ok'>on</span>" if auto else "<span class='badge muted'>off</span>"
+def _capability_form(entry: dict[str, Any] | None) -> str:
+    """The add/edit capability form card (T-036: edit mode prefills the entry).
+
+    ``entry is None`` renders the plain create form (action
+    ``/caps/create``) — no behavior change for create. An entry renders
+    the SAME form prefilled: name readonly (the immutable routing key,
+    also carried by the hidden ``__name__``), every field per the
+    ``_validate_provider_fields`` contract (version included) and action
+    ``POST /caps/update``. Unchecked checkboxes simply send nothing, so
+    the prefill is fully round-trip safe.
+    """
+    edit = entry is not None
+    vals = entry or {}
+    exec_block = vals.get("exec")
+    if not isinstance(exec_block, dict):
+        exec_block = {}
+    name = str(vals.get("name") or "")
+    heading = f"Edit capability {_esc(name)}" if edit else "Add capability"
+    action = "/caps/update" if edit else "/caps/create"
+    button = "Update capability" if edit else "Create capability"
+    name_field = (
+        f"""<div><label>Name (immutable)</label>
+      <input type='hidden' name='__name__' value='{_esc(name)}'>
+      <input name='name' id='cap_name' required pattern='[a-z][a-z0-9_.-]{{1,63}}'
+             readonly value='{_esc(name)}'></div>"""
+        if edit
+        else """<div><label>Name</label>
+      <input name='name' id='cap_name' required pattern='[a-z][a-z0-9_.-]{{1,63}}'
+             placeholder='script.cleanup'></div>"""
     )
-    auto_form = f"""
-<form class='inline' method='post' action='/caps/auto-publish'>
-  <input type='hidden' name='enable' value='{"0" if auto else "1"}'>
-  <button class='btn' type='submit'>{"Turn off" if auto else "Turn on"}</button>
-</form>"""
+    sel_proc = " selected" if vals.get("type") == "process" else ""
+    sel_http = " selected" if vals.get("type") == "http" else ""
+    v_summary = _esc(vals.get("summary") or "")
+    v_version = _esc(vals.get("version") or "")
+    checked_long_run = " checked" if vals.get("long_run") else ""
+    v_command = (
+        _esc(json.dumps(vals["command"]))
+        if edit and isinstance(vals.get("command"), list)
+        else ""
+    )
+    v_glob = _esc(vals.get("artifacts_glob") or "")
+    v_health = _esc(vals.get("health_url") or "")
+    current_method = str(exec_block.get("method") or "").upper()
+    method_options = "".join(
+        f"<option{' selected' if m == current_method else ''}>{m}</option>"
+        for m in ("POST", "GET", "PUT", "PATCH", "DELETE")
+    )
+    v_url = _esc(exec_block.get("url_template") or "")
+    v_body = _esc(exec_block.get("body_template") or "")
+    v_result = _esc(exec_block.get("result_path") or "")
+    v_paths = _esc(",".join(exec_block.get("artifact_paths") or []))
+    v_max_parallel = _esc(vals.get("max_parallel", 1))
+    v_cost = _esc(vals.get("cost", 1))
     return f"""
 <div class='card'>
-<table>
-  <thead><tr><th>Capability</th><th>Type</th><th>Summary</th><th>Parallel / Cost</th>
-  <th>Status</th><th>Actions</th></tr></thead>
-  <tbody>{_capability_rows(providers, bridge_cfg)}</tbody>
-</table>
-<p class='note'>Definitions live in
-<code>{_esc(dashboard.providers_path())}</code> (the bridge daemon picks
-them up automatically). Publishing adds the capability to
-<code>bridge.allowlist</code> in node.yaml and reloads the daemon.
-<em>Parallel / Cost</em> feed the relay scheduler (max parallel claims /
-admission points per claim).</p>
-<p style='margin-top:1rem'>Auto-publish (all capabilities while the
-allowlist is empty): {auto_badge} {auto_form}</p>
-</div>
-<div class='card'>
-<h2 style='margin-top:0'>Add capability</h2>
-<form method='post' action='/caps/create'>
+<h2 style='margin-top:0'>{heading}</h2>
+<form method='post' action='{action}'>
   <div class='fields'>
-    <div><label>Name</label>
-      <input name='name' id='cap_name' required pattern='[a-z][a-z0-9_.-]{{1,63}}'
-             placeholder='script.cleanup'></div>
+    {name_field}
     <div><label>Type</label>
       <select name='type'>
-        <option value='process'>process (run a host command)</option>
-        <option value='http'>http (call a REST endpoint)</option>
+        <option value='process'{sel_proc}>process (run a host command)</option>
+        <option value='http'{sel_http}>http (call a REST endpoint)</option>
       </select></div>
     <div><label>Summary (optional)</label>
-      <input name='summary' placeholder='Run the cleanup script'></div>
+      <input name='summary' value='{v_summary}' placeholder='Run the cleanup script'></div>
+    <div><label>Version (optional X.Y.Z, default 1.0.0)</label>
+      <input name='version' class='mono' value='{v_version}' placeholder='1.0.0'></div>
   </div>
   <label style='margin-top:1rem'>
-    <input type='checkbox' name='long_run' style='width:auto'> Long-running task (minutes+)</label>
+    <input type='checkbox' name='long_run' style='width:auto'{checked_long_run}> Long-running task (minutes+)</label>
   <h2>process fields</h2>
   <div class='fields'>
     <div><label>Command (argv template)</label>
-      <input name='command' id='cap_command' class='mono'
+      <input name='command' id='cap_command' class='mono' value='{v_command}'
              placeholder="python C:/scripts/cleanup.py --target {{{{target}}}}"></div>
     <div><label>Artifacts glob (workspace-relative, optional)</label>
-      <input name='artifacts_glob' class='mono' placeholder='out/*.png'></div>
+      <input name='artifacts_glob' class='mono' value='{v_glob}' placeholder='out/*.png'></div>
   </div>
   <p class='note' style='margin-top:.5rem'>
     <input type='file' id='cap_script' accept='{_esc(",".join(dashboard.SCRIPT_EXTENSIONS))}'
@@ -590,7 +620,8 @@ allowlist is empty): {auto_badge} {auto_form}</p>
           .then(function (r) {{ return r.json(); }})
           .then(function (data) {{
             if (!data.ok) {{ status.textContent = 'Fehler: ' + data.error; return; }}
-            document.getElementById('cap_name').value = data.name;
+            var nameInput = document.getElementById('cap_name');
+            if (nameInput && !nameInput.readOnly) nameInput.value = data.name;
             document.getElementById('cap_command').value = JSON.stringify(data.command);
             status.textContent = 'Gespeichert als ' + data.stored;
           }})
@@ -603,34 +634,65 @@ allowlist is empty): {auto_badge} {auto_form}</p>
   <h2>http fields</h2>
   <div class='fields'>
     <div><label>Health URL (optional)</label>
-      <input name='health_url' class='mono' placeholder='http://127.0.0.1:9000/health'></div>
+      <input name='health_url' class='mono' value='{v_health}' placeholder='http://127.0.0.1:9000/health'></div>
     <div><label>Method</label>
-      <select name='method'>
-        <option>POST</option><option>GET</option><option>PUT</option>
-        <option>PATCH</option><option>DELETE</option>
-      </select></div>
+      <select name='method'>{method_options}</select></div>
     <div><label>URL template</label>
-      <input name='url_template' class='mono'
+      <input name='url_template' class='mono' value='{v_url}'
              placeholder='http://127.0.0.1:9000/api/{{{{task_id}}}}/render'></div>
     <div><label>Body template (optional)</label>
-      <input name='body_template' class='mono' placeholder='{{{{"file": "{{{{file}}}}"}}}}'></div>
+      <input name='body_template' class='mono' value='{v_body}' placeholder='{{{{"file": "{{{{file}}}}"}}}}'></div>
     <div><label>Result path (optional dot path)</label>
-      <input name='result_path' class='mono' placeholder='result'></div>
+      <input name='result_path' class='mono' value='{v_result}' placeholder='result'></div>
     <div><label>Artifact paths (comma-separated dot paths)</label>
-      <input name='artifact_paths' class='mono' placeholder='result.output_path'></div>
+      <input name='artifact_paths' class='mono' value='{v_paths}' placeholder='result.output_path'></div>
   </div>
   <h2>scheduler</h2>
   <div class='fields'>
     <div><label>Max parallel (default 1)</label>
-      <input name='max_parallel' type='number' min='1' value='1'></div>
+      <input name='max_parallel' type='number' min='1' value='{v_max_parallel}'></div>
     <div><label>Cost — admission points (default 1)</label>
-      <input name='cost' type='number' min='0' value='1'></div>
+      <input name='cost' type='number' min='0' value='{v_cost}'></div>
   </div>
   <div style='margin-top:1.25rem'>
-    <button class='btn btn-primary' type='submit'>Create capability</button>
+    <button class='btn btn-primary' type='submit'>{button}</button>
   </div>
 </form>
 </div>"""
+
+
+def _capabilities_section(
+    bridge_cfg: dict[str, Any] | None, edit_entry: dict[str, Any] | None = None
+) -> str:
+    providers = dashboard.load_providers()
+    auto = bool(bridge_cfg and bridge_cfg.get("auto_publish"))
+    auto_badge = (
+        "<span class='badge ok'>on</span>" if auto else "<span class='badge muted'>off</span>"
+    )
+    auto_form = f"""
+<form class='inline' method='post' action='/caps/auto-publish'>
+  <input type='hidden' name='enable' value='{"0" if auto else "1"}'>
+  <button class='btn' type='submit'>{"Turn off" if auto else "Turn on"}</button>
+</form>"""
+    return f"""
+<div class='card'>
+<table>
+  <thead><tr><th>Capability</th><th>Type</th><th>Summary</th><th>Parallel / Cost</th>
+  <th>Status</th><th>Actions</th></tr></thead>
+  <tbody>{_capability_rows(providers, bridge_cfg)}</tbody>
+</table>
+<p class='note'>Definitions live in
+<code>{_esc(dashboard.providers_path())}</code> (the bridge daemon picks
+them up automatically). Publishing adds the capability to
+<code>bridge.allowlist</code> in node.yaml and reloads the daemon.
+<em>Parallel / Cost</em> feed the relay scheduler (max parallel claims /
+admission points per claim). <em>Edit</em> reuses this form prefilled;
+every save bumps the entry version (patch level) unless an explicit
+different X.Y.Z is set.</p>
+<p style='margin-top:1rem'>Auto-publish (all capabilities while the
+allowlist is empty): {auto_badge} {auto_form}</p>
+</div>
+{_capability_form(edit_entry)}"""
 
 
 def _forward_section(panel: dict[str, Any]) -> str:
@@ -715,6 +777,7 @@ def _render_dashboard(
     banner: str | None = None,
     error: str | None = None,
     bearer_override: str | None = None,
+    edit_entry: dict[str, Any] | None = None,
 ) -> bytes:
     """The full node dashboard (configured state) — relay-design family."""
     try:
@@ -757,7 +820,7 @@ def _render_dashboard(
   <div class='kv'><div class='k'>Version</div><div class='v mono'>{_esc(node_version())}</div></div>
 </div>
 <h2>Capabilities</h2>
-{_capabilities_section(bridge_cfg)}
+{_capabilities_section(bridge_cfg, edit_entry)}
 <h2>Forward-Slots</h2>
 {_forward_section(dashboard.fetch_forward_panel())}
 <h2>MCP endpoint</h2>
@@ -777,6 +840,7 @@ must approve it first. The daemon picks config changes up automatically
 # Dashboard POST routes (configured state only — blank nodes get a 409).
 _DASHBOARD_POST_ROUTES = (
     "/caps/create",
+    "/caps/update",
     "/caps/delete",
     "/caps/publish",
     "/caps/unpublish",
@@ -837,6 +901,17 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
             ok, msg = dashboard.create_provider(fields)
             if ok:
                 return 200, _render_dashboard(banner=f"Capability '{msg}' created")
+            return 400, _render_dashboard(error=msg)
+        if path == "/caps/update":
+            # T-036: name immutable — the hidden __name__ carries the
+            # original routing key; a mismatched form name is a reject.
+            fields = {k: (v[0] if v else "") for k, v in form.items()}
+            target = (
+                (form.get("__name__") or [""])[0].strip() or fields.get("name", "")
+            )
+            ok, msg = dashboard.update_provider(target, fields)
+            if ok:
+                return 200, _render_dashboard(banner=msg)
             return 400, _render_dashboard(error=msg)
         name = (form.get("name") or [""])[0].strip()
         if path == "/caps/delete":
@@ -953,7 +1028,20 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         return parse_qs(raw, keep_blank_values=True)
 
     def do_GET(self) -> None:  # noqa: N802 — stdlib naming
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
+        if path == "/caps/edit":
+            # T-036: the capability Edit button — render the create form
+            # prefilled for one existing entry (name readonly).
+            if node_utils.relay_config_ready() is None:
+                self._send(404, b"not found\n", "text/plain; charset=utf-8")
+                return
+            name = (parse_qs(query).get("name") or [""])[0]
+            entry = dashboard.find_provider(name)
+            if entry is None:
+                self._send(404, _render_dashboard(error=f"capability {name!r} not found"))
+                return
+            self._send(200, _render_dashboard(edit_entry=entry))
+            return
         if path != "/":
             self._send(404, b"not found\n", "text/plain; charset=utf-8")
             return

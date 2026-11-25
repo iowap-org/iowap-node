@@ -61,6 +61,10 @@ CAP_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 CAP_TYPES = ("process", "http")
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
+# T-036: optional entry version — strict X.Y.Z, empty/missing → 1.0.0.
+CAP_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+DEFAULT_CAP_VERSION = "1.0.0"
+
 BEARER_PREFIX = "iw_mcp_"
 BEARER_ENTROPY_BYTES = 32
 
@@ -119,6 +123,12 @@ def load_providers(path: Path | None = None) -> list[dict[str, Any]]:
     return [entry for entry in doc["providers"] if isinstance(entry, dict)]
 
 
+def find_provider(name: str, path: Path | None = None) -> dict[str, Any] | None:
+    """One provider entry by name (``None`` when missing) — T-036 edit path."""
+    name = (name or "").strip()
+    return next((p for p in load_providers(path) if p.get("name") == name), None)
+
+
 def _validate_provider_fields(fields: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     """Validate one create form into a providers.yaml entry (or an error)."""
     name = (fields.get("name") or "").strip()
@@ -137,6 +147,20 @@ def _validate_provider_fields(fields: dict[str, Any]) -> tuple[dict[str, Any] | 
         entry["summary"] = summary
     if fields.get("long_run") in ("on", "1", "true", True):
         entry["long_run"] = True
+
+    # T-036: optional ``version`` — empty/missing defaults to 1.0.0, the
+    # default is carried INTO the entry (visible in providers.yaml). Any
+    # other garbage shape is a validation error (nothing is written).
+    raw_version = fields.get("version")
+    if raw_version is None or (isinstance(raw_version, str) and not raw_version.strip()):
+        entry["version"] = DEFAULT_CAP_VERSION
+    else:
+        version = str(raw_version).strip()
+        if not CAP_VERSION_RE.match(version):
+            return None, (
+                f"invalid version {version!r} — must be X.Y.Z (e.g. 1.0.0)"
+            )
+        entry["version"] = version
 
     # T-030: scheduler capacity — max_parallel (≥1, default 1) and cost
     # (admission points, ≥0, default 1). Empty field = default; anything
@@ -272,6 +296,65 @@ def delete_provider(name: str, path: Path | None = None) -> tuple[bool, str]:
         return False, f"unknown capability {name!r}"
     _atomic_write_yaml(path, {"providers": kept})
     return True, name
+
+
+def _bump_version(version: str) -> str:
+    """Patch-bump one ``X.Y.Z`` version string (T-036 auto-bump)."""
+    major, minor, patch = (int(p) for p in version.split("."))
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def update_provider(name: str, fields: dict[str, Any], path: Path | None = None) -> tuple[bool, str]:
+    """Replace ONE capability entry in place, atomically (T-036 edit path).
+
+    Contract:
+
+    * the name is the immutable routing key: ``fields["name"]`` (when set)
+      must equal ``name`` — renames stay delete + create-legitimate;
+    * field validation is the create ``_validate_provider_fields``
+      contract — any validation error writes NOTHING (the file is left
+      byte-identical, same T-021 rule as ``create_provider``);
+    * every successful edit patch-bumps the entry version, UNLESS the form
+      carries an explicit valid ``version`` that differs from the stored
+      one — that one applies verbatim. An explicit version equal to the
+      stored one still bumps (the contract is "every edit changes the
+      version").
+
+    Returns ``(ok, message)`` — ``update ok — <name> vX.Y.Z`` on success
+    (the message feeds the dashboard flash).
+    """
+    name = (name or "").strip()
+    path = path or providers_path()
+    fields = dict(fields)
+    new_name = (fields.get("name") or "").strip()
+    if new_name and new_name != name:
+        return False, (
+            f"name is immutable — {name!r} cannot be renamed to {new_name!r} "
+            "(rename stays delete + create legitimate)"
+        )
+    fields.setdefault("name", name)
+    existing = load_providers(path)
+    idx = next((i for i, p in enumerate(existing) if p.get("name") == name), -1)
+    if idx < 0:
+        return False, f"capability {name!r} not found"
+    entry, error = _validate_provider_fields(fields)
+    if entry is None:
+        return False, error
+    entry["name"] = name  # belt & braces: the routing key never moves
+    old_version = str(existing[idx].get("version") or DEFAULT_CAP_VERSION)
+    if not CAP_VERSION_RE.match(old_version):
+        old_version = DEFAULT_CAP_VERSION  # hand-edited garbage → sane base
+    explicit = fields.get("version")
+    explicit = explicit.strip() if isinstance(explicit, str) else ""
+    if explicit and entry["version"] != old_version:
+        # an explicit valid version DIFFERENT from the stored one → verbatim
+        pass
+    else:
+        # no explicit version, or explicit-but-equal → every edit bumps
+        entry["version"] = _bump_version(old_version)
+    existing[idx] = entry
+    _atomic_write_yaml(path, {"providers": existing})
+    return True, f"update ok — {name} v{entry['version']}"
 
 
 # ---------------------------------------------------------------------------
