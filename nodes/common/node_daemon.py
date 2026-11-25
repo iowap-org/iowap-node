@@ -62,6 +62,7 @@ from typing import Any
 import httpx
 
 from nodes.common import bridge, daemon_channel, file_serve, poll_daemon
+from nodes.common import budget as budget_meter  # noqa: F401 — T-046 completion meter
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     capability_cost,
@@ -1017,6 +1018,9 @@ class SseDaemon:
                             )
                     else:
                         self.tasks_completed += 1
+                        # T-046: budget meter at the completion site (see
+                        # poll_daemon._run_stage — bridge caps with cost>0).
+                        budget_meter.record_stage_cost(cap, cost)
                 log.info("completed stage %s", stage_id)
             except Exception as exc:  # noqa: BLE001
                 # T-179 task 5: complete_by_script — when the handler
@@ -1029,6 +1033,9 @@ class SseDaemon:
                 if script_complete and _is_already_completed(exc):
                     with self._lock:
                         self.tasks_completed += 1
+                        # T-046: a script-completed stage IS a completed
+                        # capability task (T-179 opt-in) — it meters too.
+                        budget_meter.record_stage_cost(cap, cost)
                     log.info(
                         "stage %s already completed by script — counted as done",
                         stage_id,

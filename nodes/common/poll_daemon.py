@@ -34,6 +34,7 @@ from typing import Any
 import httpx
 
 from nodes.common import bridge, daemon_channel, file_serve
+from nodes.common import budget as budget_meter  # noqa: F401 — T-046 completion meter
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
     BASE_DIR,
@@ -328,6 +329,11 @@ class Daemon:
                             )
                     else:
                         self.tasks_completed += 1
+                        # T-046: the completed task runs its budget meter —
+                        # bridge caps with cost>0 increment the persisted
+                        # counter (budget.record_stage_cost never raises,
+                        # the completion path cannot die on the meter).
+                        budget_meter.record_stage_cost(cap, cost)
                 log.info("completed stage %s", stage_id)
             except Exception as exc:  # noqa: BLE001
                 # T-001c-c: the stage is gone server-side (404: expired/

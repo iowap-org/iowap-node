@@ -84,7 +84,18 @@ CAPABILITY_SCHEMA: dict[str, Any] = {
         "node_name": {"type": "string"},
         "description": {"type": "string"},
         # T-247: node-level points budget (top-level, optional).
-        "budget": {"type": "integer", "minimum": 0},
+        # T-046: or the accounting mapping form {total: N}.
+        "budget": {
+            "anyOf": [
+                {"type": "integer", "minimum": 0},
+                {
+                    "type": "object",
+                    "properties": {"total": {"type": "integer", "minimum": 0}},
+                    "required": ["total"],
+                    "additionalProperties": False,
+                },
+            ]
+        },
         "capabilities": {
             "type": "array",
             "items": {
@@ -134,11 +145,34 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
     # T-247: optional node-level points budget (the daemon's default-off
     # admission axis; validated fail-loud so a publish can never install
     # a budget the loader will silently ignore).
+    # T-046: ``budget`` may ALSO be the mapping form `{total: N}` — the
+    # accounting ceiling (`budget.budget_total`, default 100). The int
+    # form keeps its T-247 admission meaning (and serves as the
+    # accounting ceiling too). Anything else is loud.
     budget = data.get("budget")
-    if budget is not None and (
-        not isinstance(budget, int) or isinstance(budget, bool) or budget < 0
-    ):
-        errors.append("'budget' must be a non-negative integer")
+    if budget is not None:
+        if isinstance(budget, dict):
+            if set(budget.keys()) != {"total"}:
+                errors.append(
+                    "'budget' mapping must contain exactly the key 'total'"
+                )
+            else:
+                total = budget["total"]
+                if (
+                    isinstance(total, bool)
+                    or not isinstance(total, int)
+                    or total < 0
+                ):
+                    errors.append("'budget.total' must be a non-negative integer")
+        elif (
+            not isinstance(budget, int)
+            or isinstance(budget, bool)
+            or budget < 0
+        ):
+            errors.append(
+                "'budget' must be a non-negative integer"
+                " or a mapping with exactly the key 'total'"
+            )
     # 'capabilities' is optional — a profile may carry only node-level
     # configuration (status, node_name, description). When present it
     # must be a list.
@@ -1193,14 +1227,22 @@ def load_active_status() -> str | None:
 
 
 def load_active_budget() -> int | None:
-    """Return the top-level ``budget`` from the active YAML profile (T-247).
+    """Return the points budget from the active YAML profile (T-247).
 
-    The points axis is only active when the active file declares a
-    ``budget``; ``None`` means "unset — axis off" and leaves admission to
-    ``max_parallel`` alone. Read fresh from disk on every call (same
-    discipline as :func:`load_active_status`) so a publish/SIGHUP-pickup
-    is honoured on the next claim without cache involvement. An invalid
-    hand-edited value degrades to ``None``: profile validation
+    The points axis is active when the active file declares a
+    ``budget``; ``None`` means "unset — axis off" and leaves admission
+    to ``max_parallel`` alone. Both T-246/T-046 forms feed this axis so
+    a budget config can never silently disarm admission:
+
+    * ``budget: <int>`` (legacy T-247 form) — the int itself;
+    * ``budget: {total: N}`` (T-046 mapping form, the dashboard writes
+      it) — ``total``; the same number the accounting meter
+      (:mod:`nodes.common.budget`) divides by.
+
+    Read fresh from disk on every call (same discipline as
+    :func:`load_active_status`) so a publish/SIGHUP-pickup is honoured
+    on the next claim without cache involvement. An invalid hand-edited
+    value degrades to ``None``: profile validation
     (``validate_with_schema``) is the loud path, the daemon admission
     path must never die on YAML content.
     """
@@ -1214,6 +1256,14 @@ def load_active_budget() -> int | None:
             val = parsed.get("budget")
             if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
                 return int(val)
+            if isinstance(val, dict):
+                total = val.get("total")
+                if (
+                    isinstance(total, int)
+                    and not isinstance(total, bool)
+                    and total >= 0
+                ):
+                    return int(total)
     except (OSError, yaml.YAMLError):
         pass
     return None

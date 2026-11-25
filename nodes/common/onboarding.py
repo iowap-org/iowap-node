@@ -66,7 +66,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs
 
-from nodes.common import agent_tokens, bridge, dashboard, node_config, node_utils
+from nodes.common import active_profile, agent_tokens, bridge, budget, dashboard
+from nodes.common import node_config, node_utils
 from nodes.common.cli.cli_server import normalize_base_url, register_node
 from nodes.common.relay_client import _discover_relay_mdns
 
@@ -817,28 +818,150 @@ allowlist is empty): {auto_badge} {auto_form}</p>
 
 
 def _forward_section(panel: dict[str, Any]) -> str:
-    """The Forward-Slots section (T-030) — read-only for non-admin tokens.
+    """The Forward-Slots section (T-030) + the slot definition card (T-046).
 
-    Slots themselves are declared in node.yaml (``forward_slots``, T-053)
-    and transported by the heartbeat; this panel maintains only the
-    (node, slot) → target mappings via the relay's forward-mappings API.
-    A 403 (runtime token without admin role) hides the section behind a
-    quiet note instead of showing a dead editor.
+    Two parts with different write surfaces:
+
+    * the MAPPINGS table ((node, slot) → target_capability, relay API,
+      T-030) stays read-only for non-admin tokens — a 403 (runtime token
+      without admin role) hides it behind a quiet note (T-0246/T-030
+      pattern), unchanged;
+    * the DEFINITION card (T-046) writes node.yaml ``forward_slots``
+      LOCALLY via /slots/define + /slots/delete — no admin role involved
+      (the mapping PUT is relay-admin-blocked T-246, but slot definition
+      is local node.yaml config), so it renders regardless of the
+      panel's fetch outcome.
     """
     if panel.get("forbidden"):
-        return """
+        mappings_html = """
 <div class='card'>
-<p class='note'>Forward-Slots: nur f&uuml;r Admin-Nodes konfigurierbar —
-dieser Node-Token hat keine Admin-Rolle. Slots und Mappings werden im
-Relay-Dashboard gepflegt.</p>
+<p class='note'>Forward-Slot-Mappings: nur f&uuml;r Admin-Nodes konfigurierbar —
+dieser Node-Token hat keine Admin-Rolle. Mappings werden im
+Relay-Dashboard gepflegt (Slot-Definition unten bleibt verf&uuml;gbar).</p>
 </div>"""
-    if not panel.get("ok"):
+    elif not panel.get("ok"):
         err = panel.get("error") or "unbekannter Fehler"
-        return f"""
+        mappings_html = f"""
 <div class='card'>
-<p class='note'>Forward-Slots nicht abrufbar: {_esc(err)}</p>
+<p class='note'>Forward-Slot-Mappings nicht abrufbar: {_esc(err)}
+(Slot-Definition unten bleibt verf&uuml;gbar)</p>
+</div>"""
+    else:
+        mappings_html = _forward_mappings_table(panel)
+
+    return f"{_forward_slots_define_card()}{mappings_html}"
+
+
+def _local_forward_entries() -> dict[str, Any]:
+    """The raw ``forward_slots`` of the ACTIVE node.yaml, keyed by slot name.
+
+    Both documented section shapes are normalized (node/config.md): the
+    mapping form and the list form (rows carry a ``slot`` key) — the
+    delete buttons and the defined-rows table work from the LOCAL truth,
+    not from the relay panel which only updates on the next heartbeat.
+    Legacy description-string rows (no ``slot`` key) are skipped (they
+    have no name to address); never crashes the render.
+    """
+    path = node_config.ACTIVE_PATH
+    if not path.exists():
+        return {}
+    import yaml as _yaml
+
+    try:
+        parsed = _yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, _yaml.YAMLError):
+        return {}
+    section = parsed.get("forward_slots") if isinstance(parsed, dict) else None
+    entries: dict[str, Any] = {}
+    if isinstance(section, dict):
+        entries = dict(section)
+    elif isinstance(section, list):
+        for row in section:
+            if isinstance(row, dict) and row.get("slot"):
+                entries[str(row["slot"])] = row
+    return entries
+
+
+def _forward_slots_define_card() -> str:
+    """The T-046 slot-DEFINITION card (label/type/value/ref, T-245-typed)."""
+    local = _local_forward_entries()
+    rows: list[str] = []
+    for slot_name, entry in sorted(local.items()):
+        entry = entry if isinstance(entry, dict) else {"type": "forward"}
+        label = str(entry.get("label") or "")
+        slot_type = str(entry.get("type") or "forward")
+        value = entry.get("value")
+        value_html = (
+            f"<span class='badge'>{_esc(str(value))}</span>"
+            if value is not None
+            else ""
+        )
+        ref = ""
+        if entry.get("ref_slot"):
+            ref = (
+                f"<span class='badge muted'>ref: {_esc(str(entry.get('ref_slot')))}"
+                f".{_esc(str(entry.get('ref_field') or ''))}</span>"
+            )
+        rows.append(f"""
+<tr>
+  <td class='mono'>{_esc(slot_name)}</td>
+  <td>{_esc(label)}</td>
+  <td><span class='badge'>{_esc(slot_type)}</span></td>
+  <td>{value_html} {ref}</td>
+  <td>
+    <form class='inline' method='post' action='/slots/delete'>
+      <input type='hidden' name='slot' value='{_esc(slot_name)}'>
+      <button class='btn btn-danger' type='submit'>L&ouml;schen</button>
+    </form>
+  </td>
+</tr>""")
+    if not rows:
+        rows.append(
+            "<tr><td colspan='5' class='note'>Noch keine Slots definiert "
+            "(node.yaml <code>forward_slots</code>).</td></tr>"
+        )
+    return f"""
+<div class='card'>
+<h3 style='margin:.2rem 0 .5rem 0'>Slots definieren (node.yaml)</h3>
+<table>
+  <thead><tr><th>Slot</th><th>Label</th><th>Typ</th><th>Wert / Ref</th>
+  <th>Actions</th></tr></thead>
+  <tbody>{''.join(rows)}</tbody>
+</table>
+<form method='post' action='/slots/define'
+      style='display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.75rem;align-items:end'>
+  <div><label class='k'>Slot-Name *</label>
+      <input name='slot' required pattern='[A-Za-z0-9_-]+'
+             title='letters, digits, underscore, hyphen'
+             placeholder='z.B. video-gen' style='min-width:10rem'></div>
+  <div><label class='k'>Label</label>
+      <input name='label' placeholder='Anzeigename' style='min-width:10rem'></div>
+  <div><label class='k'>Typ</label>
+      <select name='type'>
+        <option value='forward'>forward (routable)</option>
+        <option value='text'>text</option>
+        <option value='bool'>bool</option>
+      </select></div>
+  <div><label class='k'>Wert</label>
+      <input name='value' placeholder='nur text/bool' style='min-width:8rem'>
+      </div>
+  <div><label class='k'>Ref-Slot</label>
+      <input name='ref_slot' placeholder='f&uuml;r value-Slots' style='min-width:8rem'></div>
+  <div><label class='k'>Ref-Feld</label>
+      <input name='ref_field' placeholder='z.B. prompt' style='min-width:8rem'></div>
+  <div><button class='btn btn-primary' type='submit'>Slot definieren</button></div>
+</form>
+<p class='note'>T-245-typed: <em>forward</em>-Slots sind routend (Mapping unten
+oder im Relay-Dashboard), <em>text</em>/<em>bool</em> sind value-Slots
+(nicht routend — 422 forward_slot_not_routable beim Submit); ein
+Ref-Slot verweist auf einen forward-Slot im selben Deklarationsblock.
+Die Definition landet lokal in node.yaml und wandert mit dem n&auml;chsten
+Heartbeat zum Relay.</p>
 </div>"""
 
+
+def _forward_mappings_table(panel: dict[str, Any]) -> str:
+    """The (node, slot) → target_capability mappings table (T-030, unchanged)."""
     mappings = panel.get("mappings") or {}
     rows = []
     for slot in panel.get("slots") or []:
@@ -888,9 +1011,66 @@ Relay-Dashboard gepflegt.</p>
 <p class='note'>Nodes mit Admin-Rolle d&uuml;rfen die
 <code>(node, slot) &rarr; target_capability</code>-Mappings direkt hier
 pflegen (PUT/DELETE <code>/relay/v2/forward-mappings/&#123;node&#125;/&#123;slot&#125;</code>).
-Slots selbst werden NICHT hier angelegt — sie kommen aus der
-node.yaml (<code>forward_slots</code>, T-053).</p>
+Slots selbst werden NICHT hier angelegt — die Definition lebt im
+Kartentitel &uuml;ber dieser Tabelle (node.yaml <code>forward_slots</code>, T-053/T-046).</p>
 </div>"""
+
+
+def _budget_section() -> str:
+    """T-046: Budget-Config + Verbrauchsanzeige + Reset + Busy-Schalter.
+
+    * Budget: node.yaml ``budget.total`` (Dashboard-Feld, Default 100);
+    * Verbrauch: ``used N / budget B (P%)`` aus dem persistierenden
+      Meter (``<relay-dir>/state/budget_used``) — NO auto-busy at 100%
+      (v1 deliberately simple, Ronny-Order 25.11);
+    * Busy: manual toggle → node.yaml ``status`` (busy/idle, T-081
+      store) → heartbeat explicit-busy — the field the relay honours
+      (discovery.py); NO auto-busy wiring touches this.
+    """
+    total = budget.budget_total()
+    used = budget.read_used()
+    pct = budget.percent(used, total)
+    current_status = node_config.load_active_status()
+    busy = current_status == "busy"
+    busy_badge = (
+        "<span class='badge accent'>explicit busy (heartbeat)</span>"
+        if busy
+        else f"<span class='badge'>{_esc(current_status) or 'auto (online)'}</span>"
+    )
+    # The toggle posts the OPPOSITE of the displayed state.
+    toggle_value = "0" if busy else "1"
+    toggle_label = "Busy aus (→ idle)" if busy else "Busy an"
+    return f"""
+<div class='grid'>
+  <div class='kv'>
+    <div class='k'>Budget</div>
+    <div class='v'>used {used} / budget {total} <strong>({pct}%)</strong></div>
+  </div>
+</div>
+<div style='display:flex;gap:1.5rem;flex-wrap:wrap;margin-top:.75rem;align-items:end'>
+  <form class='inline' method='post' action='/budget/save'>
+    <div style='display:flex;flex-direction:column'>
+      <label class='k'>Budget total (Punkte)</label>
+      <input name='budget_total' type='number' min='0' step='1'
+             value='{total}' required style='min-width:8rem'>
+    </div>
+    <button class='btn btn-primary' type='submit'>Budget speichern</button>
+  </form>
+  <form class='inline' method='post' action='/budget/reset'>
+    <button class='btn btn-danger' type='submit'>Verbrauch zur&uuml;cksetzen</button>
+  </form>
+  <form class='inline' method='post' action='/busy/toggle'>
+    <div class='k' style='margin-bottom:.25rem'>Node-Status: {busy_badge}</div>
+    <input type='hidden' name='busy' value='{toggle_value}'>
+    <button class='btn' type='submit'>{toggle_label}</button>
+  </form>
+</div>
+<p class='note'>Meter: jeder abgeschlossene Capability-Task z&auml;hlt die
+T-247-Admission-Points seiner bridge-Capability (cost&nbsp;&gt;&nbsp;0) —
+Reset nulliert den Z&auml;hler, nicht den Budget-Wert. Kein Auto-Busy bei
+100&nbsp;% (v1 bewusst simpel). Der Busy-Schalter tr&auml;gt den explicit-busy-Request
+im Heartbeat und &uuml;berlebt Daemon-Restarts (persistiert in node.yaml).</p>
+"""
 
 
 def _render_dashboard(
@@ -945,6 +1125,8 @@ def _render_dashboard(
 {_capabilities_section(bridge_cfg, edit_entry)}
 <h2>Forward-Slots</h2>
 {_forward_section(dashboard.fetch_forward_panel())}
+<h2>Budget &amp; Busy</h2>
+{_budget_section()}
 <h2>MCP endpoint</h2>
 {_mcp_section(bearer_override)}
 <h2>Agent-Tokens</h2>
@@ -964,6 +1146,8 @@ must approve it first. The daemon picks config changes up automatically
 # Dashboard POST routes (configured state only — blank nodes get a 409).
 # T-045: the per-row instant toggles /caps/publish + /caps/unpublish are
 # REPLACED by the batch commit form /caps/update-publish.
+# T-046: + /budget/save, /budget/reset, /busy/toggle (Budget & Busy
+# section) and /slots/define, /slots/delete (forward slot definition).
 _DASHBOARD_POST_ROUTES = (
     "/caps/create",
     "/caps/update",
@@ -973,6 +1157,12 @@ _DASHBOARD_POST_ROUTES = (
     "/caps/script-upload",
     "/forward/save",
     "/forward/delete",
+    # T-046: budget + busy + slot definition.
+    "/budget/save",
+    "/budget/reset",
+    "/busy/toggle",
+    "/slots/define",
+    "/slots/delete",
     "/mcp/enable",
     "/mcp/disable",
     "/mcp/bearer/rotate",
@@ -1161,6 +1351,92 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
             except Exception as exc:  # noqa: BLE001
                 return 400, _render_dashboard(error=f"forward client: {exc}")
             ok, msg = dashboard.delete_forward_mapping(client, node_id, slot)
+            if ok:
+                return 200, _render_dashboard(banner=msg)
+            return 400, _render_dashboard(error=msg)
+        elif path == "/budget/save":
+            # T-046: budget.total (Dashboard-Feld) → node.yaml mapping form.
+            raw = (form.get("budget_total") or [""])[0].strip()
+            try:
+                total = int(raw)
+            except ValueError:
+                total = -1
+            if total < 0:
+                return 400, _render_dashboard(
+                    error=f"budget total must be a non-negative integer, got {raw!r}"
+                )
+            ok, msg = active_profile.write_budget_total(total)
+            if ok:
+                return 200, _render_dashboard(banner=msg)
+            return 400, _render_dashboard(error=msg)
+        elif path == "/budget/reset":
+            # T-046: Reset nulliert den Meter (NOT the budget value).
+            after = budget.reset_used()
+            return 200, _render_dashboard(
+                banner=f"Budget-Verbrauch zurückgesetzt — used {after} / "
+                f"budget {budget.budget_total()}"
+            )
+        elif path == "/busy/toggle":
+            # T-046: manual busy switch → node.yaml status busy/idle
+            # (the T-081 store the heartbeat forwards and the relay honours).
+            want_busy = (form.get("busy") or [""])[0] == "1"
+            currently_busy = node_config.load_active_status() == "busy"
+            if want_busy == currently_busy:
+                return 200, _render_dashboard(
+                    banner=f"node status unchanged ({'busy' if want_busy else 'idle'})"
+                )
+            ok, msg = active_profile.write_busy_status(want_busy)
+            if ok:
+                return 200, _render_dashboard(banner=msg)
+            return 400, _render_dashboard(error=msg)
+        elif path == "/slots/define":
+            # T-046: DEFINE a forward slot (T-245-typed) → node.yaml.
+            slot = (form.get("slot") or [""])[0].strip()
+            if not slot:
+                return 400, _render_dashboard(error="slot name is required")
+            slot_type = (form.get("type") or ["forward"])[0].strip() or "forward"
+            slot_entry: dict[str, Any] = {"type": slot_type}
+            label = (form.get("label") or [""])[0].strip()
+            if label:
+                slot_entry["label"] = label
+            value = (form.get("value") or [""])[0].strip()
+            if value:
+                if slot_type == "text":
+                    slot_entry["value"] = value
+                elif slot_type == "bool":
+                    if value.lower() not in ("true", "false"):
+                        return 400, _render_dashboard(
+                            error="bool slot value must be exactly 'true' or 'false'"
+                        )
+                    slot_entry["value"] = value.lower() == "true"
+                else:
+                    return 400, _render_dashboard(
+                        error="forward slots must not carry a value —"
+                        " the routing target lives in forward_mappings"
+                    )
+            ref_slot = (form.get("ref_slot") or [""])[0].strip()
+            ref_field = (form.get("ref_field") or [""])[0].strip()
+            if ref_slot or ref_field:
+                if slot_type == "forward":
+                    return 400, _render_dashboard(
+                        error="forward slots must not carry a ref —"
+                        " the routing target lives in forward_mappings"
+                    )
+                if not (ref_slot and ref_field):
+                    return 400, _render_dashboard(
+                        error="ref needs both ref_slot AND ref_field (or neither)"
+                    )
+                slot_entry["ref_slot"] = ref_slot
+                slot_entry["ref_field"] = ref_field
+            ok, msg = active_profile.upsert_forward_slot(slot, slot_entry)
+            if ok:
+                return 200, _render_dashboard(banner=msg)
+            return 400, _render_dashboard(error=msg)
+        elif path == "/slots/delete":
+            slot = (form.get("slot") or [""])[0].strip()
+            if not slot:
+                return 400, _render_dashboard(error="slot name is required")
+            ok, msg = active_profile.remove_forward_slot(slot)
             if ok:
                 return 200, _render_dashboard(banner=msg)
             return 400, _render_dashboard(error=msg)
