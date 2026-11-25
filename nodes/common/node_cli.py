@@ -23,6 +23,14 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
         node-cli capabilities list | validate [profile] | publish <profile>
         node-cli capabilities diff [profile] | current
 
+    Capability store management (T-042, dashboard providers.yaml):
+        node-cli capabilities create --name N [--type process|http] [--summary S]
+            [--command C] [--args AR...] [--script F] [--max-parallel N]
+            [--cost N] [--artifacts-glob G] [--version V] [--publish]
+        node-cli capabilities update --name N [same field set] [--publish|--unpublish]
+        node-cli capabilities delete --name N
+        node-cli capabilities script-upload --file F | --stdin --name FILENAME
+
     Status:
         node-cli status
         node-cli reload — SIGHUP notification to a running daemon (ops
@@ -285,6 +293,45 @@ def _parser_prog() -> str:
     return os.path.basename(argv0) or "iowap-cli"
 
 
+def _add_capability_field_args(parser: argparse.ArgumentParser) -> None:
+    """T-042: the shared capability form-field slice for create AND update.
+
+    Identical flags on both subcommands (the brief's "same field set"):
+    only flags the user passed are collected by cli_capabilities._field_args,
+    so the dashboard store validation governs what is mandatory.
+    """
+    parser.add_argument(
+        "--type", default=None, help="Capability type: process or http (validated by the store)."
+    )
+    parser.add_argument("--summary", default=None, help="Short human description.")
+    parser.add_argument(
+        "--command", default=None, help="Process command text (argv template; parsed like the dashboard form)."
+    )
+    parser.add_argument(
+        "--args", nargs="*", default=None, metavar="ARG", help="Extra tokens appended to --command."
+    )
+    parser.add_argument(
+        "--script", default=None,
+        help="Store this script (dashboard upload rules) and prefill --command with its default argv.",
+    )
+    parser.add_argument("--max-parallel", default=None, help="Scheduler parallelism (≥1, default 1).")
+    parser.add_argument("--cost", default=None, help="Admission points (≥0, default 1).")
+    parser.add_argument("--artifacts-glob", default=None, help="Glob of artifacts the run may emit.")
+    parser.add_argument(
+        "--version", default=None, help="Entry version X.Y.Z (default 1.0.0; update auto-bumps unless set)."
+    )
+    parser.add_argument("--url-template", default=None, help="http type: URL template (exec mapping).")
+    parser.add_argument(
+        "--method", default=None, help="http type: HTTP method (GET/POST/PUT/PATCH/DELETE; default POST)."
+    )
+    parser.add_argument("--body-template", default=None, help="http type: request body template.")
+    parser.add_argument("--result-path", default=None, help="http type: JSON path of the stage result.")
+    parser.add_argument(
+        "--artifact-paths", default=None, help="http type: comma-separated artifact JSON paths."
+    )
+    parser.add_argument("--health-url", default=None, help="http type: health probe URL.")
+
+
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog or _parser_prog(),
@@ -441,6 +488,60 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     p_info.add_argument("name", help="Capability name to query.")
     p_info.set_defaults(func=with_client(cli_capabilities._cmd_capabilities_info))
+
+    # T-042: workspace capability management — wraps the dashboard store
+    # (create_provider/update_provider/delete_provider/save_script), NOT the
+    # profile commands above (list/validate/publish/diff stay profile-based).
+    p_create = p_caps_sub.add_parser(
+        "create", help="Create one workspace capability (dashboard store)."
+    )
+    p_create.add_argument("--name", required=True, help="Capability name (T-042: dashboard name regex).")
+    _add_capability_field_args(p_create)
+    p_create.add_argument(
+        "--publish", action="store_true",
+        help="Also add the capability to the bridge allowlist (set_capability_published).",
+    )
+    p_create.set_defaults(func=cli_capabilities._cmd_capabilities_create)
+
+    p_update = p_caps_sub.add_parser(
+        "update",
+        help="Edit one workspace capability in place (name immutable, auto-bump) — or, field-less with --publish/--unpublish, toggle the bridge allowlist only.",
+    )
+    p_update.add_argument("--name", required=True, help="Capability name (the immutable routing key).")
+    _add_capability_field_args(p_update)
+    p_update_group = p_update.add_mutually_exclusive_group()
+    p_update_group.add_argument(
+        "--publish", action="store_true",
+        help="After the edit (or alone, field-less): add to the bridge allowlist.",
+    )
+    p_update_group.add_argument(
+        "--unpublish", action="store_true",
+        help="Field-less only: remove the capability from the bridge allowlist.",
+    )
+    p_update.set_defaults(func=cli_capabilities._cmd_capabilities_update)
+
+    p_delete = p_caps_sub.add_parser(
+        "delete", help="Remove one workspace capability (destructive)."
+    )
+    p_delete.add_argument("--name", required=True, help="Capability name to delete.")
+    p_delete.set_defaults(func=cli_capabilities._cmd_capabilities_delete)
+
+    p_script_upload = p_caps_sub.add_parser(
+        "script-upload",
+        help="Store a capability script under <workspace>/bridge/scripts (extension allowlist, 2 MB cap).",
+    )
+    p_script_upload_source = p_script_upload.add_mutually_exclusive_group(required=True)
+    p_script_upload_source.add_argument(
+        "--file", default=None, help="Path of the script to store (basename becomes the stored name)."
+    )
+    p_script_upload_source.add_argument(
+        "--stdin", action="store_true", help="Read the script bytes from stdin (requires --name)."
+    )
+    p_script_upload.add_argument(
+        "--name", default=None,
+        help="Override the filename (required with --stdin; must carry an allowed extension).",
+    )
+    p_script_upload.set_defaults(func=cli_capabilities._cmd_capabilities_script_upload)
 
     # node
     p_node = sub.add_parser("node", help="Node operations (list, info, busy/idle/status).")

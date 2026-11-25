@@ -1,4 +1,5 @@
-"""CLI capabilities subcommands — list/validate/publish/diff/current/server/info (T-117 split).
+"""CLI capabilities subcommands — list/validate/publish/diff/current/server/info +
+T-042 workspace-store management (create/update/delete/script-upload).
 
 Constants ``ACTIVE_PATH`` and ``PROFILES_DIR`` are referenced lazily via
 ``node_config`` (``_nc.ACTIVE_PATH`` / ``_nc.PROFILES_DIR``) so the
@@ -12,12 +13,25 @@ daemon) is resolved the same lazy way inside the publish handler
 The ``with_client``-decorated handlers (server/info) keep the plain
 ``(client, args) -> int`` signature; the decorator is applied at
 parser-registration time in the facade.
+
+T-042: the ``create``/``update``/``delete``/``script-upload`` subcommands
+manage the WORKSPACE capability store (``<workspace>/bridge/providers.yaml``)
+and wrap the dashboard write functions verbatim — ``dashboard.create_provider``
+/ ``update_provider`` / ``delete_provider`` / ``save_script`` — so every
+validation rule (write-nothing-on-error, duplicate "delete it first",
+name regex, version shape, auto-bump) is the dashboard's rule, not a copy.
+They are deliberately separate from the profile commands above
+(list/validate/publish/diff operate on ``profiles.d/`` entries). Client-free:
+the relay is never contacted; the daemon picks changes up on its own
+``providers.yaml`` watch (T-022), and ``--publish`` toggles the allowlist via
+``set_capability_published`` which SIGHUPs live daemons itself.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 from nodes.common import node_config as _nc
@@ -250,4 +264,275 @@ def _cmd_capabilities_info(client: RelayClient, args) -> int:
                 f"(load={n.get('load', 0):.1f}, "
                 f"queue={n.get('queue_depth', 0)})"
             )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# T-042: workspace capability management (dashboard store wrap)
+# ---------------------------------------------------------------------------
+
+
+# T-042: the create/update form-field slice — argparse flag name → store
+# field name. One mapping for both subcommands (the update field set must
+# stay identical to the create set) and for the parser registration test.
+_FIELD_FLAGS: tuple[tuple[str, str], ...] = (
+    ("name", "name"),
+    ("type", "type"),
+    ("summary", "summary"),
+    ("command", "command"),
+    ("args", "args"),
+    ("script", "script"),
+    ("max-parallel", "max_parallel"),
+    ("cost", "cost"),
+    ("artifacts-glob", "artifacts_glob"),
+    ("version", "version"),
+    ("method", "method"),
+    ("url-template", "url_template"),
+    ("body-template", "body_template"),
+    ("result-path", "result_path"),
+    ("artifact-paths", "artifact_paths"),
+    ("health-url", "health_url"),
+)
+
+
+def _field_args(args) -> dict[str, Any]:
+    """Collect the capability form fields from a create/update Namespace.
+
+    Only flags the user actually passed land in the dict — the dashboard
+    validation decides what is mandatory (identical error messages). Values
+    stay raw (strings / lists / None) because ``_parse_capacity`` and the
+    version regex validate them client-side of the store.
+    """
+    fields: dict[str, Any] = {}
+    for cli_key, form_key in _FIELD_FLAGS:
+        value = getattr(args, cli_key.replace("-", "_"), None)
+        if value:
+            fields[form_key] = value
+    return fields
+
+
+def _entry_summary(name: str) -> dict[str, Any]:
+    """One workspace entry + its publish state for the success report."""
+    from nodes.common import bridge as _bridge
+    from nodes.common import dashboard as _dash
+
+    entry = _dash.find_provider(name) or {}
+    published = _dash.is_published(name, _bridge.load_bridge_config())
+    return {
+        "name": name,
+        "version": entry.get("version"),
+        "published": published,
+    }
+
+
+def _print_summary_line(prefix: str, summary: dict[str, Any]) -> None:
+    print(
+        f"{prefix}{summary['name']} v{summary['version']} "
+        f"published={'yes' if summary['published'] else 'no'}"
+    )
+
+
+def _publish_chain(args, name: str, summary: dict[str, Any]) -> dict[str, Any] | None:
+    """Apply a ``--publish`` flag after a successful create/update.
+
+    Returns a publish-failure result dict (``publish_error``) when the
+    allowlist toggle fails AFTER the entry write (the entry stays — the
+    caller reports both, exit 1), or None when nothing failed / no flag.
+    """
+    from nodes.common import dashboard as _dash
+
+    if not getattr(args, "publish", False):
+        return None
+    ok, msg = _dash.set_capability_published(name, True)
+    if ok:
+        summary["published"] = True
+        return None
+    return {"publish_error": msg}
+
+
+def _merge_command_and_args(fields: dict[str, Any]) -> str | None:
+    """Fold ``--args`` (raw tokens) into the ``--command`` text in place.
+
+    Returns the error message when ``args`` came without a command, else
+    None: the merged string is then split by the store's own parse_command,
+    so both create and update build the argv list identically.
+    """
+    extra = fields.pop("args", None)
+    command = fields.get("command")
+    if command and extra:
+        fields["command"] = f"{command} {' '.join(str(a) for a in extra)}"
+    elif extra:
+        return "--args requires --command"
+    return None
+
+
+def _cmd_capabilities_create(args) -> int:
+    """T-042: create one workspace capability (dashboard create_provider wrap)."""
+    from nodes.common import dashboard as _dash
+
+    _setup_logging(args.log_level)
+    fields = _field_args(args)
+
+    script = fields.pop("script", None)
+    if script:
+        # T-042: dashboard-form flow — store the script first, then prefill
+        # the command with the extension-aware default argv (the --command
+        # flag, when given, wins over the prefill). A failed create leaves
+        # the stored script behind, exactly as the dashboard form does.
+        script_path = Path(script)
+        if not script_path.is_file():
+            print(f"script not found: {script}", file=sys.stderr)
+            return 1
+        ok, msg, stored = _dash.save_script(script_path.name, script_path.read_bytes())
+        if not ok:
+            print(f"script upload FAILED: {msg}", file=sys.stderr)
+            return 1
+        fields["command"] = fields.get("command") or json.dumps(_dash.script_command_argv(stored))
+        summary_extra = {"script_uploaded": f"bridge/scripts/{stored}", "script_name": stored}
+    else:
+        summary_extra = {}
+
+    merge_error = _merge_command_and_args(fields)
+    if merge_error:
+        print(merge_error, file=sys.stderr)
+        return 1
+
+    ok, msg = _dash.create_provider(fields)
+    if not ok:
+        print(f"create FAILED: {msg}", file=sys.stderr)
+        return 1
+    summary = {**_entry_summary(msg), **summary_extra}
+    publish_err = _publish_chain(args, msg, summary)
+    if args.json:
+        print(json.dumps({"ok": True, **summary, **(publish_err or {})}))
+        return 1 if publish_err else 0
+    _print_summary_line(f"created '{msg}' — ", summary)
+    if publish_err:
+        print(f"publish FAILED: {publish_err['publish_error']}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cmd_capabilities_update(args) -> int:
+    """T-042: edit one workspace capability in place (dashboard update_provider wrap).
+
+    A field-less invocation with only --publish/--unpublish is the pure
+    allowlist toggle (dashboard /caps/publish semantics — ``set_capability_published``
+    only, NO version bump); a full field edit keeps the update contract
+    (every edit bumps unless an explicit differing version is passed).
+    """
+    from nodes.common import dashboard as _dash
+
+    _setup_logging(args.log_level)
+    name = (args.name or "").strip()
+    if not name:
+        print("update requires --name", file=sys.stderr)
+        return 1
+    fields = _field_args(args)
+    fields.pop("name", None)  # the routing key rides --name only
+    merge_error = _merge_command_and_args(fields)
+    if merge_error:
+        print(merge_error, file=sys.stderr)
+        return 1
+    publish_only = not fields
+    if publish_only and not (args.publish or args.unpublish):
+        print(
+            "update requires at least one field or --publish/--unpublish",
+            file=sys.stderr,
+        )
+        return 1
+    if publish_only:
+        # Pure allowlist toggle — the dashboard publish button, not an edit:
+        # no version bump (update_provider is never called).
+        ok, msg = _dash.set_capability_published(name, bool(args.publish))
+        if not ok:
+            print(f"publish FAILED: {msg}", file=sys.stderr)
+            return 1
+        summary = _entry_summary(name)
+        if args.json:
+            print(json.dumps({"ok": True, **summary}))
+            return 0
+        verb = "published" if args.publish else "unpublished"
+        _print_summary_line(f"{verb} — ", summary)
+        return 0
+
+    ok, msg = _dash.update_provider(name, fields)
+    if not ok:
+        print(f"update FAILED: {msg}", file=sys.stderr)
+        return 1
+    summary = _entry_summary(name)
+    publish_err = _publish_chain(args, name, summary)
+    if args.json:
+        print(json.dumps({"ok": True, **summary, "update_message": msg, **(publish_err or {})}))
+        return 1 if publish_err else 0
+    _print_summary_line(f"{msg} — ", summary)
+    if publish_err:
+        print(f"publish FAILED: {publish_err['publish_error']}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cmd_capabilities_delete(args) -> int:
+    """T-042: remove one workspace capability (dashboard delete_provider wrap)."""
+    from nodes.common import dashboard as _dash
+
+    _setup_logging(args.log_level)
+    name = (args.name or "").strip()
+    if not name:
+        print("delete requires --name", file=sys.stderr)
+        return 1
+    ok, msg = _dash.delete_provider(name)
+    if not ok:
+        print(f"delete FAILED: {msg}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"ok": True, "name": msg, "deleted": True}))
+        return 0
+    print(f"deleted '{msg}'")
+    return 0
+
+
+def _cmd_capabilities_script_upload(args) -> int:
+    """T-042: store one capability script (dashboard save_script wrap).
+
+    ``--file <path>`` (or ``--stdin`` with ``--name <filename>``) →
+    ``<workspace>/bridge/scripts/<stored>`` with the extension allowlist,
+    2 MB size cap and collision suffixing of the dashboard. Output is the
+    workspace-relative stored path, the slugified capability-name default
+    and the extension-aware default argv template per extension.
+    """
+    from nodes.common import dashboard as _dash
+
+    _setup_logging(args.log_level)
+    name = (args.name or "").strip()
+    if args.stdin:
+        if not name:
+            print("--stdin requires --name (the filename, e.g. tool.bat)", file=sys.stderr)
+            return 1
+        filename = name
+        content = sys.stdin.buffer.read()
+    else:
+        file_path = Path(args.file or "")
+        if not file_path.is_file():
+            print(f"script not found: {args.file}", file=sys.stderr)
+            return 1
+        filename = name or file_path.name
+        content = file_path.read_bytes()
+    ok, msg, stored = _dash.save_script(filename, content)
+    if not ok:
+        print(f"script upload FAILED: {msg}", file=sys.stderr)
+        return 1
+    result = {
+        "ok": True,
+        "stored": f"bridge/scripts/{stored}",
+        "stored_name": stored,
+        "name": _dash.slugify_capability_name(stored),
+        "command": _dash.script_command_argv(stored),
+    }
+    if args.json:
+        print(json.dumps(result))
+        return 0
+    print(f"stored '{result['stored']}'")
+    print(f"name: {result['name']}")
+    print(f"command: {' '.join(result['command'])}")
     return 0
