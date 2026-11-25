@@ -94,7 +94,9 @@ def _post(server, data, path):
     import urllib.parse
     import urllib.request
 
-    body = urllib.parse.urlencode(data).encode()
+    # doseq: scalar values encode identically, checkbox lists (T-045
+    # /caps/update-publish) need one parameter per item
+    body = urllib.parse.urlencode(data, doseq=True).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{server.server_address[1]}{path}", data=body, method="POST"
     )
@@ -495,19 +497,29 @@ def test_caps_delete_via_http(dash_env, monkeypatch):
 
 
 def test_caps_publish_unpublish_via_http(dash_env, monkeypatch):
+    """T-045: the per-row toggle routes are REPLACED by the batch commit
+    form — /caps/publish + /caps/unpublish are gone, the checkbox form
+    posts the full desired set to /caps/update-publish."""
     _configure(dash_env)
     node_config.ACTIVE_PATH.write_text(BRIDGE_YAML)
+    dashboard.create_provider({"name": "script.cleanup", "type": "process", "command": "x"})
     srv = _start_server(dash_env, monkeypatch)
     try:
-        resp = _post(srv, {"name": "script.cleanup"}, "/caps/publish")
+        resp = _post(srv, {"caps": ["script.cleanup"]}, "/caps/update-publish")
         assert resp.status_code == 200
+        assert "published: 1, unpublished: 0, unchanged: 0" in resp.text
         doc = yaml.safe_load(node_config.ACTIVE_PATH.read_text())
         assert doc["bridge"]["allowlist"] == ["script.cleanup"]
         assert doc["bridge"]["url"] == "http://host.docker.internal:7780"
-        resp = _post(srv, {"name": "script.cleanup"}, "/caps/unpublish")
+        # pulling back: posting the EMPTY set unpublishes everything
+        resp = _post(srv, {}, "/caps/update-publish")
         assert resp.status_code == 200
+        assert "published: 0, unpublished: 1, unchanged: 0" in resp.text
         doc = yaml.safe_load(node_config.ACTIVE_PATH.read_text())
         assert doc["bridge"]["allowlist"] == []
+        # the recomposed capabilities carry nothing bridged (store has no
+        # host.* entries)
+        assert not [c for c in doc.get("capabilities") or [] if c.get("bridge")]
     finally:
         onboarding.shutdown(srv)
 

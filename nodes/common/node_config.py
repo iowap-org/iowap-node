@@ -103,6 +103,12 @@ CAPABILITY_SCHEMA: dict[str, Any] = {
                     "cost": {"type": "integer", "minimum": 0},
                     "timeout": {"type": "integer", "minimum": 1},
                     "input_schema": {"type": "object"},
+                    # T-045: bridge routing markers on composed (baked)
+                    # provider entries — the recomposed active profile
+                    # persists the runtime merge dict's routing pair so
+                    # claimed host.* stages forward to the provider.
+                    "bridge": {"type": "boolean"},
+                    "bridge_name": {"type": "string"},
                 },
                 "additionalProperties": False,
             },
@@ -149,7 +155,7 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
             if "name" not in entry or not isinstance(entry.get("name"), str) or not entry["name"].strip():
                 errors.append(f"{prefix}: 'name' is required and must be a non-empty string")
             # Check for unknown keys
-            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "cost", "timeout", "routes", "long_run", "upload_modes", "result_path_hints", "config"}
+            allowed = {"name", "version", "type", "description", "input_schema", "auto_publish", "claimable", "handler", "max_parallel", "cost", "timeout", "routes", "long_run", "upload_modes", "result_path_hints", "config", "bridge", "bridge_name"}
             extra = set(entry.keys()) - allowed
             if extra:
                 errors.append(f"{prefix}: unknown keys: {', '.join(sorted(extra))}")
@@ -167,6 +173,8 @@ def validate_with_schema(data: dict[str, Any]) -> list[str]:
                 ("cost", int),
                 ("timeout", int),
                 ("long_run", bool),
+                ("bridge", bool),
+                ("bridge_name", str),
             ]:
                 val = entry.get(key)
                 if val is not None and not isinstance(val, expected_type):
@@ -448,6 +456,26 @@ def _normalize_capability(
         cap["description"] = raw["description"]
     if raw.get("input_schema") is not None:
         cap["input_schema"] = raw["input_schema"]
+    # T-045: forward the bridge routing markers — a composed (baked)
+    # provider entry routes claimed host.* stages to execute_bridge_task
+    # exactly like the runtime-merged cap dict (the active-profile load
+    # is the claim lookup's first match).
+    if raw.get("bridge") is not None:
+        if not isinstance(raw["bridge"], bool):
+            raise CapabilityValidationError(
+                "'bridge' must be a boolean",
+                file=file,
+                capability=name,
+            )
+        cap["bridge"] = raw["bridge"]
+    if raw.get("bridge_name") is not None:
+        if not isinstance(raw["bridge_name"], str):
+            raise CapabilityValidationError(
+                "'bridge_name' must be a string",
+                file=file,
+                capability=name,
+            )
+        cap["bridge_name"] = raw["bridge_name"]
     # T-075: forward routes so the heartbeat can register dynamic API endpoints.
     if raw.get("routes") is not None:
         cap["routes"] = raw["routes"]

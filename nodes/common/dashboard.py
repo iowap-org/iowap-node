@@ -263,6 +263,25 @@ def parse_command(raw: str) -> list[str]:
     return cleaned if cleaned else argv
 
 
+def _recompile_after_store_mutation() -> tuple[bool, str]:
+    """T-045: recompose the active profile after one store mutation.
+
+    Runs after EVERY successful providers.yaml write (create / update /
+    delete) and after every allowlist toggle — the dashboard, MCP
+    (``capability_create``/``update``/``delete``/``publish`` via the
+    T-042 CLI wrap) and CLI share the dashboard functions, so one hook
+    covers all three mutation paths. Failure is non-fatal for the store
+    operation: it logs the reason and is rendered into the dashboard
+    flash via :func:`nodes.common.active_profile.last_recompile_note`.
+    """
+    from nodes.common import active_profile
+
+    ok, msg = active_profile.recompile_active_profile()
+    if not ok:
+        logger.warning("post-mutation recompile failed (node.yaml untouched): %s", msg)
+    return ok, msg
+
+
 def create_provider(fields: dict[str, Any], path: Path | None = None) -> tuple[bool, str]:
     """Validate + append one capability to the workspace registry (atomically).
 
@@ -282,6 +301,7 @@ def create_provider(fields: dict[str, Any], path: Path | None = None) -> tuple[b
         )
     existing.append(entry)
     _atomic_write_yaml(path, {"providers": existing})
+    _recompile_after_store_mutation()
     return True, entry["name"]
 
 
@@ -294,6 +314,7 @@ def delete_provider(name: str, path: Path | None = None) -> tuple[bool, str]:
     if len(kept) == len(existing):
         return False, f"unknown capability {name!r}"
     _atomic_write_yaml(path, {"providers": kept})
+    _recompile_after_store_mutation()
     return True, name
 
 
@@ -353,6 +374,7 @@ def update_provider(name: str, fields: dict[str, Any], path: Path | None = None)
         entry["version"] = _bump_version(old_version)
     existing[idx] = entry
     _atomic_write_yaml(path, {"providers": existing})
+    _recompile_after_store_mutation()
     return True, f"update ok — {name} v{entry['version']}"
 
 
@@ -368,6 +390,16 @@ def _update_bridge_block(mutate: Callable[[dict[str, Any]], None]) -> tuple[bool
     without a url the bridge stays disabled, the fields simply wait for
     the operator to configure one). A non-mapping block is replaced with
     a fresh mapping.
+
+    T-045: BEFORE the mutation, the
+    :func:`bridge.migrate_manual_publish_block` one-shot runs — a
+    blanket-publish config (``auto_publish: true`` + empty allowlist) is
+    converted on the first bridge-block write, seeded with the current
+    providers.yaml names, so the mutation sees the conserved allowlist
+    (seed-then-mutate keeps a toggle a real add/remove). The migrated
+    live state is then baked into the active profile once via the
+    recompile pipeline (the merge dicts stopped riding the wire in the
+    same release).
     """
     path = node_config.ACTIVE_PATH
     data: dict[str, Any] = {}
@@ -381,15 +413,38 @@ def _update_bridge_block(mutate: Callable[[dict[str, Any]], None]) -> tuple[bool
     block = data.get("bridge")
     if not isinstance(block, dict):
         block = {}
+    from nodes.common import bridge as _bridge  # lazy: bridge imports dashboard
+
+    migrated = _bridge.migrate_manual_publish_block(
+        block,
+        [p.get("name") for p in load_providers() if isinstance(p, dict)],
+    )
+    if migrated is not None:
+        block = migrated
     mutate(block)
     data["bridge"] = block
     _atomic_write_yaml(path, data)
     reload_daemons()
+    if migrated is not None:
+        # one-shot conservation: bake the seeded allowlist into the
+        # active profile so the wire keeps serving the live set
+        from nodes.common import active_profile
+
+        active_profile.recompile_active_profile()
     return True, "node.yaml updated"
 
 
-def set_capability_published(name: str, published: bool) -> tuple[bool, str]:
-    """Add/remove ``name`` (bare, no ``host.`` prefix) from bridge.allowlist."""
+def set_capability_published(
+    name: str, published: bool, *, recompile: bool = True
+) -> tuple[bool, str]:
+    """Add/remove ``name`` (bare, no ``host.`` prefix) from bridge.allowlist.
+
+    T-045: after a successful toggle the active profile is recomposed
+    (the published set becomes the composed ``capabilities`` section) —
+    pass ``recompile=False`` when a caller batches several toggles and
+    recomposes ONCE at the end (the dashboard's Update-Capabilities
+    form).
+    """
 
     def mutate(block: dict[str, Any]) -> None:
         allowlist = block.get("allowlist")
@@ -400,7 +455,12 @@ def set_capability_published(name: str, published: bool) -> tuple[bool, str]:
             allowlist.append(name)
         block["allowlist"] = allowlist
 
-    return _update_bridge_block(mutate)
+    ok, msg = _update_bridge_block(mutate)
+    if ok and recompile:
+        from nodes.common import active_profile
+
+        active_profile.recompile_active_profile()
+    return ok, msg
 
 
 def set_auto_publish(enabled: bool) -> tuple[bool, str]:

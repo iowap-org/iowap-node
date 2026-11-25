@@ -594,8 +594,14 @@ def _capability_rows(providers: list[dict[str, Any]], bridge_cfg: dict[str, Any]
             if published
             else "<span class='badge muted'>unpublished</span>"
         )
-        toggle_action = "unpublish" if published else "publish"
-        toggle_label = "Unpublish" if published else "Publish"
+        # T-045: the per-row instant toggles are replaced by the batch
+        # checkbox UX — the checkbox is the DESIRED state, the badge the
+        # CURRENT (actual) state; posting the form diffs the two.
+        checkbox = (
+            f"<input type='checkbox' name='caps' value='{_esc(name)}'"
+            " form='caps-publish-form'"
+            f"{' checked' if published else ''}>"
+        )
         # T-030: scheduler capacity (defaults 1× / 1 pt)
         limits = (
             f"{_esc(entry.get('max_parallel', 1))}&times; / "
@@ -607,14 +613,11 @@ def _capability_rows(providers: list[dict[str, Any]], bridge_cfg: dict[str, Any]
   <td><span class='badge accent'>{_esc(ctype)}</span></td>
   <td class='note'>{_esc(summary)}</td>
   <td class='note'>{limits}</td>
-  <td>{badge}</td>
+  <td>{badge} {checkbox}</td>
   <td>
     <form class='inline' method='get' action='/caps/edit'>
       <input type='hidden' name='name' value='{_esc(name)}'>
       <button class='btn' type='submit'>Edit</button></form>
-    <form class='inline' method='post' action='/caps/{toggle_action}'>
-      <input type='hidden' name='name' value='{_esc(name)}'>
-      <button class='btn' type='submit'>{toggle_label}</button></form>
     <form class='inline' method='post' action='/caps/delete'
           onsubmit="return confirm('Delete capability {_esc(name)}?');">
       <input type='hidden' name='name' value='{_esc(name)}'>
@@ -795,12 +798,18 @@ def _capabilities_section(
 </table>
 <p class='note'>Definitions live in
 <code>{_esc(dashboard.providers_path())}</code> (the bridge daemon picks
-them up automatically). Publishing adds the capability to
-<code>bridge.allowlist</code> in node.yaml and reloads the daemon.
-<em>Parallel / Cost</em> feed the relay scheduler (max parallel claims /
-admission points per claim). <em>Edit</em> reuses this form prefilled;
-every save bumps the entry version (patch level) unless an explicit
-different X.Y.Z is set.</p>
+them up automatically). T-045: tick the checkboxes for the
+capabilities that should be published and press <em>Update
+Capabilities</em> — the checkmarks are the desired set, the badge shows
+the current allowlist state; the save diffs both and reloads the node
+(recomposed active profile). <em>Parallel / Cost</em> feed the relay
+scheduler (max parallel claims / admission points per claim).
+<em>Edit</em> reuses this form prefilled; every save bumps the entry
+version (patch level) unless an explicit different X.Y.Z is set.</p>
+<form id='caps-publish-form' method='post' action='/caps/update-publish'
+      style='margin-top:1rem'>
+  <button class='btn btn-primary' type='submit'>Update Capabilities</button>
+</form>
 <p style='margin-top:1rem'>Auto-publish (all capabilities while the
 allowlist is empty): {auto_badge} {auto_form}</p>
 </div>
@@ -953,12 +962,13 @@ must approve it first. The daemon picks config changes up automatically
 # ---------------------------------------------------------------------------
 
 # Dashboard POST routes (configured state only — blank nodes get a 409).
+# T-045: the per-row instant toggles /caps/publish + /caps/unpublish are
+# REPLACED by the batch commit form /caps/update-publish.
 _DASHBOARD_POST_ROUTES = (
     "/caps/create",
     "/caps/update",
     "/caps/delete",
-    "/caps/publish",
-    "/caps/unpublish",
+    "/caps/update-publish",
     "/caps/auto-publish",
     "/caps/script-upload",
     "/forward/save",
@@ -1008,6 +1018,25 @@ def _parse_multipart_file(content_type: str, body: bytes) -> tuple[str, bytes] |
     return None
 
 
+def _banner_with_recompile(banner: str) -> str:
+    """Append the T-045 post-mutation recompile note to a success banner.
+
+    The store functions recomposed the active profile right before this
+    render; a failing recompose must surface in the Flash (the entry
+    write itself succeeded — node.yaml stays byte-identical in that
+    case). An empty note (recompile skipped, e.g. no node.yaml yet)
+    adds nothing instead of a synthetic filler.
+    """
+    from nodes.common import active_profile as _ap
+
+    note = _ap.last_recompile_note()
+    if not note:
+        return banner
+    if note.startswith("recompile failed"):
+        return f"{banner} — {note}"
+    return f"{banner} ({note})"
+
+
 def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, bytes]:
     """Dispatch one dashboard POST → (http_status, page).
 
@@ -1019,7 +1048,9 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
             fields = {k: (v[0] if v else "") for k, v in form.items()}
             ok, msg = dashboard.create_provider(fields)
             if ok:
-                return 200, _render_dashboard(banner=f"Capability '{msg}' created")
+                return 200, _render_dashboard(
+                    banner=_banner_with_recompile(f"Capability '{msg}' created")
+                )
             return 400, _render_dashboard(error=msg)
         if path == "/caps/update":
             # T-036: name immutable — the hidden __name__ carries the
@@ -1030,23 +1061,68 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
             )
             ok, msg = dashboard.update_provider(target, fields)
             if ok:
-                return 200, _render_dashboard(banner=msg)
+                return 200, _render_dashboard(
+                    banner=_banner_with_recompile(msg)
+                )
             return 400, _render_dashboard(error=msg)
+        if path == "/caps/update-publish":
+            # T-045: batch commit — the posted (checked) names are the
+            # FULL desired published set; the server diffs them against
+            # the live allowlist view, applies the delta per cap WITHOUT
+            # a recompile each, recomposes the active profile ONCE at
+            # the end and reports the counter flash.
+            from nodes.common import active_profile as _ap
+            from nodes.common import bridge as _bridge
+
+            checked: list[str] = []
+            for raw_value in form.get("caps", []):
+                candidate = raw_value.strip()
+                if candidate and candidate not in checked:
+                    checked.append(candidate)
+            providers = dashboard.load_providers()
+            store_names = [
+                str(p.get("name"))
+                for p in providers
+                if isinstance(p, dict) and isinstance(p.get("name"), str)
+            ]
+            bridge_cfg = _bridge.load_bridge_config()
+            currently = {
+                n for n in store_names if dashboard.is_published(n, bridge_cfg)
+            }
+            wanted = {n for n in checked if n in store_names}
+            to_publish = sorted(wanted - currently)
+            to_unpublish = sorted(currently - wanted)
+            unchanged = len(currently & wanted)
+            failures: list[str] = []
+            for cap_name in to_publish:
+                ok, msg = dashboard.set_capability_published(cap_name, True, recompile=False)
+                if not ok:
+                    failures.append(f"{cap_name}: {msg}")
+            for cap_name in to_unpublish:
+                ok, msg = dashboard.set_capability_published(cap_name, False, recompile=False)
+                if not ok:
+                    failures.append(f"{cap_name}: {msg}")
+            # EINMAL recompile für den ganzen Batch (nicht je Cap)
+            ok, recomp_msg = _ap.recompile_active_profile()
+            counter = (
+                f"published: {len(to_publish)}, unpublished: {len(to_unpublish)}, "
+                f"unchanged: {unchanged}"
+            )
+            if failures or not ok:
+                detail = "; ".join(failures) if failures else recomp_msg
+                return 400, _render_dashboard(
+                    error=f"Update Capabilities failed — {counter}: {detail}"
+                )
+            banner = f"Update Capabilities saved — {counter} ({recomp_msg})"
+            return 200, _render_dashboard(banner=banner)
         name = (form.get("name") or [""])[0].strip()
         if path == "/caps/delete":
             ok, msg = dashboard.delete_provider(name)
             if ok:
-                return 200, _render_dashboard(banner=f"Capability '{msg}' deleted")
-            return 400, _render_dashboard(error=msg)
-        if path in ("/caps/publish", "/caps/unpublish"):
-            if not name:
-                return 400, _render_dashboard(error="capability name is required")
-            ok, _ = dashboard.set_capability_published(name, path == "/caps/publish")
-            if ok:
-                verb = "published" if path == "/caps/publish" else "unpublished"
                 return 200, _render_dashboard(
-                    banner=f"Capability '{name}' {verb} (allowlist + reload)"
+                    banner=_banner_with_recompile(f"Capability '{msg}' deleted")
                 )
+            return 400, _render_dashboard(error=msg)
         elif path == "/caps/auto-publish":
             enabled = (form.get("enable") or [""])[0] == "1"
             ok, _ = dashboard.set_auto_publish(enabled)

@@ -182,9 +182,8 @@ def _coerce_version(value: Any) -> str:
 def build_bridge_cap(name: str, raw: dict[str, Any]) -> dict[str, Any]:
     """Normalize ONE manifest capability into a registry cap dict.
 
-    The cap rides the normal heartbeat/claim machinery: claimable,
-    auto_publish already gated (the bridge only publishes allowed caps),
-    and the ``bridge`` marker routes claimed stages to
+    The cap rides the normal heartbeat/claim machinery: claimable and
+    the ``bridge`` marker route claimed stages to
     :func:`execute_bridge_task` instead of the local handler runner.
     ``input_schema`` passes through 1:1 (client-mcp T-009 convention —
     the node never re-validates). ``max_parallel`` / ``cost`` (T-030)
@@ -192,12 +191,22 @@ def build_bridge_cap(name: str, raw: dict[str, Any]) -> dict[str, Any]:
     ``version`` (T-036) with the 1.0.0 default — so edits in the
     providers.yaml reach the manifest → heartbeat → relay upsert instead
     of being hardcoded away.
+
+    T-045: ``auto_publish`` is stamped **False** — bridge caps are no
+    longer blanket-published per cap flag. The publish state lives ONLY
+    in ``bridge.allowlist`` (layered gate: the bridge-level
+    :func:`_publish_allowed` still admits caps into the runtime registry
+    for claim ROUTING, but the Layer-2 flag now keeps the merged dicts
+    off the heartbeat wire — a provider cap reaches the relay only as a
+    recomposed (baked) entry of the active profile, i.e. allowlist
+    membership is the wire gate; no blanket publish without an
+    allowlist entry).
     """
     cap: dict[str, Any] = {
         "name": name if name.startswith(BRIDGE_PREFIX) else f"{BRIDGE_PREFIX}{name}",
         "version": _coerce_version(raw.get("version")),
         "description": raw.get("summary") if isinstance(raw.get("summary"), str) else None,
-        "auto_publish": True,
+        "auto_publish": False,
         "claimable": True,
         "handler": "",  # never executed locally
         "max_parallel": _coerce_capacity(raw.get("max_parallel"), default=1, minimum=1),
@@ -224,6 +233,54 @@ def _publish_allowed(name: str, cfg: dict[str, Any]) -> bool:
     if "*" in allowlist or name in allowlist:
         return True
     return bool(cfg["auto_publish"]) and not allowlist
+
+
+def migrate_manual_publish_block(
+    block: Any, provider_names: "list[Any]"
+) -> dict[str, Any] | None:
+    """T-045 one-shot migration on the node.yaml bridge-block write path.
+
+    A ``bridge:`` block carrying ``auto_publish: true`` AND an empty
+    allowlist is the blanket-publish configuration (every provider cap
+    goes live). The manual model conserves the live state ONCE: the
+    allowlist is seeded with the current
+    ``<workspace>/bridge/providers.yaml`` names (provider-file order,
+    deduped) and ``auto_publish`` is switched off, with a log line.
+    Afterwards publishing is manual: allowlist add = publish, remove =
+    pull back.
+
+    Returns the migrated block, or ``None`` when the block is not (or no
+    longer) in the blanket state — idempotent: after the first conversion
+    the condition can never hold again.
+    """
+    if not isinstance(block, dict):
+        return None
+    if block.get("auto_publish") is not True:
+        return None
+    allowlist = block.get("allowlist")
+    if (
+        isinstance(allowlist, list)
+        and allowlist
+        and all(isinstance(e, str) for e in allowlist)
+    ):
+        # a non-empty allowlist already wins over auto_publish (the gate
+        # rule) — nothing blanket-publishes here, nothing to migrate.
+        return None
+    names: list[str] = []
+    for raw in provider_names:
+        if isinstance(raw, str) and raw.strip() and raw not in names:
+            names.append(raw)
+    migrated = dict(block)
+    migrated["auto_publish"] = False
+    migrated["allowlist"] = names
+    log.info(
+        "T-045 one-shot migration: bridge.auto_publish blanket mode ended — "
+        "allowlist seeded with %d provider name(s) %s (live state conserved; "
+        "publishing via bridge.allowlist is manual from now on)",
+        len(names),
+        names or "[]",
+    )
+    return migrated
 
 
 class BridgeManager:

@@ -209,6 +209,7 @@ def test_published_state_and_bridge_block_survive_update(dash_env):
     ok, msg = dashboard.set_capability_published("a.cap", True)
     assert ok, msg
     node_before = (node_config.ACTIVE_PATH).read_bytes()
+    doc_before = yaml.safe_load(node_before)
     ok, msg = dashboard.update_provider(
         "a.cap", {"name": "a.cap", "type": "process", "command": "run x",
                   "summary": "edited"})
@@ -216,8 +217,15 @@ def test_published_state_and_bridge_block_survive_update(dash_env):
     entry = yaml.safe_load(dashboard.providers_path().read_text())["providers"][0]
     assert entry["summary"] == "edited"
     assert entry["version"] == "1.0.1"
-    # node.yaml byte-identical — the allowlist/auto_publish side is separate
-    assert node_config.ACTIVE_PATH.read_bytes() == node_before
+    # T-045: the store edit NOW recomposes the active profile — the
+    # published cap is re-baked with the bumped version and the bridge
+    # block (allowlist/auto_publish/url/token/workspace) survives:
+    doc_after = yaml.safe_load((node_config.ACTIVE_PATH).read_text())
+    assert doc_after["bridge"] == doc_before["bridge"]
+    assert doc_after["bridge"]["allowlist"] == ["a.cap"]
+    assert doc_after["bridge"]["auto_publish"] is False  # one-shot migrated
+    baked = [c for c in doc_after["capabilities"] if c.get("bridge")]
+    assert [(c["name"], c["version"]) for c in baked] == [("host.a.cap", "1.0.1")]
     assert dashboard.is_published(
         "a.cap", bridge.load_bridge_config()) is True
 

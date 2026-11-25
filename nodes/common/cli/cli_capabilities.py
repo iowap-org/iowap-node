@@ -24,7 +24,8 @@ They are deliberately separate from the profile commands above
 (list/validate/publish/diff operate on ``profiles.d/`` entries). Client-free:
 the relay is never contacted; the daemon picks changes up on its own
 ``providers.yaml`` watch (T-022), and ``--publish`` toggles the allowlist via
-``set_capability_published`` which SIGHUPs live daemons itself.
+``set_capability_published`` which recomposes the active profile and
+SIGHUPs live daemons itself.
 """
 
 from __future__ import annotations
@@ -442,8 +443,9 @@ def _cmd_capabilities_update(args) -> int:
         )
         return 1
     if publish_only:
-        # Pure allowlist toggle — the dashboard publish button, not an edit:
-        # no version bump (update_provider is never called).
+        # Pure allowlist toggle — the manual publish set (T-045: the
+        # dashboard batch form is the UX, MCP/CLI stay per-call; NO
+        # version bump — update_provider is never called).
         ok, msg = _dash.set_capability_published(name, bool(args.publish))
         if not ok:
             print(f"publish FAILED: {msg}", file=sys.stderr)

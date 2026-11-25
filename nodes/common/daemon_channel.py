@@ -134,6 +134,20 @@ def _adopt(
     block = data.get("bridge")
     if not isinstance(block, dict):
         block = {}
+    # T-045: the adoption write is a node.yaml bridge-block write path,
+    # so the one-shot manual-publish migration runs here too — a VM whose
+    # config is only ever touched by the daemon.json channel still gets
+    # its blanket publish state conserved (auto_publish off, allowlist
+    # seeded, active profile recomposed ONCE).
+    from nodes.common import bridge as _bridge
+    from nodes.common import dashboard as _dash
+
+    migrated = _bridge.migrate_manual_publish_block(
+        block,
+        [p.get("name") for p in _dash.load_providers() if isinstance(p, dict)],
+    )
+    if migrated is not None:
+        block = migrated
     block["url"] = url
     block["token"] = token
     data["bridge"] = block
@@ -141,6 +155,10 @@ def _adopt(
     tmp = active_path.with_suffix(active_path.suffix + ".tmp")
     tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
     tmp.replace(active_path)
+    if migrated is not None:
+        from nodes.common import active_profile
+
+        active_profile.recompile_active_profile()
     return True, "node.yaml updated"
 
 
