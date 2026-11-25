@@ -11,6 +11,7 @@ external YAML profile (see NODE_CLI_SPEC.md). Subcommands:
         node-cli task submit --name <name> --stage <cap>:<json_payload> [--priority N] [--owner <node_id>]
         node-cli artifact download <artifact_id> [--output <path>]
         node-cli artifact upload <file> [--name <name>] [--task-id <id>] [--stage-id <id>]
+        node-cli artifact link <artifact_id> [--ttl-seconds N] [--max-downloads N]
 
     Handler primitives (T-179):
         node-cli hp put <path> --cap <capability> [--name <name>]
@@ -762,6 +763,21 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         "--stage-id", default=None, help="Optional stage ID to associate with."
     )
     p_artifact_upload.set_defaults(func=with_client(cli_artifact._cmd_artifact_upload))
+
+    # T-033: short-lived signed download link
+    p_artifact_link = p_artifact_sub.add_parser(
+        "link", help="Create a short-lived signed download URL for an artifact."
+    )
+    p_artifact_link.add_argument("artifact_id", help="The artifact ID to link.")
+    p_artifact_link.add_argument(
+        "--ttl-seconds", type=int, default=None,
+        help="Link TTL in seconds (server default: 900; accepted 30..86400).",
+    )
+    p_artifact_link.add_argument(
+        "--max-downloads", type=int, default=None,
+        help="Download cap (server default: 1; accepted 1..10).",
+    )
+    p_artifact_link.set_defaults(func=with_client(cli_artifact._cmd_artifact_link))
 
     # docs (T-059)
     p_docs = sub.add_parser(

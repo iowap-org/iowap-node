@@ -1,4 +1,4 @@
-"""CLI artifact subcommands — download / upload (T-117 split).
+"""CLI artifact subcommands — download / upload / link (T-117 split, T-033 link).
 
 Handler signatures are plain ``(client, args) -> int``; the
 ``node_cli.with_client`` decorator is applied at parser-registration time
@@ -10,8 +10,55 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
+import httpx
 
 from nodes.common.relay_client import RelayClient
+
+
+def _cmd_artifact_link(client: RelayClient, args: Any) -> int:
+    """Create a short-lived signed download URL for an artifact (T-033).
+
+    pretty print URL + expires_at + max_downloads; exit 0. Relay
+    rejections (404 artifact, 422 out-of-range) exit 1 with the status on
+    stderr — the caller (CLI, MCP runner) classifies from there.
+    """
+    try:
+        result = client.create_artifact_link(
+            args.artifact_id,
+            ttl_seconds=args.ttl_seconds,
+            max_downloads=args.max_downloads,
+        )
+    except httpx.HTTPStatusError as exc:
+        resp = exc.response
+        detail = ""
+        try:
+            detail = resp.json().get("detail", "")
+        except Exception:  # noqa: BLE001 — body may not be JSON
+            detail = ""
+        if detail:
+            print(
+                f"artifact link failed: HTTP {resp.status_code}: {detail}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"artifact link failed: HTTP {resp.status_code}: {resp.text.strip()}",
+                file=sys.stderr,
+            )
+        return 1
+    if args.json:
+        print(json.dumps(result, default=str))
+        return 0
+    print(
+        "Download link created — valid until {expires_at}, max {max_downloads} download(s):".format(
+            expires_at=result.get("expires_at", "?"),
+            max_downloads=result.get("max_downloads", "?"),
+        )
+    )
+    print(result.get("url", ""))
+    return 0
 
 
 def _cmd_artifact_download(client: RelayClient, args) -> int:

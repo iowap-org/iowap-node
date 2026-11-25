@@ -1262,6 +1262,35 @@ class RelayClient:
         resp.raise_for_status()
         return resp.json()
 
+    # -- artifact download link (T-033) -------------------------------------
+
+    def create_artifact_link(
+        self,
+        artifact_id: str,
+        *,
+        ttl_seconds: int | None = None,
+        max_downloads: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a short-lived signed download URL for a relay artifact.
+
+        ``POST /relay/v2/storage/files/{artifact_id}/link`` — both
+        ``ttl_seconds`` and ``max_downloads`` are optional (server defaults:
+        900 s TTL, 1 download). The response dict re-aches the caller
+        completely, including ``url`` — the URL itself is the bearer, so it
+        must be treated as a secret (only its SHA-256 hash lives on the
+        relay).
+        """
+        body: dict[str, Any] = {}
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
+        if max_downloads is not None:
+            body["max_downloads"] = max_downloads
+        r = self._post_with_auth_retry(
+            f"/relay/v2/storage/files/{artifact_id}/link", body
+        )
+        r.raise_for_status()
+        return r.json()
+
     # -- T-177: unauthenticated server-status probe ---------------------------
 
     def probe_server(self) -> dict[str, Any]:
