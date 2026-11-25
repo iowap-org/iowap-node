@@ -34,10 +34,17 @@ register logic (:func:`nodes.common.cli.cli_server.register_node`, the
 same code path as ``iowap-cli node register`` — no CLI subprocess). The
 result (node_id + status ok/pending) is shown inline; errors as plain
 text. POST is refused once the node is configured. All other POST
-routes (``/caps/*``, ``/mcp/*``) are refused while blank (409).
+routes (``/caps/*``, ``/mcp/*``, ``/agents/*``) are refused while blank (409).
 
 Config pickup needs no signal: the T-011 idle loop polls every 2 s and
 starts the daemon on its own (see ``node_utils.wait_for_relay_config``).
+
+T-035 P1c adds the fourth section, "Agent-Tokens": create (show-once raw
+token rendered exactly in that POST's response), revoke (immediate MCP
+verification cut-off) and the caps-manage toggle — all backed by
+:mod:`nodes.common.agent_tokens` on the dedicated ``/data/agents``
+volume. The primary bearer itself is never rendered here (T-016e keeps
+its rotate flow).
 
 Security: the server is loopback-mapped on the host (compose profile —
 mirroring the MCP port 7781) and unauthenticated by design: it can only
@@ -59,7 +66,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs
 
-from nodes.common import bridge, dashboard, node_config, node_utils
+from nodes.common import agent_tokens, bridge, dashboard, node_config, node_utils
 from nodes.common.cli.cli_server import normalize_base_url, register_node
 from nodes.common.relay_client import _discover_relay_mdns
 
@@ -464,6 +471,111 @@ def _mcp_section(banner_bearer: str | None = None) -> str:
 </div>"""
 
 
+def _agent_rows(agents: list[dict[str, Any]]) -> str:
+    """One table row per known agent token (T-035: id, created, used, caps)."""
+    if not agents:
+        return (
+            "<tr><td colspan='5' class='note'>No agent tokens yet — every "
+            "MCP client currently uses the primary bearer above; create one "
+            "per agent to scope it to its own tasks.</td></tr>"
+        )
+    rows = []
+    for entry in agents:
+        agent_id = str(entry.get("id", "?"))
+        name = str(entry.get("name", "?"))
+        created = str(entry.get("created_at") or "—").split("T")[0]
+        used = str(entry.get("last_used") or "never").split(".")[0]
+        revoked = bool(entry.get("revoked"))
+        caps = bool(entry.get("caps_manage"))
+        rev_note = " <span class='note'>(revoked)</span>" if revoked else ""
+        caps_html = (
+            "<span class='badge ok'>manage</span>"
+            if caps
+            else "<span class='badge muted'>restricted</span>"
+        )
+        state_html = (
+            "<span class='badge muted'>revoked</span>"
+            if revoked
+            else "<span class='badge ok'>active</span>"
+        )
+        toggle_action = "0" if caps else "1"
+        toggle_label = "Revoke manage-right" if caps else "Allow caps-manage"
+        disabled = " disabled" if revoked else ""
+        rows.append(f"""
+<tr>
+  <td>{_esc(name)}{rev_note}</td>
+  <td class='mono'>{_esc(agent_id)}</td>
+  <td class='note'>{_esc(created)}</td>
+  <td class='note'>{_esc(used)}</td>
+  <td>{state_html} {caps_html}</td>
+  <td>
+    <form class='inline' method='post' action='/agents/caps-toggle'{disabled}>
+      <input type='hidden' name='agent_id' value='{_esc(agent_id)}'>
+      <input type='hidden' name='enable' value='{toggle_action}'>
+      <button class='btn' type='submit'{disabled}>{toggle_label}</button></form>
+    <form class='inline' method='post' action='/agents/revoke'{disabled}>
+      <input type='hidden' name='agent_id' value='{_esc(agent_id)}'>
+      <button class='btn btn-danger' type='submit'{disabled}>Revoke</button></form>
+  </td>
+</tr>"""
+        )
+    return "".join(rows)
+
+
+def _agents_section(agent_token: str | None = None) -> str:
+    """Agent-token management (T-035 P1c): list, show-once create, revoke, toggle.
+
+    The raw token is rendered EXACTLY ONCE — the caller passes it right
+    after ``create``; every later render shows only the id list. The
+    PRIMARY bearer is never displayed here (T-016e rotate flow keeps that
+    job).
+    """
+    try:
+        agents = agent_tokens.load_agents()
+    except Exception as exc:  # noqa: BLE001 — a broken store must not kill the page
+        logger.warning("agent token section: store unreadable (%s)", exc)
+        agents = []
+
+    show_once = ""
+    if agent_token is not None:
+        show_once = f"""
+  <div class='flash ok mono' style='word-break:break-all;font-size:.9rem'>
+    {_esc(agent_token)}
+  </div>
+  <p class='note'>Copy it now — this token is <strong>shown only this
+  once</strong>; the store keeps only its SHA-256 hash. Give it to exactly
+  one agent (its MCP header <code>Authorization: Bearer &lt;token&gt;</code>
+  replaces the shared primary bearer in that agent's URL config).</p>"""
+
+    return f"""
+<div class='card'>
+  {show_once}
+  <div style='overflow-x:auto'>
+  <table style='width:100%;border-collapse:collapse'>
+    <thead><tr>
+      <th style='text-align:left;padding:.4rem'>Agent</th>
+      <th style='text-align:left;padding:.4rem'>ID</th>
+      <th style='text-align:left;padding:.4rem'>Created</th>
+      <th style='text-align:left;padding:.4rem'>Last used</th>
+      <th style='text-align:left;padding:.4rem'>State</th>
+      <th style='text-align:left;padding:.4rem'>Actions</th>
+    </tr></thead>
+    <tbody>{_agent_rows(agents)}</tbody>
+  </table>
+  </div>
+  <form method='post' action='/agents/create' style='margin-top:1rem'>
+    <input type='text' name='name' placeholder='agent name (e.g. hermes-laptop)'
+           required style='padding:.5rem .7rem;border-radius:.5rem;
+           border:1px solid var(--border);background:var(--panel2);color:var(--text)'>
+    <button class='btn btn-primary' type='submit'>Create token</button>
+  </form>
+  <p class='note'>Tokens live on the dedicated <code>/data/agents</code>
+  volume (hashes only, 0600). Agents see their submitted tasks only
+  (primary bearer = full access, unchanged); <em>Allow caps-manage</em>
+  additionally grants an agent the capability_* MCP tools.</p>
+</div>"""
+
+
 def _capability_rows(providers: list[dict[str, Any]], bridge_cfg: dict[str, Any] | None) -> str:
     if not providers:
         return (
@@ -777,6 +889,7 @@ def _render_dashboard(
     banner: str | None = None,
     error: str | None = None,
     bearer_override: str | None = None,
+    agent_token: str | None = None,
     edit_entry: dict[str, Any] | None = None,
 ) -> bytes:
     """The full node dashboard (configured state) — relay-design family."""
@@ -825,6 +938,8 @@ def _render_dashboard(
 {_forward_section(dashboard.fetch_forward_panel())}
 <h2>MCP endpoint</h2>
 {_mcp_section(bearer_override)}
+<h2>Agent-Tokens</h2>
+{_agents_section(agent_token)}
 <p class='note'>If the relay shows the node as <em>pending</em>, an admin
 must approve it first. The daemon picks config changes up automatically
 (SIGHUP / next poll).</p>
@@ -851,6 +966,10 @@ _DASHBOARD_POST_ROUTES = (
     "/mcp/enable",
     "/mcp/disable",
     "/mcp/bearer/rotate",
+    # T-035 P1c: agent-token management on the /data/agents store.
+    "/agents/create",
+    "/agents/revoke",
+    "/agents/caps-toggle",
 )
 
 # T-030: the script-upload body may carry up to MAX_SCRIPT_BYTES of file
@@ -991,6 +1110,38 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
             return 200, _render_dashboard(
                 banner=f"New bearer generated{note}", bearer_override=bearer
             )
+        elif path == "/agents/create":
+            # T-035 P1c: show-once — the raw token rides THIS render only.
+            name = (form.get("name") or [""])[0].strip()
+            if not name:
+                return 400, _render_dashboard(error="agent name is required")
+            agent_id, raw_token = agent_tokens.create(name)
+            logger.info("agent token created: id=%s (never logged)", agent_id)
+            return 200, _render_dashboard(
+                banner=(f"Agent token '{name}' created ({agent_id}) — "
+                        "copy the token below, it is shown only this once"),
+                agent_token=raw_token,
+            )
+        elif path == "/agents/revoke":
+            agent_id = (form.get("agent_id") or [""])[0].strip()
+            entry = agent_tokens.revoke(agent_id) if agent_id else None
+            if entry is not None:
+                return 200, _render_dashboard(
+                    banner=f"Agent '{entry.get('name', agent_id)}' revoked — "
+                           "its bearer stops working immediately"
+                )
+            return 400, _render_dashboard(error=f"agent {agent_id!r} unknown")
+        elif path == "/agents/caps-toggle":
+            agent_id = (form.get("agent_id") or [""])[0].strip()
+            enable = (form.get("enable") or [""])[0] == "1"
+            entry = agent_tokens.set_caps_manage(agent_id, enable) if agent_id else None
+            if entry is not None:
+                verb = "granted" if enable else "removed"
+                return 200, _render_dashboard(
+                    banner=f"caps-manage {verb} for agent "
+                           f"'{entry.get('name', agent_id)}'"
+                )
+            return 400, _render_dashboard(error=f"agent {agent_id!r} unknown")
     except Exception as exc:  # noqa: BLE001 — the page must never 500 raw
         logger.exception("dashboard POST %s failed", path)
         return 400, _render_dashboard(error=f"{type(exc).__name__}: {exc}")

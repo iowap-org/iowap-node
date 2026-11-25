@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "bindings": {
+    "agt-00001234": {
+      "task_ids": [
+        "TASK-1A",
+        "TASK-2B"
+      ],
+      "seen_artifacts": {
+        "art-100": [
+          "TASK-1A"
+        ],
+        "art-101": [
+          "TASK-1A",
+          "TASK-2B"
+        ]
+      }
+    },
+    "agt-5678abcd": {
+      "task_ids": [
+        "TASK-3C"
+      ],
+      "seen_artifacts": {}
+    }
+  }
+}
