@@ -43,7 +43,6 @@ import shlex
 import shutil
 import signal
 import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -526,28 +525,98 @@ def rotate_bearer(supervisor: "McpSupervisor | None" = None) -> tuple[str, bool]
     return bearer, restarted
 
 
-def default_mcp_command(port: int) -> list[str]:
-    """Resolve the MCP server argv (same shape the T-020 supervisor uses).
+# ---------------------------------------------------------------------------
+# MCP spawn resolution (T-041): transport-dependent binary selection.
+#
+# The universal image (iowap-docker/universal-node) ships the MCP HTTP
+# server as the ``iowap-node-mcp`` console script — the legacy ``iowap-mcp``
+# entry no longer knows ``--http`` (client-mcp 0.2.0 is stdio-only), so the
+# old ``iowap-mcp --http`` spawn in a universal image died with a usage
+# error before answering the first probe (curl 52 again). Classic node
+# images only know ``iowap-mcp --http``. The resolver picks the binary by
+# transport; nothing resolvable → FileNotFoundError, the supervisor start
+# turns that into a fail-closed (False, msg) and spawns NOTHING.
+#
+# Untouched channels: the entrypoint-started MCP (separate supervisor) and
+# the bearer fail-closed guard (start never without the bearer — the
+# spawned process still enforces it itself via _child_env()).
+# ---------------------------------------------------------------------------
 
-    Resolution: ``IOWAP_MCP_COMMAND`` (shell string, for exotic installs),
-    then the ``iowap-mcp`` console script on PATH, then
-    ``python -m iowap_client_mcp`` from the running interpreter.
+# http transport (the McpSupervisor / dashboard HTTP-MCP start): universal
+# image first, then the legacy console script — both take the same server
+# flags (--http --host 0.0.0.0 --port <port>); only the name changed.
+MCP_HTTP_BINARY = "iowap-node-mcp"
+MCP_HTTP_LEGACY_BINARY = "iowap-mcp"
+# stdio transport (client-context entry — NOT the dashboard HTTP path):
+# the legacy console script without transport flags; client-mcp 0.2.0 is
+# stdio-only.
+MCP_STDIO_BINARY = "iowap-mcp"
+
+
+def resolve_mcp_spawn(port: int, *, transport: str = "http") -> list[str]:
+    """The MCP process argv, transport-dependent (T-041).
+
+    ``transport="http"`` — the supervisor/dashboard HTTP-MCP spawn:
+    ``IOWAP_MCP_COMMAND`` override (exotic installs), the
+    ``iowap-node-mcp`` console script (universal images), then the legacy
+    ``iowap-mcp --http`` argv (classic images). Raises FileNotFoundError
+    when nothing is resolvable — fail-closed, same rule the spawned
+    process enforces on a missing bearer: never start what cannot serve
+    the endpoint.
+
+    ``transport="stdio"`` — the stdio client entry (``iowap-mcp``, no
+    transport flags); not exercised by the dashboard's HTTP spawn path.
+
+    The ``--host 0.0.0.0`` (T-016d, same reason the T-020 entrypoint
+    needs it): the process defaults to container-internal loopback, but
+    the compose publish 127.0.0.1:7781 -> container eth0 never reaches
+    that bind — the endpoint would answer curl 52 while looking perfectly
+    alive.
     """
     env_cmd = os.environ.get("IOWAP_MCP_COMMAND", "").strip()
     if env_cmd:
         return shlex.split(env_cmd)
-    # --host 0.0.0.0 (T-016d, same reason the T-020 entrypoint needs it):
-    # the process defaults to container-internal loopback, but the compose
-    # publish 127.0.0.1:7781 -> container eth0 never reaches that bind —
-    # the endpoint would answer curl 52 while looking perfectly alive.
-    exe = shutil.which("iowap-mcp")
+    if transport == "stdio":
+        exe = shutil.which(MCP_STDIO_BINARY)
+        if exe:
+            return [exe]
+        raise FileNotFoundError(
+            f"no {MCP_STDIO_BINARY!r} on PATH (T-041) — set IOWAP_MCP_COMMAND to override"
+        )
+    # http: universal image first (T-041), legacy images fallback, then a
+    # clear failure — no silent stdio-only last resort (client-mcp 0.2.0
+    # is stdio-only; the old ``python -m iowap_client_mcp --http`` spawn
+    # just died with a usage error).
+    exe = shutil.which(MCP_HTTP_BINARY)
     if exe:
         return [exe, "--http", "--host", "0.0.0.0", "--port", str(port)]
-    return [sys.executable, "-m", "iowap_client_mcp", "--http", "--host", "0.0.0.0", "--port", str(port)]
+    exe = shutil.which(MCP_HTTP_LEGACY_BINARY)
+    if exe:
+        return [exe, "--http", "--host", "0.0.0.0", "--port", str(port)]
+    raise FileNotFoundError(
+        f"no MCP binary on PATH: tried {MCP_HTTP_BINARY!r} (universal image) and "
+        f"{MCP_HTTP_LEGACY_BINARY!r} (legacy) — set IOWAP_MCP_COMMAND to override (T-041)"
+    )
+
+
+def default_mcp_command(port: int) -> list[str]:
+    """The MCP server argv for the HTTP spawn (same shape the T-020 supervisor uses).
+
+    T-041: thin alias of :func:`resolve_mcp_spawn` (http transport) —
+    ``iowap-node-mcp`` first (universal images), legacy ``iowap-mcp
+    --http`` fallback, FileNotFoundError fail-closed when neither is
+    resolvable.
+    """
+    return resolve_mcp_spawn(port)
 
 
 class McpSupervisor:
-    """Starts/stops the in-container HTTP-MCP process (``iowap-mcp --http``).
+    """Starts/stops the in-container HTTP-MCP process (T-041 spawn).
+
+    The binary is transport-dependent (HTTP-MCP start): ``iowap-node-mcp``
+    on universal images, legacy ``iowap-mcp --http`` elsewhere,
+    fail-closed when neither is resolvable. The entrypoint-started MCP
+    is a separate channel and unaffected.
 
     The dashboard's enable/disable/rotate route through this class so the
     process interface is one seam tests can mock (``spawner`` kwarg).
@@ -581,7 +650,10 @@ class McpSupervisor:
     def _argv(self) -> list[str]:
         if self._command:
             return list(self._command)
-        return default_mcp_command(self.port)
+        # T-041: this spawn IS the HTTP-MCP start — http transport resolves
+        # ``iowap-node-mcp`` (universal image) with the legacy ``iowap-mcp
+        # --http`` fallback, or raises FileNotFoundError (fail-closed).
+        return resolve_mcp_spawn(self.port, transport="http")
 
     def _read_pid(self) -> int | None:
         return node_utils.read_pid(self.pid_path)
@@ -624,7 +696,14 @@ class McpSupervisor:
         """Spawn the MCP process (no-op when already running)."""
         if self.is_running():
             return True, f"MCP already running (pid {self._read_pid()})"
-        argv = self._argv()
+        try:
+            argv = self._argv()
+        except FileNotFoundError as exc:
+            # T-041 fail-closed: no resolvable MCP binary → spawn NOTHING
+            # (the same rule the bearer guard enforces on the process
+            # side: the endpoint must be able to come up, or not start).
+            logger.warning("MCP start failed: %s", exc)
+            return False, f"MCP start failed: {exc}"
         try:
             if self._spawner is not None:
                 # injected spawner (tests) — full replacement, no log redirect
