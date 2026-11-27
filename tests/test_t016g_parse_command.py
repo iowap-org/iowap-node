@@ -5,6 +5,9 @@ separated forms; shlex keeps commas glued to tokens ("cmd,"), making
 command[0] unresolvable on the daemon — the provider reported
 health=down forever and the node never published it
 ("bridge cap host.sysinfo is down — not published").
+(Pre-T-048 wording: since T-048 health is advisory and the allowlist
+decides publishing; an unresolvable command then reports its honest
+exec error at run time instead of vanishing.)
 """
 
 from __future__ import annotations

@@ -356,11 +356,19 @@ class BridgeManager:
             # double up (host.host.sysinfo was invisible at the relay's
             # host.sysinfo lookups).
             name = name.removeprefix(BRIDGE_PREFIX)
+            # T-048: health is ADVISORY — the manifest is a declaration,
+            # not a gate. A down entry STAYS in the list (one advisory
+            # log line per poll); the allowlist + recomposed profile
+            # (T-045) decide what publishes, and a command that cannot
+            # run reports the honest exec error at run time (SPEC §5
+            # mapping below). The health==down skip is gone.
             health = raw.get("health", "ok")
             if health == "down":
-                # SPEC §3: down → not published / unpublished.
-                log.info("bridge cap %s is down — not published", name)
-                continue
+                log.info(
+                    "bridge manifest reports %s health=%s — publishing per allowlist",
+                    name,
+                    health,
+                )
             if not _publish_allowed(name, cfg):
                 gated.append(name)
                 continue

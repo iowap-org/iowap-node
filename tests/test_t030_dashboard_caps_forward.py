@@ -331,8 +331,12 @@ def test_delete_forward_mapping_statuses():
 
 def test_forward_section_forbidden_note():
     html = onboarding._forward_section({"forbidden": True, "ok": False})
-    assert "nur f&uuml;r Admin-Nodes konfigurierbar" in html
+    # T-048: the 403 degrades to the relay-admin note (T-246 wording)
+    assert "relay-admin-seitig verwaltet (T-246)" in html
+    # the mapping editor stays hidden, the slot definition stays live
     assert "/forward/save" not in html
+    assert "action='/slots/define'" in html
+    assert "Slots definieren" in html
 
 
 def test_forward_section_error_note():
@@ -522,5 +526,6 @@ def test_dashboard_renders_forbidden_forward_note(dash_env, monkeypatch):
             html = resp.read().decode()
     finally:
         onboarding.shutdown(srv)
-    assert "nur f&uuml;r Admin-Nodes konfigurierbar" in html
+    assert "relay-admin-seitig verwaltet (T-246)" in html
+    assert "Slots definieren" in html
     assert "action='/forward/save'" not in html

@@ -15,7 +15,8 @@ Contract (SPEC.md, board iowap-windows-stack):
   auto_publish=true with a non-empty allowlist publishes ONLY allowlisted
   names. Gate-blocked caps are logged, never published.
 * Collision with an already existing capability name → skip + log.
-* ``health: "down"`` → cap is not published / gets unpublished.
+* T-048: ``health: "down"`` is ADVISORY — the entry stays in the list
+  (advisory log line, publishing per allowlist), never a drop.
 * 3 consecutive poll errors → all ``host.`` caps unpublished; recovery →
   republish. Manifest ``version`` major != 1 → manifest ignored + logged.
 * Exec forward: claimed ``host.`` tasks → ``POST /v1/exec/<name>`` with
@@ -252,28 +253,52 @@ def test_invalid_manifest_name_skipped(bridge_env, monkeypatch, caplog):
 
 
 # ---------------------------------------------------------------------------
-# Health / error-driven unpublish
+# Health (advisory metadata, T-048) / error-driven unpublish
 # ---------------------------------------------------------------------------
 
 
-def test_health_down_unpublishes_and_recovers(bridge_env, monkeypatch):
-    _write_active(node_config.ACTIVE_PATH, BRIDGE_CFG_AUTO_ON)
-    _stub_manifest(monkeypatch, MANIFEST_OK)
-    mgr = bridge.get_manager()
-    mgr.poll_once()
-    assert list(mgr.published) == ["host.comfy.generate"]
+def test_health_down_is_advisory_published_per_allowlist(bridge_env, monkeypatch, caplog):
+    """T-048: the manifest is a declaration, not a health gate.
 
+    A ``health: "down"`` entry stays published (the allowlist decides);
+    an ok manifest afterwards changes nothing. NO drop/recover dance on
+    health flips — the old down-unpublish behavior is gone.
+    """
+    _write_active(node_config.ACTIVE_PATH, BRIDGE_CFG_AUTO_ON)
     down = {
         "version": 1,
         "capabilities": [{"name": "comfy.generate", "health": "down"}],
     }
     _stub_manifest(monkeypatch, down)
-    mgr.poll_once()
-    assert mgr.published == {}
+    with caplog.at_level(logging.INFO, logger="bridge"):
+        bridge.get_manager().poll_once()
+    assert list(bridge.get_manager().published) == ["host.comfy.generate"]
+    # the advisory log line carries the health value + the allowlist note
+    assert any(
+        "health=down" in r.message and "allowlist" in r.message for r in caplog.records
+    )
 
     _stub_manifest(monkeypatch, MANIFEST_OK)
-    mgr.poll_once()
-    assert list(mgr.published) == ["host.comfy.generate"]
+    bridge.get_manager().poll_once()
+    assert list(bridge.get_manager().published) == ["host.comfy.generate"]
+
+
+def test_health_down_without_allowlist_gated_by_allowlist_not_health(bridge_env, monkeypatch, caplog):
+    """Default config (auto_publish off, empty allowlist): the down cap is
+    unpublished — because of the ALLOWLIST (T-003/T-045), never because of
+    health; the advisory line rides along."""
+    _write_active(node_config.ACTIVE_PATH, BRIDGE_CFG_DEFAULT)
+    down = {
+        "version": 1,
+        "capabilities": [{"name": "comfy.generate", "health": "down"}],
+    }
+    _stub_manifest(monkeypatch, down)
+    with caplog.at_level(logging.INFO, logger="bridge"):
+        bridge.get_manager().poll_once()
+    assert bridge.get_manager().published == {}
+    assert any("health=down" in r.message for r in caplog.records)
+    # the reason must be the allowlist gate, not a health drop
+    assert any("not allowlisted" in r.message for r in caplog.records)
 
 
 def test_three_consecutive_poll_errors_unpublish(bridge_env, monkeypatch):

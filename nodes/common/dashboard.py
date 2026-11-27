@@ -950,6 +950,29 @@ def build_forward_client() -> "RelayClient":
     return relay_client.RelayClient(meta, cfg)  # type: ignore[return-value]
 
 
+def _mark_forward_forbidden(panel: dict[str, Any], node_id: str) -> None:
+    """Latch + ONE log hint for this node's fresh 403 (T-032 + T-048).
+
+    The mapping list is relay-admin-managed (T-246): a plain node token
+    answers 403, and that answer does not change render-to-render —
+    exactly once per 403 that actually reaches the endpoint (latch not
+    yet set) a single degrade-hint line is logged and the TTL starts;
+    repeated renders, toggles and daemon ticks answer from the latch
+    silently (no hammering).
+    """
+    panel["forbidden"] = True
+    latch = _FORBIDDEN_LATCH.get(node_id)
+    if latch and time.monotonic() < latch:
+        return
+    _FORBIDDEN_LATCH[node_id] = time.monotonic() + _FORWARD_FORBIDDEN_TTL
+    logger.info(
+        "forward mappings are relay-admin-managed (T-246) — node %s token has "
+        "no admin role; degrading the panel for %s s",
+        node_id or "?",
+        int(_FORWARD_FORBIDDEN_TTL),
+    )
+
+
 def fetch_forward_panel(
     client: Any = None,
     *,
@@ -961,6 +984,9 @@ def fetch_forward_panel(
     Returns ``{"ok", "forbidden", "error", "node_id", "slots", "mappings"}``
     where ``mappings`` maps slot → mapping entry. ``forbidden`` is True on
     403 (the runtime token is not an admin — the UI hides the editor).
+    T-048: the 403 DEGRADES the panel (relay-admin note, T-246) and logs
+    a single hint per fresh 403; the T-032 latch keeps the next renders
+    (toggles, daemon ticks) silent — no hammering.
     """
     panel: dict[str, Any] = {
         "ok": False,
@@ -998,8 +1024,7 @@ def fetch_forward_panel(
             f"{FORWARD_MAPPINGS_PATH}/slots", params={"node": node_id}, timeout=timeout
         )
         if r_slots.status_code == 403:
-            panel["forbidden"] = True
-            _FORBIDDEN_LATCH[node_id] = time.monotonic() + _FORWARD_FORBIDDEN_TTL
+            _mark_forward_forbidden(panel, node_id)
             return panel
         if r_slots.status_code != 200:
             panel["error"] = f"slots request failed (HTTP {r_slots.status_code})"
@@ -1011,7 +1036,7 @@ def fetch_forward_panel(
             FORWARD_MAPPINGS_PATH, params={"node": node_id}, timeout=timeout
         )
         if r_maps.status_code == 403:
-            panel["forbidden"] = True
+            _mark_forward_forbidden(panel, node_id)
             return panel
         if r_maps.status_code == 200:
             rows = r_maps.json().get("mappings", [])

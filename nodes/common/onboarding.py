@@ -833,11 +833,15 @@ def _forward_section(panel: dict[str, Any]) -> str:
       panel's fetch outcome.
     """
     if panel.get("forbidden"):
+        # T-048/T-246: a node token is relay-no-admin — the mapping list
+        # 403 degrades the panel to this quiet admin-managed note (the
+        # fetch logs ONCE per fresh 403, see dashboard._mark_forward_
+        # _forbidden); the definition card below stays available.
         mappings_html = """
 <div class='card'>
-<p class='note'>Forward-Slot-Mappings: nur f&uuml;r Admin-Nodes konfigurierbar —
-dieser Node-Token hat keine Admin-Rolle. Mappings werden im
-Relay-Dashboard gepflegt (Slot-Definition unten bleibt verf&uuml;gbar).</p>
+<p class='note'>Mappings werden relay-admin-seitig verwaltet (T-246) —
+dieser Node-Token hat keine Admin-Rolle. Die Slot-Definition unten
+(node.yaml) bleibt verf&uuml;gbar.</p>
 </div>"""
     elif not panel.get("ok"):
         err = panel.get("error") or "unbekannter Fehler"
