@@ -440,6 +440,7 @@ def _mcp_section(banner_bearer: str | None = None) -> str:
     if bearer:
         snips = mcp_snippets(bearer)
         snippets = f"""
+<p class='note'>Primary bearer (operator) — config snippets:</p>
 <dl>
   <dt>Hermes</dt><dd><pre>{_esc(snips['hermes'])}</pre></dd>
   <dt>Claude Desktop / Claude Code</dt><dd><pre>{_esc(snips['claude'])}</pre></dd>
@@ -448,9 +449,10 @@ def _mcp_section(banner_bearer: str | None = None) -> str:
 </dl>"""
     else:
         snippets = (
-            "<p class='note'>Bearer not provisioned yet — generate one to "
-            "configure your agents (Hermes, Claude, Codex) against this "
-            "node's MCP endpoint.</p>"
+            "<p class='note'>Bearer not provisioned yet — generate the "
+            "<strong>primary (operator)</strong> bearer below. Agents should "
+            "not share it: give each agent its own token in the Agent-Tokens "
+            "section (per-task bound, caps:manage off by default).</p>"
         )
 
     return f"""
@@ -464,10 +466,15 @@ def _mcp_section(banner_bearer: str | None = None) -> str:
     <form class='inline' method='post' action='/mcp/bearer/rotate'>
       <button class='btn btn-primary' type='submit'>Generate new Bearer</button></form>
   </div>
-  <p class='note'>The MCP endpoint serves tools over HTTP on port
+  <p class='note'>Service status + primary (operator) access: the MCP
+  endpoint serves tools over HTTP on port
   <code>{_esc(dashboard.mcp_port())}</code> (loopback-mapped to the host).
-  The bearer is stored in <code>~/.relay/mcp_bearer</code>; generating a
-  new one restarts the MCP process so it serves the new token immediately.</p>
+  The bearer shown here is the <strong>primary (operator)</strong> bearer —
+  full access to this node. Agents should get their own tokens in the
+  <strong>Agent-Tokens</strong> section below (each bound to its own tasks,
+  caps:manage gated) instead of sharing this one. The primary bearer is
+  stored in <code>~/.relay/mcp_bearer</code>; generating a new one restarts
+  the MCP process so it serves the new token immediately.</p>
   {snippets}
 </div>"""
 
@@ -1109,6 +1116,22 @@ def _render_dashboard(
         )
     else:
         bridge_html = "<span class='pill warn'><span class='dot'></span>not configured</span>"
+    # T-050 companion (Ronny order): the OVERVIEW is the cockpit — a Status
+    # card (busy/idle pill + the inline busy toggle) and a Budget card
+    # (used/budget + inline reset) from the SAME data the Budget&Busy
+    # section shows. Both inline forms ride the EXISTING /busy/toggle and
+    # /budget/reset POST routes — no new post route, no behavior change.
+    _busy = node_config.load_active_status() == "busy"
+    status_pill = (
+        "<span class='pill warn'><span class='dot'></span>busy (explicit)</span>"
+        if _busy
+        else "<span class='pill ok'><span class='dot'></span>idle</span>"
+    )
+    busy_toggle_value = "0" if _busy else "1"  # the toggle posts the OPPOSITE
+    busy_toggle_label = "Busy aus (→ idle)" if _busy else "Busy an"
+    budget_total = budget.budget_total()
+    budget_used = budget.read_used()
+    budget_pct = budget.percent(budget_used, budget_total)
     banner_html = f"<div class='flash ok'>{_esc(banner)}</div>" if banner else ""
     error_html = f"<div class='flash error'>{_esc(error)}</div>" if error else ""
     body = f"""
@@ -1123,7 +1146,25 @@ def _render_dashboard(
   <div class='kv'><div class='k'>Relay URL</div><div class='v mono'>{_esc(base_url)}</div></div>
   <div class='kv'><div class='k'>Relay status</div><div>{_status_pill(token)}</div></div>
   <div class='kv'><div class='k'>Bridge</div><div>{bridge_html}</div></div>
-  <div class='kv'><div class='k'>Version</div><div class='v mono'>{_esc(node_version())}</div></div>
+  <div class='kv'>
+    <div class='k'>Status</div>
+    <div>{status_pill}
+      <form class='inline' method='post' action='/busy/toggle'>
+        <input type='hidden' name='busy' value='{busy_toggle_value}'>
+        <button class='btn' type='submit'>{busy_toggle_label}</button>
+      </form>
+    </div>
+  </div>
+  <div class='kv'>
+    <div class='k'>Budget</div>
+    <div>
+      <div class='v'>used {budget_used} / budget {budget_total} <strong>({budget_pct}%)</strong></div>
+      <form class='inline' method='post' action='/budget/reset'>
+        <button class='btn btn-danger' type='submit'>Reset</button>
+      </form>
+    </div>
+  </div>
+  <div class='kv'><div class='k'>Version</div><div class='v mono'>{node_version()}</div></div>
 </div>
 <h2>Capabilities</h2>
 {_capabilities_section(bridge_cfg, edit_entry)}
@@ -1175,6 +1216,32 @@ _DASHBOARD_POST_ROUTES = (
     "/agents/revoke",
     "/agents/caps-toggle",
 )
+
+# T-050: the /agents/* POST routes catch store-write errors themselves and
+# degrade to a 200 flash with the failure cause (see _agents_store_flash)
+# instead of the generic exception dump — scoped to exactly these routes.
+
+
+def _agents_store_flash(exc: OSError) -> str:
+    """T-050: the dashboard message for an agent-token-store write failure.
+
+    Ronny-Log 2026-11-27 showed ``PermissionError [Errno 13]:
+    /data/agents/agents.json.tmp`` — after the T-050 resolver fallback the
+    store normally moves to the relay dir on its own; if writes STILL fail
+    (override pointed at a broken dir, fallback also unwritable) the
+    dashboard shows the cause instead of a crash dump. Status stays 200 —
+    the page renders with the error banner.
+    """
+    resolved = agent_tokens.agents_dir()
+    cause = getattr(exc, "strerror", None) or str(exc) or type(exc).__name__
+    target = getattr(exc, "filename", None) or str(resolved)
+    return (
+        f"agent token store not writable: {target} ({cause}). The store "
+        f"resolver falls back automatically (/data/agents → relay dir); "
+        f"if writes still fail, fix the volume mount/ownership "
+        f"(e.g. a root-owned named volume while the container runs as appuser)"
+    )
+
 
 # T-030: the script-upload body may carry up to MAX_SCRIPT_BYTES of file
 # content plus multipart overhead — larger than the plain form cap.
@@ -1471,7 +1538,13 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
             name = (form.get("name") or [""])[0].strip()
             if not name:
                 return 400, _render_dashboard(error="agent name is required")
-            agent_id, raw_token = agent_tokens.create(name)
+            try:
+                agent_id, raw_token = agent_tokens.create(name)
+            except OSError as exc:
+                # T-050: an unusable store (root-owned named volume etc.) is
+                # a cause flash on a 200 — not a 400/500 crash dump.
+                logger.exception("agent token create failed — store unusable")
+                return 200, _render_dashboard(error=_agents_store_flash(exc))
             logger.info("agent token created: id=%s (never logged)", agent_id)
             return 200, _render_dashboard(
                 banner=(f"Agent token '{name}' created ({agent_id}) — "
@@ -1480,7 +1553,11 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
             )
         elif path == "/agents/revoke":
             agent_id = (form.get("agent_id") or [""])[0].strip()
-            entry = agent_tokens.revoke(agent_id) if agent_id else None
+            try:
+                entry = agent_tokens.revoke(agent_id) if agent_id else None
+            except OSError as exc:
+                logger.exception("agent token revoke failed — store unusable")
+                return 200, _render_dashboard(error=_agents_store_flash(exc))
             if entry is not None:
                 return 200, _render_dashboard(
                     banner=f"Agent '{entry.get('name', agent_id)}' revoked — "
@@ -1490,7 +1567,11 @@ def _handle_dashboard_post(path: str, form: dict[str, list[str]]) -> tuple[int, 
         elif path == "/agents/caps-toggle":
             agent_id = (form.get("agent_id") or [""])[0].strip()
             enable = (form.get("enable") or [""])[0] == "1"
-            entry = agent_tokens.set_caps_manage(agent_id, enable) if agent_id else None
+            try:
+                entry = agent_tokens.set_caps_manage(agent_id, enable) if agent_id else None
+            except OSError as exc:
+                logger.exception("agent caps toggle failed — store unusable")
+                return 200, _render_dashboard(error=_agents_store_flash(exc))
             if entry is not None:
                 verb = "granted" if enable else "removed"
                 return 200, _render_dashboard(

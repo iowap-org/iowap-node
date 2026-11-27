@@ -45,6 +45,9 @@ def store_env(tmp_path, monkeypatch):
     monkeypatch.delenv(agent_tokens.AGENT_DIR_ENV, raising=False)
     # simulate "no dedicated volume exists" on the test host
     monkeypatch.setattr(agent_tokens, "VOLUME_AGENT_DIR", tmp_path / "definitely-absent")
+    # T-050: the resolution is probe-once per PROCESS — without this reset
+    # the cache would pin the first test's dir for every later test.
+    monkeypatch.setattr(agent_tokens, "_AGENTS_DIR_CACHE", None)
     return tmp_path
 
 

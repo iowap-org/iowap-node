@@ -61,6 +61,11 @@ VOLUME_AGENT_DIR = Path("/data/agents")
 AGENTS_FILE = "agents.json"
 BINDINGS_FILE = "bindings.json"
 
+# T-050: probe-once per process — the resolution (including its write probe)
+# runs on the first ``agents_dir()`` call and is then cached. A later chown
+# needs a process restart on purpose (simple, no probe-retry storms).
+_AGENTS_DIR_CACHE: Path | None = None
+
 _TOKEN_PREFIX = "iw_agt_"
 _TOKEN_ENTROPY_BYTES = 32
 _PRIMARY = "primary"
@@ -74,18 +79,59 @@ _PRIMARY = "primary"
 def agents_dir() -> Path:
     """The directory holding ``agents.json`` / ``bindings.json``.
 
-    ``IOWAP_AGENTS_DIR`` overrides everything (tests, exotic installs).
-    Otherwise the dedicated token volume is used when its directory
-    exists (``/data/agents`` — compose/daemon create the mount); fresh or
-    volume-less containers (and every pre-T-035 install) fall back to
-    ``<relay-dir>/agents`` so old containers stay runnable.
+    ``IOWAP_AGENTS_DIR`` overrides everything (tests, exotic installs) —
+    an explicit override wins unprobed, per call. Otherwise the dedicated
+    token volume ``/data/agents`` is chosen when it exists AND passes a
+    write probe (T-050 — ``os.access`` alone is not enough: a root-owned
+    named volume exists but is not writable for appuser, which surfaced as
+    ``PermissionError [Errno 13]: /data/agents/agents.json.tmp`` in the
+    Ronny-Log 2026-11-27). Unwritable → ``<relay-dir>/agents`` fallback
+    with a one-time log. The resolved directory (and thus the probe) is
+    cached once per process — a later volume fix needs a process restart,
+    which is accepted and logged.
     """
     override = os.environ.get(AGENT_DIR_ENV, "").strip()
     if override:
         return Path(override)
-    if VOLUME_AGENT_DIR.is_dir():
+    global _AGENTS_DIR_CACHE
+    if _AGENTS_DIR_CACHE is None:
+        _AGENTS_DIR_CACHE = _resolve_agents_dir()
+    return _AGENTS_DIR_CACHE
+
+
+def _resolve_agents_dir() -> Path:
+    """Volume dir if a real write probe passes; relay-dir fallback otherwise."""
+    if VOLUME_AGENT_DIR.is_dir() and _dir_accepts_writes(VOLUME_AGENT_DIR):
         return VOLUME_AGENT_DIR
-    return Path(node_config.BASE_DIR) / "agents"
+    fallback = Path(node_config.BASE_DIR) / "agents"
+    logger.warning(
+        "agents store: %s not writable — using relay-dir fallback %s",
+        VOLUME_AGENT_DIR, fallback,
+    )
+    return fallback
+
+
+def _dir_accepts_writes(path: Path) -> bool:
+    """T-050 write probe: actually ``mkdir`` + write + unlink a tmp file.
+
+    ``os.access()`` is not trustworthy here (root-owned dirs report odd
+    outcomes; ACLs are invisible to it) — the probe does what the store
+    itself would do, so the resolver sees the exact failure mode.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".iowap-write-probe-{os.getpid()}"
+        probe.write_text("probe", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _reset_agents_dir_cache() -> None:
+    """Test seam: forget the probe-once resolution (next call re-probes)."""
+    global _AGENTS_DIR_CACHE
+    _AGENTS_DIR_CACHE = None
 
 
 def agents_path() -> Path:
