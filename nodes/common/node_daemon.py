@@ -62,6 +62,7 @@ from typing import Any
 import httpx
 
 from nodes.common import bridge, daemon_channel, file_serve, poll_daemon
+from nodes.common import artifact_hydration
 from nodes.common import budget as budget_meter  # noqa: F401 — T-046 completion meter
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
@@ -989,22 +990,38 @@ class SseDaemon:
                 # handler. Terminal errors return an error envelope
                 # (completed below); retryable errors raise
                 # BridgeRetryableError → generic failure path → the
-                # claim expires and the relay requeues.
+                # claim expires and the relay requeues. Input hydration
+                # (T-051) happens inside execute_bridge_task.
                 result = bridge.execute_bridge_task(self.client, cap, stage)
             else:
-                result = run_handler(
-                    cap.get("handler", ""),
-                    stage,
-                    context=context,
-                    # T-154/T-163: a long_run capability must not be killed by
-                    # the short per-stage timeout (default 300s). The relay's
-                    # Long-Run lease keeps the stage `accepted` for up to 2h as
-                    # long as progress notes keep arriving, so the handler
-                    # process gets the same 2h budget. Without this, a big
-                    # archive/extract is killed mid-run and the stage is
-                    # re-claimed to start over.
-                    timeout=_handler_timeout(cap),
+                # T-051: input hydration BEFORE the local exec — artifact
+                # refs in the stage payload (T-179 envelope) download into
+                # the node workspace and the payload fields rewrite to
+                # workspace-relative paths; the handler never sees an id.
+                # An unowned ref fails the stage honestly (terminal).
+                hydrated, hydro_error = artifact_hydration.hydrate_stage_params(
+                    self.client,
+                    stage.get("payload"),
+                    str(task_id or ""),
+                    artifact_hydration.resolve_workspace(),
                 )
+                if hydro_error is not None:
+                    result = {"status": "error", "error": hydro_error}
+                else:
+                    stage["payload"] = hydrated
+                    result = run_handler(
+                        cap.get("handler", ""),
+                        stage,
+                        context=context,
+                        # T-154/T-163: a long_run capability must not be killed by
+                        # the short per-stage timeout (default 300s). The relay's
+                        # Long-Run lease keeps the stage `accepted` for up to 2h as
+                        # long as progress notes keep arriving, so the handler
+                        # process gets the same 2h budget. Without this, a big
+                        # archive/extract is killed mid-run and the stage is
+                        # re-claimed to start over.
+                        timeout=_handler_timeout(cap),
+                    )
             try:
                 self.client.complete(str(task_id), str(stage_id), result)
                 with self._lock:
@@ -1021,6 +1038,12 @@ class SseDaemon:
                         # T-046: budget meter at the completion site (see
                         # poll_daemon._run_stage — bridge caps with cost>0).
                         budget_meter.record_stage_cost(cap, cost)
+                        # T-051: bind the pushed artifacts to the task's
+                        # submitter — ownership starts AT completion (the
+                        # chained-flow win; best effort, never raises).
+                        artifact_hydration.record_result_artifacts(
+                            result, str(task_id or "")
+                        )
                 log.info("completed stage %s", stage_id)
             except Exception as exc:  # noqa: BLE001
                 # T-179 task 5: complete_by_script — when the handler
@@ -1036,6 +1059,12 @@ class SseDaemon:
                         # T-046: a script-completed stage IS a completed
                         # capability task (T-179 opt-in) — it meters too.
                         budget_meter.record_stage_cost(cap, cost)
+                    # T-051: the script-completed stage IS a completed
+                    # task — the artifacts its result declares bind to
+                    # the submitter as well (best effort, never raises).
+                    artifact_hydration.record_result_artifacts(
+                        result, str(task_id or "")
+                    )
                     log.info(
                         "stage %s already completed by script — counted as done",
                         stage_id,

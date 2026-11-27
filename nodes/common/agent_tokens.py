@@ -48,6 +48,7 @@ import json
 import logging
 import os
 import secrets
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,16 @@ _AGENTS_DIR_CACHE: Path | None = None
 _TOKEN_PREFIX = "iw_agt_"
 _TOKEN_ENTROPY_BYTES = 32
 _PRIMARY = "primary"
+
+# T-051: the binding WRITE side is now process-locked read-modify-write —
+# the budget.py pattern (T-046). bindings.json is written by the MCP
+# process (task_submit/task_result wrappers) AND the node daemons
+# (completion records via artifact_hydration.record_result_artifacts);
+# the lock serializes a process's read-modify-write window, the atomic
+# tmp+os.replace keeps every published file valid. Cross-process remains
+# last-writer-wins like budget_used — documented, accepted; a lost record
+# costs one hydration refusal, never integrity.
+_BINDING_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -336,12 +347,13 @@ def record_task(agent_id: str, task_id: str) -> bool:
     """Bind a submitted task to its agent (never for the primary path)."""
     if agent_id == _PRIMARY or not agent_id or not task_id:
         return False
-    bindings = load_bindings()
-    entry = _binding_entry(bindings, agent_id)
-    if task_id not in entry["task_ids"]:
-        entry["task_ids"].append(task_id)
-    bindings[agent_id] = entry
-    _save_bindings(bindings)
+    with _BINDING_LOCK:
+        bindings = load_bindings()
+        entry = _binding_entry(bindings, agent_id)
+        if task_id not in entry["task_ids"]:
+            entry["task_ids"].append(task_id)
+        bindings[agent_id] = entry
+        _save_bindings(bindings)
     return True
 
 
@@ -352,15 +364,16 @@ def record_artifacts(agent_id: str, task_id: str, artifact_ids: list[str]) -> bo
     clean = [a for a in (artifact_ids or []) if isinstance(a, str) and a]
     if not clean:
         return False  # nothing seen — no binding entry at all
-    bindings = load_bindings()
-    entry = _binding_entry(bindings, agent_id)
-    for art_id in clean:
-        tasks = entry["seen_artifacts"].get(art_id)
-        if not isinstance(tasks, list) or task_id not in tasks:
-            entry["seen_artifacts"][art_id] = [
-                *entry["seen_artifacts"].get(art_id, []), task_id]
-    bindings[agent_id] = entry
-    _save_bindings(bindings)
+    with _BINDING_LOCK:
+        bindings = load_bindings()
+        entry = _binding_entry(bindings, agent_id)
+        for art_id in clean:
+            tasks = entry["seen_artifacts"].get(art_id)
+            if not isinstance(tasks, list) or task_id not in tasks:
+                entry["seen_artifacts"][art_id] = [
+                    *entry["seen_artifacts"].get(art_id, []), task_id]
+        bindings[agent_id] = entry
+        _save_bindings(bindings)
     return True
 
 
@@ -371,6 +384,25 @@ def tasks_for(agent_id: str) -> list[str]:
     entry = load_bindings().get(agent_id, {})
     task_ids = entry.get("task_ids") if isinstance(entry, dict) else []
     return [t for t in (task_ids or []) if isinstance(t, str)]
+
+
+def submitting_agent(task_id: str) -> str | None:
+    """The agent bound to one submitted task (``None`` = primary/legacy path).
+
+    ``task_submit`` writes exactly one binding per task (T-035 P2, MCP
+    side); the primary/legacy bearer is never recorded, so an unbound
+    AND an unknown task both resolve to ``None`` — the operator path,
+    which keeps full access across every node-side check (T-051
+    hydration guard). Never raises: a corrupt binding store degrades to
+    primary-only (the P1 rule).
+    """
+    if not task_id:
+        return None
+    for agent_id, entry in load_bindings().items():
+        task_ids = entry.get("task_ids") if isinstance(entry, dict) else None
+        if isinstance(task_ids, list) and task_id in task_ids:
+            return agent_id
+    return None
 
 
 def can_read_task(agent_id: str, task_id: str) -> bool:

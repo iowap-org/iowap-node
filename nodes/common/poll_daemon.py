@@ -34,6 +34,7 @@ from typing import Any
 import httpx
 
 from nodes.common import bridge, daemon_channel, file_serve
+from nodes.common import artifact_hydration
 from nodes.common import budget as budget_meter  # noqa: F401 — T-046 completion meter
 from nodes.common.handler_runner import run_handler
 from nodes.common.node_config import (
@@ -301,15 +302,32 @@ class Daemon:
             if cap.get("bridge"):
                 # T-003: bridge caps forward to the provider instead of a
                 # local handler (see node_daemon._run_stage for the full
-                # terminal/retryable contract).
+                # terminal/retryable contract). Input hydration (T-051)
+                # happens inside execute_bridge_task — the bridge config
+                # carries the workspace.
                 result = bridge.execute_bridge_task(self.client, cap, stage)
             else:
-                result = run_handler(
-                    cap.get("handler", ""),
-                    stage,
-                    context=context,
-                    timeout=int(cap.get("timeout", 300)),
+                # T-051: input hydration BEFORE the local exec — artifact
+                # refs in the stage payload (T-179 envelope) download into
+                # the node workspace and the payload fields rewrite to
+                # workspace-relative paths; the handler never sees an id.
+                # An unowned ref fails the stage honestly (terminal).
+                hydrated, hydro_error = artifact_hydration.hydrate_stage_params(
+                    self.client,
+                    stage.get("payload"),
+                    str(task_id or ""),
+                    artifact_hydration.resolve_workspace(),
                 )
+                if hydro_error is not None:
+                    result = {"status": "error", "error": hydro_error}
+                else:
+                    stage["payload"] = hydrated
+                    result = run_handler(
+                        cap.get("handler", ""),
+                        stage,
+                        context=context,
+                        timeout=int(cap.get("timeout", 300)),
+                    )
             try:
                 self.client.complete(str(task_id), str(stage_id), result)
                 with self._lock:
@@ -334,6 +352,12 @@ class Daemon:
                         # counter (budget.record_stage_cost never raises,
                         # the completion path cannot die on the meter).
                         budget_meter.record_stage_cost(cap, cost)
+                        # T-051: bind the pushed artifacts to the task's
+                        # submitter — ownership starts AT completion (the
+                        # chained-flow win; best effort, never raises).
+                        artifact_hydration.record_result_artifacts(
+                            result, str(task_id or "")
+                        )
                 log.info("completed stage %s", stage_id)
             except Exception as exc:  # noqa: BLE001
                 # T-001c-c: the stage is gone server-side (404: expired/

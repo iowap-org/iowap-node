@@ -49,6 +49,7 @@ from typing import Any
 import httpx
 import yaml
 
+from nodes.common import artifact_hydration
 from nodes.common import dashboard, node_config
 
 log = logging.getLogger("bridge")
@@ -609,6 +610,19 @@ def execute_bridge_task(
     params = stage.get("payload")
     if not isinstance(params, dict):
         params = {} if params is None else {"payload": params}
+    # T-051: input hydration BEFORE the exec — artifact refs in the
+    # params tree (T-179 envelope, ``src: artifact``) are downloaded into
+    # the bridge workspace (NODE credentials) and the fields rewritten to
+    # workspace-relative paths (``{"src": "path", "path": ...}``); the
+    # exec contract body never carries an artifact id. Ownership is
+    # node-side: the task submitter must own every referenced artifact —
+    # primary/legacy tasks bypass, an unowned ref fails the stage with
+    # the honest cause (terminal, not retryable, never not_found).
+    params, hydro_error = artifact_hydration.hydrate_stage_params(
+        client, params, task_id, cfg["workspace"]
+    )
+    if hydro_error is not None:
+        return {"status": "error", "error": hydro_error}
     timeout_s = int(cap.get("timeout", DEFAULT_BRIDGE_TIMEOUT) or DEFAULT_BRIDGE_TIMEOUT)
     body = {"task_id": task_id, "params": params, "timeout_s": timeout_s}
     spec = bridge_spec_for(str(name))
