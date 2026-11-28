@@ -339,7 +339,12 @@ class BridgeManager:
         with self._lock:
             self.consecutive_errors = 0
 
-        base_names = {c["name"] for c in node_config.load_active_profile_unmerged()}
+        base_caps = node_config.load_active_profile_unmerged()
+        base_by_name: dict[str, dict[str, Any]] = {}
+        for base_cap in base_caps:
+            base_name = base_cap.get("name") if isinstance(base_cap, dict) else None
+            if isinstance(base_name, str):
+                base_by_name[base_name] = base_cap
         new_published: dict[str, dict[str, Any]] = {}
         gated: list[str] = []
         skipped: list[str] = []
@@ -374,15 +379,31 @@ class BridgeManager:
                 gated.append(name)
                 continue
             prefixed = f"{BRIDGE_PREFIX}{name}"
-            if prefixed in base_names:
-                # Namespace rule: a local capability keeps the name.
-                log.warning(
-                    "bridge cap %s skipped — collision with existing capability '%s'",
-                    name,
-                    prefixed,
+            existing = base_by_name.get(prefixed)
+            if existing is not None:
+                same_bridge_cap = (
+                    existing.get("bridge") is True and existing.get("bridge_name") == name
                 )
-                skipped.append(name)
-                continue
+                if not same_bridge_cap:
+                    # Namespace rule: a local capability keeps the name.
+                    # T-052: a baked bridge entry (router pair present —
+                    # a healed legacy bake or a modern recompose bake)
+                    # IS this cap, so it never reaches the skip here.
+                    log.warning(
+                        "bridge cap %s skipped — collision with existing capability '%s'",
+                        name,
+                        prefixed,
+                    )
+                    skipped.append(name)
+                    continue
+                # T-052: update-in-place — the same bridge cap. The baked
+                # entry (or its stale legacy predecessor) made the old
+                # base-name check skip its own cap forever: the runtime
+                # registry stayed empty for the name and nothing claimed
+                # (advertised-but-never-claimed claim deadlock). A fresh
+                # registry dict (current version/schema/costs) restores
+                # the claim routing; the recompose keeps the file form.
+                log.info("bridge cap %s refreshed from manifest", name)
             new_published[prefixed] = build_bridge_cap(name, raw)
 
         with self._lock:

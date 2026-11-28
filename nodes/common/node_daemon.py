@@ -1118,10 +1118,24 @@ class SseDaemon:
         return self._find_capability(name) is not None
 
     def _find_capability(self, name: str) -> dict[str, Any] | None:
+        # T-052 claim-eligibility consolidation: the merged view can
+        # carry ONE capability twice — the baked file entry (claimable
+        # False, the wire/compose representation) and the bridge
+        # registry copy (claimable True, the claim routing from the
+        # manifest poll). Picking blindly the first match made the
+        # targeted task_created sweep see the non-claimable baked copy
+        # and skip the claim attempt — owner-pinned tasks stayed
+        # pending. A claimable match wins; for a single-copy name this
+        # is exactly the old first-match behaviour.
+        first: dict[str, Any] | None = None
         for cap in load_active_profile():
-            if cap.get("name") == name:
+            if cap.get("name") != name:
+                continue
+            if cap.get("claimable"):
                 return cap
-        return None
+            if first is None:
+                first = cap
+        return first
 
     # -- lifecycle ---------------------------------------------------------
 

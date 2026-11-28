@@ -564,8 +564,18 @@ def _normalize_caps_list(
 
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
+    healed_count = 0
     for i, entry in enumerate(raw_caps):
         cap = _normalize_capability(entry, file=file, index=i)
+        # T-052: a pre-schema baked bridge entry (host.-prefixed name,
+        # router fields absent) heals HERE — the in-memory view carries
+        # the bridge/bridge_name pair, so manifest polls / claim routing
+        # see the bridge cap this entry always was. Disk healing happens
+        # on the next recompose write (which regenerates baked entries).
+        healed = heal_legacy_baked_bridge_entry(cap)
+        if healed is not None:
+            cap = healed
+            healed_count += 1
         if cap["name"] in seen:
             raise CapabilityValidationError(
                 f"duplicate capability name {cap['name']!r}",
@@ -582,7 +592,81 @@ def _normalize_caps_list(
             )
         seen.add(cap["name"])
         normalized.append(cap)
+    if healed_count:
+        # Log-once per process (the heal is idempotent and hits every
+        # load while the file still carries the stale entry).
+        _log_legacy_bridge_heal(healed_count)
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# T-052: legacy baked bridge entries (pre-schema, router fields absent)
+# ---------------------------------------------------------------------------
+
+# The bridge capability namespace (SPEC §3, ``host.`` prefix) — a mirror
+# of ``bridge.BRIDGE_PREFIX`` (this module cannot import bridge: bridge
+# imports node_config).
+_BRIDGE_NS_PREFIX = "host."
+
+
+def heal_legacy_baked_bridge_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Recognize ONE legacy baked bridge entry and return the healed copy.
+
+    Pre-schema recompose bakes (the T-045 migration window) wrote the
+    capability NAME already ``host.``-prefixed but WITHOUT the
+    ``bridge``/``bridge_name`` router fields. Such an entry counted as a
+    local capability everywhere (the recompose classified it by the
+    router pair; the bridge poll matched it against the namespace rule)
+    → the manifest poll skipped its own cap ("collision with existing
+    capability"), the runtime registry stayed empty for the name and no
+    claim ever dispatched (T-052 claim deadlock: advertised, never
+    claimed).
+
+    Healed view: ``bridge: True`` + ``bridge_name: <bare name>``. The
+    name itself KEEPS the ``host.`` prefix — entries ride the wire under
+    their published prefixed name (full-replace heartbeats must not flip
+    the advertised identity), and the next recompose write regenerates
+    these entries from the providers store anyway (routing-complete
+    ``host.*`` + router pair). A prefixed entry that IS a local
+    capability keeps the name: ``claimable`` with a non-empty ``handler``
+    (or any router field present) means "not legacy" — the namespace
+    rule keeps colliding correctly for real locals.
+
+    Returns a healed copy, or ``None`` when the entry must stay as it is.
+    """
+    if not isinstance(entry, dict):
+        return None
+    name = entry.get("name")
+    if not isinstance(name, str) or not name.startswith(_BRIDGE_NS_PREFIX):
+        return None
+    if entry.get("bridge") is not None or entry.get("bridge_name") is not None:
+        # Router fields present: either a modern baked entry or an
+        # operator-authored bridge entry — both are treated as bridged.
+        return None
+    if entry.get("claimable") is True and isinstance(entry.get("handler"), str) and entry["handler"].strip():
+        # Local routing semantics — a genuine host.* local capability.
+        return None
+    bare = name[len(_BRIDGE_NS_PREFIX):]
+    if not bare:
+        return None
+    healed = dict(entry)
+    healed["bridge"] = True
+    healed["bridge_name"] = bare
+    return healed
+
+
+_LEGACY_BRIDGE_HEAL_LOGGED = False
+
+
+def _log_legacy_bridge_heal(count: int) -> None:
+    """Log-once notice for the in-memory legacy bake heal (T-052)."""
+    global _LEGACY_BRIDGE_HEAL_LOGGED
+    if _LEGACY_BRIDGE_HEAL_LOGGED:
+        return
+    _LEGACY_BRIDGE_HEAL_LOGGED = True
+    __import__("logging").getLogger("relay.node_config").info(
+        "legacy baked bridge entries normalized (%d)", count
+    )
 
 
 def validate_profile(

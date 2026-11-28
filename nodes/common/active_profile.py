@@ -377,12 +377,28 @@ def recompile_active_profile(
         locals_: list[dict[str, Any]] = []
         baked_old: list[dict[str, Any]] = []
     elif isinstance(existing, list):
+        # T-052: pre-schema baked bridge entries (prefixed name, router
+        # fields absent) heal first — the healed view carries the
+        # bridge/bridge_name pair, so the classification below counts
+        # them as baked (compose output, regenerated from the store)
+        # instead of operator locals that would ride along stale forever.
+        healed_existing: list[dict[str, Any]] = []
+        legacy_healed = 0
+        for c in existing:
+            if isinstance(c, dict):
+                h = node_config.heal_legacy_baked_bridge_entry(c)
+                if h is not None:
+                    c = h
+                    legacy_healed += 1
+            healed_existing.append(c)
+        if legacy_healed:
+            log.info("legacy baked bridge entries normalized (%d)", legacy_healed)
         # true locals (operator/profile entries) ride along untouched;
         # PREVIOUSLY baked entries (bridge-marked) are regenerated — an
         # update_provider version bump or a pulled-back allowlist name
         # must be reflected, they are compose OUTPUT, not operator state.
-        locals_ = [c for c in existing if isinstance(c, dict) and not c.get("bridge")]
-        baked_old = [c for c in existing if isinstance(c, dict) and c.get("bridge")]
+        locals_ = [c for c in healed_existing if isinstance(c, dict) and not c.get("bridge")]
+        baked_old = [c for c in healed_existing if isinstance(c, dict) and c.get("bridge")]
     else:
         # a broken section shape: pass it through untouched, the
         # validation below fails loudly — never silently rewrite garbage
